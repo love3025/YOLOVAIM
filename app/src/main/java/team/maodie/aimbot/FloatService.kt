@@ -55,6 +55,18 @@ class FloatService : Service() {
     // ── 主线程 Handler ───────────────────────
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // ── 推理优化: 预分配缓存 ─────────────────
+    private val rectBuffer = Array(20) { RectF() }  // 复用RectF避免GC
+    private var lastDetections: List<RectF> = emptyList()
+
+    // 预计算的屏幕中心（避免每帧计算）
+    private var centerX = 0f
+    private var centerY = 0f
+
+    // 缓存guiPanel属性避免重复访问
+    private var cachedRange = 0f
+    private var cachedRangePx = 0
+
     // ─────────────────────────────────────────
     override fun onCreate() {
         super.onCreate()
@@ -66,17 +78,14 @@ class FloatService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val code = ProjectionHolder.resultCode
         val data = ProjectionHolder.resultData
-        Log.d("AimbotInfer", "Service收到 code=$code data=$data")
 
         if (data != null) {
             try {
                 val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = manager.getMediaProjection(code, data)
-                Log.d("AimbotInfer", "projection创建成功: $mediaProjection")
                 setupImageReader()
             } catch (e: Exception) {
-                Log.e("AimbotInfer", "projection创建失败: ${e.message}")
-                Log.e("AimbotInfer", "堆栈: ${e.stackTraceToString()}")
+                Log.e(TAG, "projection创建失败: ${e.message}")
             }
         }
         setupBall()
@@ -213,83 +222,101 @@ class FloatService : Service() {
     }
 
     // ─────────────────────────────────────────
-//  推理循环（while循环 + acquire）
+//  推理循环（优化版）
 // ─────────────────────────────────────────
     private fun startInferLoop() {
         if (inferRunning.getAndSet(true)) return
-        Log.d("AimbotInfer", "executor 开始跑")
+
+        // 预计算屏幕中心
+        centerX = screenWidth / 2f
+        centerY = screenHeight / 2f
 
         executor.execute {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
-            Log.d("AimbotInfer", "线程内部启动")
 
             while (inferRunning.get() && aimbotOn.get()) {
+                // 更新缓存的guiPanel参数（只在值变化时更新）
+                val currentRange = guiPanel.range
+                if (currentRange != cachedRangePx) {
+                    cachedRangePx = currentRange
+                    cachedRange = currentRange.toFloat()
+                }
+
                 val image = imageReader?.acquireLatestImage()
                 if (image == null) {
-                    Thread.sleep(2)
+                    // 轻量级spin wait替代sleep
+                    Thread.yield()
                     continue
                 }
 
                 try {
                     val plane = image.planes[0]
+                    val buffer = plane.buffer
 
-                    val rangePx = guiPanel.range
-                        val regionW = rangePx * 2
-                        val regionH = rangePx * 2
-                        val offsetX = (screenWidth - regionW) / 2
-                        val offsetY = (screenHeight - regionH) / 2
+                    val regionW = cachedRangePx * 2
+                    val regionH = cachedRangePx * 2
+                    val offsetX = (screenWidth - regionW) / 2
+                    val offsetY = (screenHeight - regionH) / 2
 
-                        val result = JniCallBack.detect(
-                            plane.buffer,
-                            offsetX, offsetY,
-                            regionW, regionH,
-                            screenWidth, screenHeight,
-                            plane.rowStride, plane.pixelStride
-                        )
+                    val result = JniCallBack.detect(
+                        buffer,
+                        offsetX, offsetY,
+                        regionW, regionH,
+                        screenWidth, screenHeight,
+                        plane.rowStride, plane.pixelStride
+                    )
 
                     if (result != null) {
-                        val rects = mutableListOf<RectF>()
                         val count = result.size / 6
-                        val range = guiPanel.range.toFloat()
-                        val cx = screenWidth  / 2f
-                        val cy = screenHeight / 2f
 
-                        for (i in 0 until count) {
+                        // 复用rectBuffer，避免每帧分配
+                        var rectCount = 0
+                        var i = 0
+                        while (i < count && rectCount < rectBuffer.size) {
                             val x1 = result[i * 6 + 2] * screenWidth
                             val y1 = result[i * 6 + 3] * screenHeight
                             val x2 = result[i * 6 + 4] * screenWidth
                             val y2 = result[i * 6 + 5] * screenHeight
-                            rects.add(RectF(x1, y1, x2, y2))
+                            rectBuffer[rectCount].set(x1, y1, x2, y2)
+                            rectCount++
+                            i++
                         }
 
-                        if (count > 0) {
-                            val r = rects[0]
-                            Log.d("AimbotInfer", "检测框像素: count=$count, first=${r.left.toInt()},${r.top.toInt()},${r.right.toInt()},${r.bottom.toInt()}")
-                        }
+                        // 创建不可变list给UI层
+                        lastDetections = rectBuffer.take(rectCount)
+                        mainHandler.post { overlayView.updateDetections(lastDetections) }
 
-                        mainHandler.post { overlayView.updateDetections(rects) }
+                        // 瞄准计算（内联避免函数调用开销）
+                        if (aimbotOn.get() && rectCount > 0) {
+                            var bestDistSq = Float.MAX_VALUE
+                            var bestX = centerX
+                            var bestY = centerY
+                            var bestIdx = 0
 
-                        if (aimbotOn.get()) {
-                            var bestDist = Float.MAX_VALUE
-                            var bestX = cx
-                            var bestY = cy
-                            for (rect in rects) {
-                                val bcx = (rect.left + rect.right) / 2f
+                            // 缓存range避免重复访问
+                            val rangeVal = cachedRange
+                            val centerXVal = centerX
+                            val centerYVal = centerY
+
+                            for (idx in 0 until rectCount) {
+                                val rect = rectBuffer[idx]
+                                val bcx = (rect.left + rect.right) * 0.5f
                                 val bcy = rect.top + (rect.bottom - rect.top) * 0.2f
-                                val dist = Math.hypot(
-                                    (bcx - cx).toDouble(),
-                                    (bcy - cy).toDouble()
-                                ).toFloat()
-                                if (dist < range && dist < bestDist) {
-                                    bestDist = dist
+                                val dx = bcx - centerXVal
+                                val dy = bcy - centerYVal
+                                val distSq = dx * dx + dy * dy
+                                if (distSq < bestDistSq && dx * dx + dy * dy < rangeVal * rangeVal) {
+                                    bestDistSq = distSq
                                     bestX = bcx
                                     bestY = bcy
+                                    bestIdx = idx
                                 }
                             }
                             // TODO: TouchInjector.moveTo(bestX, bestY, guiPanel.speed)
                         }
                     } else {
-                        mainHandler.post { overlayView.updateDetections(emptyList()) }
+                        lastDetections = emptyList()
+                        mainHandler.post { overlayView.updateDetections(lastDetections) }
                     }
 
                 } catch (e: Exception) {

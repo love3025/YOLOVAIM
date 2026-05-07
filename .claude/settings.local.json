@@ -11,7 +11,8 @@
       "Bash(adb shell *)",
       "Bash(G:/Python380/python.exe -c ' *)",
       "Bash(rm -rf \"G:/ai/模型/2026-0505_V1/best_192_saved_model\" \"G:/ai/模型/2026-0505_V1/best_256_saved_model\")",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(git add *)"
     ]
   }
 }

@@ -35,6 +35,9 @@ class MainActivity : AppCompatActivity() {
     private var modelList: List<ModelInfo> = emptyList()
     private var selectedModelIndex = 0
 
+    // 缓存density避免重复访问
+    private val displayDensity: Float by lazy { resources.displayMetrics.density }
+
     private val captureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -372,7 +375,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int): Int = (v * displayDensity).toInt()
 
     private fun loadModel(filename: String) {
         val modelFile = File(filesDir, filename)
