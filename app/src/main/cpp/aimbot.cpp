@@ -35,6 +35,7 @@ static TfLiteDelegate* g_nnapi_delegate = nullptr;
 static int g_input_height = 256;
 static int g_input_width = 256;
 static int g_num_outputs = 1344;
+static float g_conf_thresh = 0.25f;
 
 //==============================================================================
 //  Build NNAPI Delegate Options
@@ -353,7 +354,6 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     // Output shape: [1, 5, num_outputs] - YOLOv8n format
     std::vector<std::tuple<float, float, float, float, float, float>> detections;
 
-    const float CONF_THRESH = 0.25f;
     TfLiteType output_type = TfLiteTensorType(output_tensor);
     void* output_data = const_cast<void*>(TfLiteTensorData(output_tensor));
     TfLiteQuantizationParams qp_output = TfLiteTensorQuantizationParams(output_tensor);
@@ -370,7 +370,7 @@ Java_team_maodie_aimbot_JniCallBack_detect(
             float bh = (data[3 * g_num_outputs + i] - out_zp) * out_scale;
             float score = (data[4 * g_num_outputs + i] - out_zp) * out_scale;
 
-            if (score < CONF_THRESH) continue;
+            if (score < g_conf_thresh) continue;
             if (bw <= 0 || bh <= 0) continue;
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
 
@@ -406,7 +406,7 @@ Java_team_maodie_aimbot_JniCallBack_detect(
             float bh = data[3 * g_num_outputs + i];
             float score = data[4 * g_num_outputs + i];
 
-            if (score < CONF_THRESH) continue;
+            if (score < g_conf_thresh) continue;
             if (bw <= 0 || bh <= 0) continue;
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
 
@@ -459,6 +459,16 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     env->SetFloatArrayRegion(res, 0, result_flat.size(), result_flat.data());
 
     return res;
+}
+
+//==============================================================================
+//  Set confidence threshold
+//==============================================================================
+extern "C"
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_JniCallBack_setConfidence(JNIEnv* /*env*/, jobject /*thiz*/, jfloat threshold) {
+    g_conf_thresh = threshold;
+    LOGD("Confidence threshold set to %.2f", g_conf_thresh);
 }
 
 //==============================================================================

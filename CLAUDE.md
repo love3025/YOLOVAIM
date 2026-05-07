@@ -25,16 +25,16 @@ Android FPS game AI aiming assistant using TFLite with NNAPI delegate for real-t
 ## Architecture
 
 ```
-MainActivity.kt                    # Entry point - permissions, model loading from JSON
+MainActivity.kt                    # Entry point - permissions, model loading, Shizuku auth
     ↓
 FloatService.kt                    # Foreground service - owns the UI layer
-    ├── FloatBallView.kt           # Draggable toggle widget (black/white circle)
+    ├── FloatBallView.kt           # Draggable toggle (blue MD3 FAB)
     ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes)
-    └── GuiPanelView.kt           # Control panel (Aimbot/Triggerbot/AntiFlash tabs)
-                                     ↓
-JniCallBack.kt ───────────────────# JNI bridge (native libaimbot.so)
-    └── aimbot.cpp (cpp/)          # TFLite inference with NNAPI delegate
-            └── TFLite C API       # Uses NNAPI for Hexagon DSP/NPU acceleration
+    ├── GuiPanelView.kt           # MD3 control panel (自瞄/扳机/防闪/模型 tabs)
+    ├── TouchInjector.kt          # Touch injection via Shizuku (+ IInputManager reflection)
+    └── JniCallBack.kt            # JNI bridge (native libaimbot.so)
+            └── aimbot.cpp         # TFLite inference with NNAPI delegate
+                    └── TFLite C API
 ```
 
 ### Data Flow
@@ -43,14 +43,16 @@ JniCallBack.kt ───────────────────# JNI br
 2. Inference thread reads `ImageReader.acquireLatestImage()` via JNI
 3. `JniCallBack.detect()` runs TFLite model via NNAPI, returns detection boxes
 4. `FloatService` converts normalized coords to pixels, posts to `OverlayCanvasView`
-5. Aiming logic finds closest detection within `rangeRadius`, calls touch injection (TODO)
+5. Detection overlay only — touch injection is NOT auto-triggered, must be called explicitly
 
 ### Key Classes
 
-- **ProjectionHolder**: Static singleton holding MediaProjection result code/data between Activity and Service
-- **FloatService**: Owns all overlay views, the inference executor, and the aimbot state machine
-- **GuiPanelView**: Build UI programmatically via `buildUI()` - rebuilds entire view on tab switch
-- **models.json**: Dynamic model configuration (filename, displayName, precision, inputSize, outputSize)
+- **ProjectionHolder**: Static singleton holding MediaProjection result code/data + model list between Activity and Service
+- **FloatService**: Owns all overlay views, the inference executor, and TouchInjector
+- **GuiPanelView**: MD3 control panel with side navigation, Slider/Switch/ScrollView — rebuilt on tab switch
+- **TouchInjector**: Shizuku + IInputManager reflection for touch injection, provides `tap()`, `swipe()`, `aimAt()`
+- **JniCallBack**: JNI bridge to native `libaimbot.so`, also exposes `setConfidence(threshold)`
+- **models.json**: Dynamic model configuration
 
 ## Model Files
 
@@ -125,7 +127,54 @@ YOLOv8n output shape: `[1, 5, num_outputs]`
 - Channel 3: bh (box height, normalized [0,1])
 - Channel 4: objectness score
 
-Detection threshold: 0.25 (configurable in aimbot.cpp)
+Detection threshold: configurable via `JniCallBack.setConfidence(threshold)`, default 0.25
+
+## Touch Injection API
+
+Touch injection is handled by `TouchInjector.kt` via Shizuku + IInputManager reflection.
+The ShizukuBinderWrapper proxies Binder calls to Shizuku's process (shell UID, which has `INJECT_EVENTS` permission).
+
+### Setup
+
+```kotlin
+val injector = TouchInjector()
+injector.init()  // requires Shizuku running + permission granted
+```
+
+### Methods
+
+| Method | Description |
+|--------|-------------|
+| `tap(x, y)` | Tap at screen coordinates (DOWN + UP, 8ms interval) |
+| `swipe(x1, y1, x2, y2, durationMs)` | Touch DOWN at (x1,y1), MOVE to (x2,y2), UP after duration |
+| `aimAt(targetX, targetY, centerX, centerY, speed, screenW, screenH)` | Calculated swipe from right-side virtual joystick toward target |
+
+### Triggering (from FloatService inference loop)
+
+```kotlin
+// tap to shoot:
+touchInjector?.tap(fireButtonX, fireButtonY)
+
+// smooth aim correction:
+touchInjector?.aimAt(
+    targetX = bestX, targetY = bestY,
+    centerX = centerX, centerY = centerY,
+    speed = currentSpeed,
+    screenW = screenWidth, screenH = screenHeight
+)
+```
+
+### Requirements
+
+- Shizuku app installed and running (via wireless debugging)
+- App authorized in Shizuku
+- `rikka.shizuku.ShizukuProvider` declared in AndroidManifest (with `exported="true"`)
+
+### Detection avoidance
+
+- Events use `SOURCE_TOUCHSCREEN` (identical to real touch at framework level)
+- No `/dev/uinput` virtual devices created (more detectable)
+- Primary risk is MediaProjection (screen capture) and TYPE_APPLICATION_OVERLAY, not injection method
 
 ## Known Issues
 
@@ -152,7 +201,8 @@ QnnDsp <E> Transport layer setup failed: 14001
 ## Dependencies
 
 - `org.tensorflow:tensorflow-lite` - TFLite runtime
-- `com.github.topjohnwu.libsu:core` / `libsu:io` - Root shell access
+- `dev.rikka.shizuku:api` / `dev.rikka.shizuku:provider` - Shizuku (shell privilege via ADB)
+- `com.google.android.material` - MD3 components (MaterialCardView, Slider, Switch, etc.)
 - AndroidX libraries - standard Android components
 
 ## Important Notes
@@ -160,5 +210,6 @@ QnnDsp <E> Transport layer setup failed: 14001
 - minSdk=31 (Android 12), targetSdk=35
 - Model files are copied from assets to internal storage on first launch
 - Inference runs on single-threaded `Executors.newSingleThreadExecutor` at `THREAD_PRIORITY_URGENT_DISPLAY`
-- Touch injection stub exists in FloatService.kt but is commented out (TODO)
+- Touch injection is NOT auto-triggered — FloatService inference loop only detects + overlays
 - INT8 quantization must use calibration dataset (valorant.yaml) for proper objectness output
+- Confidence threshold is configurable via `JniCallBack.setConfidence(0.10~0.90)`, default 0.25

@@ -1,358 +1,223 @@
 package team.maodie.aimbot
 
 import android.content.Context
-import android.graphics.*
-import android.graphics.drawable.GradientDrawable
-import android.view.*
+import android.graphics.Color
+import android.graphics.Typeface
+import android.view.ContextThemeWrapper
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.widget.*
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import com.google.android.material.card.MaterialCardView
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.slider.Slider
+import com.google.android.material.textview.MaterialTextView
 
-/**
- * 悬浮 GUI 面板
- * 风格：暗色工业感，无衬线细字，红色强调
- *
- * 回调：
- *   onEnabledChanged(Boolean)
- *   onSpeedChanged(Float)       0.0 ~ 1.0
- *   onRangeChanged(Int)         像素半径
- */
-class GuiPanelView(context: Context) : LinearLayout(context) {
+class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(context, R.style.Theme_Aimbot)) {
 
     var onEnabledChanged: ((Boolean) -> Unit)? = null
-    var onSpeedChanged:   ((Float)   -> Unit)? = null
-    var onRangeChanged:   ((Int)     -> Unit)? = null
-    var onClose:          (() -> Unit)?         = null
+    var onSpeedChanged: ((Float) -> Unit)? = null
+    var onRangeChanged: ((Int) -> Unit)? = null
+    var onConfidenceChanged: ((Float) -> Unit)? = null
+    var onModelSelected: ((Int) -> Unit)? = null
+    var onTriggerEnabled: ((Boolean) -> Unit)? = null
+    var onTriggerReactionSpeed: ((Float) -> Unit)? = null
+    var onTriggerUpFluctuation: ((Int) -> Unit)? = null
+    var onTriggerDownFluctuation: ((Int) -> Unit)? = null
+    var onTriggerTouchDuration: ((Int) -> Unit)? = null
+    var onTriggerTouchRange: ((Int) -> Unit)? = null
+    var onTriggerShowArea: ((Boolean) -> Unit)? = null
+    var onToggleModel: ((Boolean) -> Unit)? = null
+    var onClose: (() -> Unit)? = null
 
-    // 当前值（外部可读）
-    var aimbotEnabled = false
-    var speed   = 0.3f
-    var range   = 300
+    var aimbotEnabled = false; var speed = 0.3f; var range = 300
+    var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
+    var triggerEnabled = false; var triggerReactionSpeed = 100f
+    var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
+    var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false
+    var modelRunning = false
 
-    private val COLOR_BG      = Color.parseColor("#0F0F0F")
-    private val COLOR_PANEL   = Color.parseColor("#181818")
-    private val COLOR_TAB_ACT = Color.parseColor("#CC2222")
-    private val COLOR_TAB_OFF = Color.parseColor("#282828")
-    private val COLOR_TEXT    = Color.WHITE
-    private val COLOR_MUTED   = Color.parseColor("#888888")
-    private val COLOR_DIVIDER = Color.parseColor("#2A2A2A")
-    private val COLOR_TRACK   = Color.parseColor("#2A2A2A")
-    private val COLOR_THUMB   = Color.parseColor("#CC2222")
+    private val clPrimary = Color.parseColor("#1976D2")
+    private val clOnPrimary = Color.WHITE; private val clSurface = Color.WHITE
+    private val clOnSurface = Color.parseColor("#1C1B1F")
+    private val clOnSurfaceVariant = Color.parseColor("#9CA3AF")
+    private val clOutline = Color.parseColor("#E5E7EB")
+    private val clSurfaceVariant = Color.parseColor("#F3F4F6")
+    private val clPrimaryLight = Color.argb(24, Color.red(clPrimary), Color.green(clPrimary), Color.blue(clPrimary))
 
-    private var activeTab = 0   // 0=Aimbot 1=Triggerbot 2=AntiFlash
+    private data class TabDef(val label: String)
+    private val tabs = listOf(TabDef("自瞄"), TabDef("扳机"), TabDef("防闪"), TabDef("模型"))
+    private var activeTab = 0
+    private lateinit var contentContainer: LinearLayout
+    private var switching = false
 
     init {
-        orientation = VERTICAL
-        setPadding(0, 0, 0, 0)
-        setBackgroundColor(COLOR_BG)
-        // 圆角外框
-        background = GradientDrawable().apply {
-            setColor(COLOR_BG)
-            cornerRadius = dp(14).toFloat()
-        }
-        elevation = dp(8).toFloat()
+        radius = dp(16).toFloat(); setCardBackgroundColor(clSurface); cardElevation = dp(12).toFloat()
         buildUI()
     }
 
-    // ─────────────────────────────────────────
     private fun buildUI() {
         removeAllViews()
-
-        // ── 顶栏：标题 + 关闭 ──────────────────
-        addView(buildTopBar())
-
-        // ── Tab 行 ──────────────────────────────
-        addView(buildTabRow())
-
-        // ── 分割线 ──────────────────────────────
-        addView(divider())
-
-        // ── 内容区 ──────────────────────────────
-        addView(buildContent())
+        val root = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT) }
+        addView(root)
+        root.addView(buildNavRail())
+        root.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(dp(1), MATCH_PARENT); setBackgroundColor(clOutline) })
+        val scroll = ScrollView(context).apply { layoutParams = LinearLayout.LayoutParams(0, MATCH_PARENT, 1f); overScrollMode = View.OVER_SCROLL_NEVER }
+        contentContainer = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(16), dp(16), dp(16)); layoutParams = LayoutParams(MATCH_PARENT, WRAP_CONTENT) }
+        scroll.addView(contentContainer); root.addView(scroll)
+        buildContent()
+        contentContainer.alpha = 0f; contentContainer.animate().alpha(1f).setDuration(180).start()
     }
 
-    // ─────────────────────────────────────────
-    private fun buildTopBar(): View {
+    private fun buildNavRail(): LinearLayout {
         return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(14), dp(12), dp(10))
-            setBackgroundColor(Color.TRANSPARENT)
-
-            // 红色小方块装饰
-            addView(View(context).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(4), dp(18)).apply { marginEnd = dp(10) }
-                background = GradientDrawable().apply {
-                    setColor(COLOR_TAB_ACT)
-                    cornerRadius = dp(2).toFloat()
-                }
-            })
-
-            // 标题
-            addView(TextView(context).apply {
-                text = "AIMBOT"
-                textSize = 13f
-                setTextColor(COLOR_TEXT)
-                letterSpacing = 0.18f
-                typeface = Typeface.DEFAULT_BOLD
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-            })
-
-            // 关闭按钮
-            addView(TextView(context).apply {
-                text = "✕"
-                textSize = 16f
-                setTextColor(COLOR_MUTED)
-                setPadding(dp(8), dp(4), dp(4), dp(4))
-                setOnClickListener { onClose?.invoke() }
-            })
-        }
-    }
-
-    // ─────────────────────────────────────────
-    private fun buildTabRow(): LinearLayout {
-        val tabs = listOf("AIMBOT", "TRIGGER", "ANTIFLASH")
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            setBackgroundColor(COLOR_PANEL)
-
-            tabs.forEachIndexed { idx, name ->
-                addView(buildTab(name, idx))
-                if (idx < tabs.size - 1) {
-                    addView(View(context).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(1), MATCH_PARENT).apply {
-                            marginStart = dp(4); marginEnd = dp(4)
-                        }
-                        setBackgroundColor(COLOR_DIVIDER)
-                    })
-                }
-            }
-        }
-    }
-
-    private fun buildTab(name: String, idx: Int): TextView {
-        return TextView(context).apply {
-            text = name
-            textSize = 10f
-            letterSpacing = 0.12f
-            gravity = Gravity.CENTER
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-            updateTabStyle(this, idx == activeTab)
-            setOnClickListener {
-                activeTab = idx
-                // 重建 UI 刷新 tab 高亮
-                buildUI()
-            }
-        }
-    }
-
-    private fun updateTabStyle(tv: TextView, active: Boolean) {
-        tv.setTextColor(if (active) COLOR_TEXT else COLOR_MUTED)
-        tv.background = GradientDrawable().apply {
-            setColor(if (active) COLOR_TAB_ACT else COLOR_TAB_OFF)
-            cornerRadius = dp(6).toFloat()
-        }
-    }
-
-    // ─────────────────────────────────────────
-    private fun buildContent(): View {
-        return when (activeTab) {
-            0    -> buildAimbotContent()
-            else -> buildEmptyContent(if (activeTab == 1) "TRIGGERBOT" else "ANTI FLASH")
-        }
-    }
-
-    // ── Aimbot 内容 ────────────────────────────
-    private fun buildAimbotContent(): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(16))
-            setBackgroundColor(COLOR_BG)
-
-            // 总开关行
-            addView(buildSwitchRow())
-            addView(divider())
-
-            // Speed 滑条
-            addView(buildSliderSection(
-                label   = "SPEED",
-                value   = "%.2f".format(speed),
-                progress = (speed * 100).toInt(),
-                max     = 100
-            ) { v ->
-                speed = v / 100f
-                onSpeedChanged?.invoke(speed)
-            })
-
-            addView(spacer(dp(4)))
-
-            // Range 滑条
-            addView(buildSliderSection(
-                label   = "RANGE",
-                value   = "${range}px",
-                progress = range,
-                max     = 800
-            ) { v ->
-                range = v
-                onRangeChanged?.invoke(range)
-            })
-        }
-    }
-
-    private fun buildSwitchRow(): LinearLayout {
-        val statusTv = TextView(context).apply {
-            text = if (aimbotEnabled) "ON" else "OFF"
-            textSize = 10f
-            letterSpacing = 0.1f
-            setTextColor(if (aimbotEnabled) COLOR_TAB_ACT else COLOR_MUTED)
-            typeface = Typeface.DEFAULT_BOLD
-        }
-
-        val toggle = buildToggleButton()
-
-        return LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(4), 0, dp(12))
-
-            addView(TextView(context).apply {
-                text = "AIM ASSIST"
-                textSize = 12f
-                setTextColor(COLOR_TEXT)
-                letterSpacing = 0.08f
-                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-            })
-            addView(statusTv)
-            addView(spacer(dp(10)))
-            addView(toggle.apply {
-                setOnClickListener {
-                    aimbotEnabled = !aimbotEnabled
-                    statusTv.text = if (aimbotEnabled) "ON" else "OFF"
-                    statusTv.setTextColor(if (aimbotEnabled) COLOR_TAB_ACT else COLOR_MUTED)
-                    updateToggleStyle(this, aimbotEnabled)
-                    onEnabledChanged?.invoke(aimbotEnabled)
-                }
-            })
-        }
-    }
-
-    private fun buildToggleButton(): TextView {
-        return TextView(context).apply {
-            text = if (aimbotEnabled) "●" else "○"
-            textSize = 22f
-            setTextColor(if (aimbotEnabled) COLOR_TAB_ACT else COLOR_MUTED)
-            setPadding(dp(4), 0, dp(4), 0)
-        }
-    }
-
-    private fun updateToggleStyle(tv: TextView, on: Boolean) {
-        tv.text = if (on) "●" else "○"
-        tv.setTextColor(if (on) COLOR_TAB_ACT else COLOR_MUTED)
-    }
-
-    private fun buildSliderSection(
-        label: String, value: String,
-        progress: Int, max: Int,
-        onChange: (Int) -> Unit
-    ): LinearLayout {
-        val valueTv = TextView(context).apply {
-            text = value
-            textSize = 10f
-            setTextColor(COLOR_TAB_ACT)
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.05f
-        }
-
-        val seekBar = SeekBar(context).apply {
-            this.max = max
-            this.progress = progress
-            progressDrawable = buildSeekTrack()
-            thumb = buildSeekThumb()
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(28))
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar, v: Int, fromUser: Boolean) {
-                    onChange(v)
-                    valueTv.text = if (max == 100) "%.2f".format(v / 100f) else "${v}px"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar) {}
-                override fun onStopTrackingTouch(sb: SeekBar) {}
-            })
-        }
-
-        return LinearLayout(context).apply {
-            orientation = VERTICAL
-            setPadding(0, dp(6), 0, dp(6))
-
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(6), dp(12), dp(6), dp(12)); setBackgroundColor(clSurfaceVariant)
+            layoutParams = LinearLayout.LayoutParams(dp(60), MATCH_PARENT)
             addView(LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 0, dp(6))
-                addView(TextView(context).apply {
-                    text = label
-                    textSize = 10f
-                    setTextColor(COLOR_MUTED)
-                    letterSpacing = 0.15f
-                    layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
-                })
-                addView(valueTv)
-            })
-            addView(seekBar)
-        }
-    }
-
-    private fun buildSeekTrack(): android.graphics.drawable.Drawable {
-        return GradientDrawable().apply {
-            setColor(COLOR_TRACK)
-            cornerRadius = dp(3).toFloat()
-            setSize(MATCH_PARENT, dp(4))
-        }
-    }
-
-    private fun buildSeekThumb(): android.graphics.drawable.Drawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(COLOR_THUMB)
-            setSize(dp(16), dp(16))
-        }
-    }
-
-    // ── 空白 Tab 内容 ──────────────────────────
-    private fun buildEmptyContent(name: String): LinearLayout {
-        return LinearLayout(context).apply {
-            orientation = VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(40), dp(16), dp(40))
-            setBackgroundColor(COLOR_BG)
-
-            addView(TextView(context).apply {
-                text = name
-                textSize = 11f
-                setTextColor(COLOR_MUTED)
-                letterSpacing = 0.2f
-                gravity = Gravity.CENTER
+                gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(32))
+                setOnClickListener { onClose?.invoke() }
+                addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(dp(20), dp(3)); setBackgroundColor(clOnSurfaceVariant) })
             })
             addView(spacer(dp(6)))
-            addView(TextView(context).apply {
-                text = "— COMING SOON —"
-                textSize = 9f
-                setTextColor(Color.parseColor("#444444"))
-                letterSpacing = 0.15f
-                gravity = Gravity.CENTER
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
+                tabs.forEachIndexed { idx, tab ->
+                    addView(navItem(tab.label, idx))
+                    if (idx < tabs.size - 1) addView(spacer(dp(4)))
+                }
+            })
+            addView(MaterialTextView(context).apply {
+                text = if (modelRunning) "■" else "▶"; textSize = 18f; gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(36))
+                setTextColor(clOnSurfaceVariant)
+                setOnClickListener {
+                    modelRunning = !modelRunning; text = if (modelRunning) "■" else "▶"
+                    setTextColor(if (modelRunning) clPrimary else clOnSurfaceVariant)
+                    onToggleModel?.invoke(modelRunning)
+                }
             })
         }
     }
 
-    // ─────────────────────────────────────────
-    private fun divider() = View(context).apply {
-        layoutParams = LayoutParams(MATCH_PARENT, dp(1))
-        setBackgroundColor(COLOR_DIVIDER)
+    private fun navItem(label: String, idx: Int): View {
+        val active = idx == activeTab
+        return MaterialTextView(context).apply {
+            text = label; textSize = 12f; gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f); setPadding(0, dp(4), 0, dp(4))
+            val r = dp(8).toFloat()
+            if (active) { setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD; background = android.graphics.drawable.GradientDrawable().apply { setColor(clPrimaryLight); cornerRadius = r } }
+            else { setTextColor(clOnSurfaceVariant); typeface = Typeface.DEFAULT; background = null }
+            setOnClickListener { switchTab(idx) }
+        }
     }
 
-    private fun spacer(h: Int) = View(context).apply {
-        layoutParams = LayoutParams(1, h)
+    private fun switchTab(target: Int) {
+        if (target == activeTab || switching) return; switching = true; activeTab = target
+        buildUI(); switching = false
     }
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun buildContent() {
+        contentContainer.removeAllViews()
+        when (activeTab) { 0 -> buildAimbot(); 1 -> buildTriggerbot(); 3 -> buildModelTab(); else -> buildEmpty("防闪") }
+    }
+
+    private fun buildAimbot() {
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "自瞄"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = aimbotEnabled; setOnCheckedChangeListener { _, c -> aimbotEnabled = c; onEnabledChanged?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(10)))
+        contentContainer.addView(buildSlider("速度", speed, 0.05f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+        contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(buildSlider("范围", range.toFloat(), 50f, 800f, "0px") { range = it.toInt(); onRangeChanged?.invoke(range) })
+    }
+
+    private fun buildTriggerbot() {
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "扳机"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = triggerEnabled; setOnCheckedChangeListener { _, c -> triggerEnabled = c; onTriggerEnabled?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4))
+            addView(MaterialTextView(context).apply { text = "显示触摸地点"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = triggerShowArea; setOnCheckedChangeListener { _, c -> triggerShowArea = c; onTriggerShowArea?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(6))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(buildSliderInt("反应速度", triggerReactionSpeed.toInt(), 10, 500, "ms") { triggerReactionSpeed = it.toFloat(); onTriggerReactionSpeed?.invoke(it.toFloat()) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("向上波动", triggerUpFluctuation, 0, 15, "ms") { triggerUpFluctuation = it; onTriggerUpFluctuation?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("向下波动", triggerDownFluctuation, 0, 15, "ms") { triggerDownFluctuation = it; onTriggerDownFluctuation?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("触摸时间", triggerTouchDuration, 1, 50, "ms") { triggerTouchDuration = it; onTriggerTouchDuration?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("触摸范围", triggerTouchRange, 20, 200, "px") { triggerTouchRange = it; onTriggerTouchRange?.invoke(it) })
+    }
+
+    private fun buildModelTab() {
+        contentContainer.addView(MaterialTextView(context).apply { text = "模型选择"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
+        contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
+        if (modelNames.isEmpty()) {
+            contentContainer.addView(MaterialTextView(context).apply { text = "无可用模型"; textSize = 13f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(16), 0, dp(16)) })
+        } else {
+            modelNames.forEachIndexed { idx, name ->
+                val selected = idx == modelIndex
+                contentContainer.addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(8), dp(8), dp(8), dp(8))
+                    background = if (selected) android.graphics.drawable.GradientDrawable().apply { setColor(clPrimaryLight); cornerRadius = dp(8).toFloat() } else null
+                    setOnClickListener { if (modelIndex != idx) { modelIndex = idx; onModelSelected?.invoke(idx); buildContent() } }
+                    addView(MaterialTextView(context).apply { text = if (selected) "●" else "○"; textSize = 14f; setTextColor(if (selected) clPrimary else clOnSurfaceVariant); setPadding(0, 0, dp(8), 0) })
+                    addView(MaterialTextView(context).apply { text = name; textSize = 13f; setTextColor(if (selected) clPrimary else clOnSurface); typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT; layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+                })
+            }
+        }
+        contentContainer.addView(spacer(dp(12)))
+        contentContainer.addView(MaterialTextView(context).apply { text = "检测置信度"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
+        contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(buildSlider("阈值", confidence, 0.10f, 0.90f, "%.2f") { confidence = it; onConfidenceChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "低于此值的检测结果将被过滤"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+    }
+
+    private fun buildSlider(label: String, value: Float, min: Float, max: Float, fmt: String, onChange: (Float) -> Unit): LinearLayout {
+        fun display(v: Float) = if (fmt == "0px") "${v.toInt()}px" else "%.2f".format(v)
+        val valueTv = MaterialTextView(context).apply { text = display(value); textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
+        val slider = Slider(context).apply { valueFrom = min; valueTo = max; this.value = value; trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            addOnChangeListener { _, v, fu -> if (fu) { onChange(v); valueTv.text = display(v) } } }
+        return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
+            addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(MaterialTextView(context).apply { text = label; textSize = 11f; setTextColor(clOnSurfaceVariant); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+                addView(valueTv) })
+            addView(slider) }
+    }
+
+    private fun buildSliderInt(label: String, value: Int, min: Int, max: Int, suffix: String, onChange: (Int) -> Unit): LinearLayout {
+        val valueTv = MaterialTextView(context).apply { text = "$value$suffix"; textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
+        val slider = Slider(context).apply { valueFrom = min.toFloat(); valueTo = max.toFloat(); this.value = value.toFloat(); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            addOnChangeListener { _, v, fu -> if (fu) { val iv = v.toInt(); onChange(iv); valueTv.text = "$iv$suffix" } } }
+        return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
+            addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(MaterialTextView(context).apply { text = label; textSize = 11f; setTextColor(clOnSurfaceVariant); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+                addView(valueTv) })
+            addView(slider) }
+    }
+
+    private fun buildEmpty(name: String) {
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; minimumHeight = dp(140)
+            addView(MaterialTextView(context).apply { text = name; textSize = 14f; setTextColor(clOnSurfaceVariant); typeface = Typeface.DEFAULT_BOLD })
+            addView(spacer(dp(4)))
+            addView(MaterialTextView(context).apply { text = "开发中"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        })
+    }
+
+    private fun divider() = View(context).apply { layoutParams = LayoutParams(MATCH_PARENT, dp(1)); setBackgroundColor(clOutline) }
+    private fun spacer(h: Int) = View(context).apply { layoutParams = LayoutParams(1, dp(h)) }
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }
