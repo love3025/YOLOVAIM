@@ -2,20 +2,21 @@ package team.maodie.aimbot
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import android.util.Log
-import com.topjohnwu.superuser.Shell
+import rikka.shizuku.Shizuku
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -38,6 +39,20 @@ class MainActivity : AppCompatActivity() {
     // 缓存density避免重复访问
     private val displayDensity: Float by lazy { resources.displayMetrics.density }
 
+    // ── Shizuku 状态 ──────────────────────────
+    private var shizukuGranted = false
+    private var shizukuRunning = false
+
+    private val shizukuListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+        if (requestCode == REQ_SHIZUKU) {
+            shizukuGranted = grantResult == PackageManager.PERMISSION_GRANTED
+            Log.d("Shizuku", "permission result: $grantResult, granted=$shizukuGranted")
+            if (shizukuGranted) {
+                runOnUiThread { recreate() }
+            }
+        }
+    }
+
     private val captureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -46,8 +61,17 @@ class MainActivity : AppCompatActivity() {
         if (data != null) {
             ProjectionHolder.resultCode = result.resultCode
             ProjectionHolder.resultData = data
+            // 同步模型列表到服务
+            ProjectionHolder.modelList = modelList.map { m ->
+                ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description)
+            }
+            ProjectionHolder.selectedModelIndex = selectedModelIndex
             startForegroundService(Intent(this, FloatService::class.java))
         }
+    }
+
+    companion object {
+        private const val REQ_SHIZUKU = 10001
     }
 
     // 白色卡片风格颜色
@@ -61,12 +85,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Shell.enableVerboseLogging = false
-        Shell.setDefaultBuilder(
-            Shell.Builder.create()
-                .setFlags(Shell.FLAG_REDIRECT_STDERR)
-                .setTimeout(10)
-        )
 
         // Load models from JSON
         loadModelsFromJson()
@@ -122,6 +140,90 @@ class MainActivity : AppCompatActivity() {
             }
         }
         rootLayout.addView(btnStart)
+        rootLayout.addView(createSpacer(12))
+
+        // ── 触摸测试按钮 ───────────────────────
+        val testInjector = TouchInjector()
+        var injectorReady = false
+
+        // 主动初始化：先检查 Shizuku 状态，再初始化 TouchInjector
+        fun tryInitInjector(): Boolean {
+            try {
+                Log.d("Shizuku", "pingBinder=${Shizuku.pingBinder()} uid=${Shizuku.getUid()} perm=${Shizuku.checkSelfPermission()}")
+            } catch (e: Exception) {
+                Log.e("Shizuku", "binder not ready yet: ${e.message}")
+            }
+            if (Shizuku.pingBinder()) {
+                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                    Log.d("Shizuku", "permission not granted, requesting...")
+                    Shizuku.requestPermission(REQ_SHIZUKU)
+                    return false
+                }
+                val ok = testInjector.init()
+                injectorReady = ok
+                Log.d("Shizuku", "TouchInjector init: $ok")
+                return ok
+            }
+            return false
+        }
+
+        // 同时也注册 binder 到达监听，实现自动初始化
+        Shizuku.addBinderReceivedListenerSticky(object : Shizuku.OnBinderReceivedListener {
+            override fun onBinderReceived() {
+                Log.d("Shizuku", "binder received callback!")
+                runOnUiThread { tryInitInjector() }
+            }
+        })
+
+        rootLayout.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+
+            addView(Button(this@MainActivity).apply {
+                text = "测试点击"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(8) }
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#FF9F0A"))
+                    cornerRadius = dp(10).toFloat()
+                }
+                setOnClickListener {
+                    if (!injectorReady && !tryInitInjector()) {
+                        Toast.makeText(this@MainActivity, "Shizuku 未就绪 (ping=${Shizuku.pingBinder()})", Toast.LENGTH_LONG).show()
+                        return@setOnClickListener
+                    }
+                    val x = resources.displayMetrics.widthPixels / 2
+                    val y = resources.displayMetrics.heightPixels / 2
+                    testInjector.tap(x, y)
+                    Toast.makeText(this@MainActivity, "点击 ($x, $y)", Toast.LENGTH_SHORT).show()
+                }
+            })
+
+            addView(Button(this@MainActivity).apply {
+                text = "测试滑动"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(8) }
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#34C759"))
+                    cornerRadius = dp(10).toFloat()
+                }
+                setOnClickListener {
+                    if (!injectorReady && !tryInitInjector()) {
+                        Toast.makeText(this@MainActivity, "Shizuku 未就绪 (ping=${Shizuku.pingBinder()})", Toast.LENGTH_LONG).show()
+                        return@setOnClickListener
+                    }
+                    val cx = resources.displayMetrics.widthPixels / 2
+                    val cy = resources.displayMetrics.heightPixels / 2
+                    testInjector.swipe(cx - 100, cy, cx + 100, cy, 200)
+                    Toast.makeText(this@MainActivity, "滑动 ${cx-100},$cy → ${cx+100},$cy", Toast.LENGTH_SHORT).show()
+                }
+            })
+        })
 
         setContentView(rootLayout)
 
@@ -174,9 +276,52 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, 0, 0, dp(12))
             })
 
+            // ── 屏幕录制 ──────────────────────────
             addView(buildPermissionRow("屏幕录制", canCaptureScreen()))
             addView(divider())
+
+            // ── 悬浮窗 ────────────────────────────
             addView(buildPermissionRow("悬浮窗", Settings.canDrawOverlays(this@MainActivity)))
+            addView(divider())
+
+            // ── Shizuku ───────────────────────────
+            val shizukuOk = isShizukuGranted()
+            addView(buildPermissionRow("Shizuku 提权", shizukuOk))
+            if (!shizukuOk) {
+                val hintTv = TextView(context).apply {
+                    textSize = 11f
+                    setTextColor(Color.parseColor("#FF9F0A"))
+                    setPadding(dp(18), 0, 0, dp(4))
+                }
+                try {
+                    when {
+                        !Shizuku.pingBinder() -> {
+                            hintTv.text = "请通过无线调试启动 Shizuku 后再试"
+                            // 可选：加一个跳转按钮
+                        }
+                        else -> {
+                            hintTv.text = "Shizuku 运行中，点击下方按钮授权"
+                            addView(Button(context).apply {
+                                text = "授权 Shizuku"
+                                textSize = 13f
+                                setTextColor(Color.WHITE)
+                                setPadding(dp(12), dp(6), dp(12), dp(6))
+                                layoutParams = LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)
+                                ).apply { setMargins(dp(18), dp(6), 0, 0) }
+                                background = GradientDrawable().apply {
+                                    setColor(COLOR_PRIMARY)
+                                    cornerRadius = dp(8).toFloat()
+                                }
+                                setOnClickListener { requestShizukuPermission() }
+                            })
+                        }
+                    }
+                } catch (_: Exception) {
+                    hintTv.text = "Shizuku 未安装或不可用"
+                }
+                addView(hintTv)
+            }
         }
     }
 
@@ -349,6 +494,40 @@ class MainActivity : AppCompatActivity() {
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             })
         }
+    }
+
+    // ── Shizuku 权限管理 ──────────────────────
+
+    private fun requestShizukuPermission() {
+        try {
+            Shizuku.requestPermission(REQ_SHIZUKU)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Shizuku 请求失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun isShizukuGranted(): Boolean {
+        return try {
+            Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // ── Lifecycle ──────────────────────────────
+
+    override fun onStart() {
+        super.onStart()
+        try {
+            Shizuku.addRequestPermissionResultListener(shizukuListener)
+        } catch (_: Exception) {}
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try {
+            Shizuku.removeRequestPermissionResultListener(shizukuListener)
+        } catch (_: Exception) {}
     }
 
     private fun canCaptureScreen(): Boolean {

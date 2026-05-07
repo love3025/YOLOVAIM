@@ -10,365 +10,267 @@ import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.Log
 import android.view.*
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import androidx.core.app.NotificationCompat
-import java.io.File
-import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class FloatService : Service() {
 
-    companion object {
-        const val TAG = "FloatService"
-        const val CH_ID = "aimbot_ch"
-    }
+    companion object { const val TAG = "FloatService"; const val CH_ID = "aimbot_ch" }
 
-    // ── WindowManager ────────────────────────
     private lateinit var wm: WindowManager
-
-    // ── Views ────────────────────────────────
-    private lateinit var ballView:    FloatBallView
+    private lateinit var ballView: FloatBallView
     private lateinit var overlayView: OverlayCanvasView
-    private lateinit var guiPanel:    GuiPanelView
+    private lateinit var guiPanel: GuiPanelView
 
-    private var ballParams:    WindowManager.LayoutParams? = null
+    private var ballParams: WindowManager.LayoutParams? = null
     private var overlayParams: WindowManager.LayoutParams? = null
-    private var guiParams:     WindowManager.LayoutParams? = null
+    private var guiParams: WindowManager.LayoutParams? = null
+    private var guiVisible = false; private var ballAdded = false
+    private var overlayAdded = false; private var guiAdded = false
 
-    private var guiVisible  = false
-    private var ballAdded   = false
-    private var overlayAdded = false
-    private var guiAdded    = false
-
-    // ── MediaProjection ──────────────────────
     private var mediaProjection: MediaProjection? = null
     private var imageReader: ImageReader? = null
-    private val screenWidth  get() = resources.displayMetrics.widthPixels
+    private val screenWidth get() = resources.displayMetrics.widthPixels
     private val screenHeight get() = resources.displayMetrics.heightPixels
     private val screenDensity get() = resources.displayMetrics.densityDpi
 
-    // ── 推理线程 ─────────────────────────────
     private val executor = Executors.newSingleThreadExecutor()
     private val inferRunning = AtomicBoolean(false)
-    private val aimbotOn     = AtomicBoolean(false)
-
-    // ── 主线程 Handler ───────────────────────
+    private val aimbotOn = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // ── 推理优化: 预分配缓存 ─────────────────
-    private val rectBuffer = Array(20) { RectF() }  // 复用RectF避免GC
+    private val rectBuffer = Array(20) { RectF() }
     private var lastDetections: List<RectF> = emptyList()
+    private var centerX = 0f; private var centerY = 0f
+    private var cachedRange = 0f; private var cachedRangePx = 0
 
-    // 预计算的屏幕中心（避免每帧计算）
-    private var centerX = 0f
-    private var centerY = 0f
+    private var touchInjector: TouchInjector? = null
+    private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
 
-    // 缓存guiPanel属性避免重复访问
-    private var cachedRange = 0f
-    private var cachedRangePx = 0
+    private var triggerEnabled = false; private var triggerReactionSpeed = 100f
+    private var triggerUpFluct = 3; private var triggerDownFluct = 3
+    private var triggerTouchDuration = 10; private var triggerTouchRange = 100
+    private var triggerShowArea = false
+    private var triggerOverlay: TriggerOverlayView? = null
+    private var triggerOverlayAdded = false
+    private var triggerAreaX = 0; private var triggerAreaY = 0; private var lastTriggerMs = 0L
+    private var hasDetects = false
 
-    // ─────────────────────────────────────────
     override fun onCreate() {
-        super.onCreate()
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        createNotificationChannel()
-        startForeground(1, buildNotification())
+        super.onCreate(); wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        createNotificationChannel(); startForeground(1, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val code = ProjectionHolder.resultCode
-        val data = ProjectionHolder.resultData
-
+        val code = ProjectionHolder.resultCode; val data = ProjectionHolder.resultData
         if (data != null) {
             try {
                 val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection = manager.getMediaProjection(code, data)
-                setupImageReader()
-            } catch (e: Exception) {
-                Log.e(TAG, "projection创建失败: ${e.message}")
-            }
+                mediaProjection = manager.getMediaProjection(code, data); setupImageReader()
+            } catch (e: Exception) { Log.e(TAG, "projection创建失败: ${e.message}") }
         }
-        setupBall()
-        setupOverlay()
+        setupBall(); setupOverlay(); initTouchInjector()
         return START_NOT_STICKY
     }
-    // ─────────────────────────────────────────
-    //  悬浮球
-    // ─────────────────────────────────────────
+
     private fun setupBall() {
         val size = dp(35)
         ballView = FloatBallView(this)
-
-        ballParams = makeParams(size, size,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 50; y = 200
-        }
-
-        ballView.onMoveCallback = { dx, dy ->
-            ballParams?.let {
-                it.x += dx; it.y += dy
-                wm.updateViewLayout(ballView, it)
-            }
-        }
-
-        ballView.onClickCallback = { toggleGui() }
-
-        wm.addView(ballView, ballParams)
-        ballAdded = true
+        ballParams = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE).apply { gravity = Gravity.TOP or Gravity.START; x = 50; y = 200 }
+        ballView.onMoveCallback = { dx, dy -> ballParams?.let { it.x += dx; it.y += dy; wm.updateViewLayout(ballView, it) } }
+        ballView.onClickCallback = { toggleGui() }; wm.addView(ballView, ballParams); ballAdded = true
     }
 
-    // ─────────────────────────────────────────
-    //  全屏覆盖层
-    // ─────────────────────────────────────────
     private fun setupOverlay() {
         overlayView = OverlayCanvasView(this)
-
-        overlayParams = makeParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        )
-
-        wm.addView(overlayView, overlayParams)
-        overlayAdded = true
+        overlayParams = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+        wm.addView(overlayView, overlayParams); overlayAdded = true
     }
 
-    // ─────────────────────────────────────────
-    //  GUI 面板
-    // ─────────────────────────────────────────
-    private fun toggleGui() {
-        if (guiVisible) {
-            hideGui()
-        } else {
-            showGui()
+    private fun initTouchInjector() {
+        executor.execute {
+            val injector = TouchInjector()
+            if (injector.init()) { touchInjector = injector; Log.d(TAG, "TouchInjector ready") }
+            else { Log.w(TAG, "TouchInjector unavailable") }
         }
     }
+
+    private fun setupTriggerOverlay() {
+        if (triggerOverlayAdded) return
+        triggerOverlay = TriggerOverlayView(this)
+        val size = dp(triggerTouchRange.coerceAtLeast(30))
+        val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+        p.gravity = Gravity.TOP or Gravity.START
+        p.x = screenWidth / 2 - size / 2; p.y = screenHeight / 2 - size / 2
+        triggerAreaX = p.x; triggerAreaY = p.y
+        triggerOverlay!!.areaSize = size
+        triggerOverlay!!.onPositionChanged = { l, t -> triggerAreaX = l; triggerAreaY = t }
+        wm.addView(triggerOverlay!!, p); triggerOverlayAdded = true
+        triggerOverlay!!.alpha = 0f
+        Log.d(TAG, "trigger overlay at ($triggerAreaX,$triggerAreaY) size=$size")
+    }
+
+    private fun updateTriggerOverlayVisibility() {
+        val ov = triggerOverlay ?: return
+        val p = ov.layoutParams as? WindowManager.LayoutParams ?: return
+        if (triggerShowArea) {
+            ov.alpha = 1f; p.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        } else {
+            ov.alpha = 0f; p.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        try { wm.updateViewLayout(ov, p) } catch (_: Exception) {}
+    }
+
+    private fun updateTriggerOverlaySize() {
+        val ov = triggerOverlay ?: return
+        val p = ov.layoutParams as? WindowManager.LayoutParams ?: return
+        val size = dp(triggerTouchRange.coerceAtLeast(30)); p.width = size; p.height = size
+        ov.areaSize = size; try { wm.updateViewLayout(ov, p) } catch (_: Exception) {}
+    }
+
+    private fun loadModel(filename: String) {
+        val modelFile = java.io.File(applicationContext.filesDir, filename)
+        try {
+            if (!modelFile.exists()) { assets.open(filename).use { i -> java.io.FileOutputStream(modelFile).use { o -> i.copyTo(o) } } }
+            if (JniCallBack.init(modelFile.absolutePath)) Log.d(TAG, "模型切换成功: $filename")
+            else Log.e(TAG, "模型切换失败: $filename")
+        } catch (e: Exception) { Log.e(TAG, "模型切换异常: ${e.message}") }
+    }
+
+    private fun toggleGui() { if (guiVisible) hideGui() else showGui() }
 
     private fun showGui() {
         if (guiAdded) {
-            guiPanel.visibility = View.VISIBLE
-            guiVisible = true
-            return
+            guiPanel.visibility = View.VISIBLE; guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
+            guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start(); guiVisible = true; return
         }
-
         guiPanel = GuiPanelView(this)
-
-        guiParams = makeParams(dp(280), WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 60; y = 280
-        }
-
+        val panelH = (screenHeight * 0.68f).toInt()
+        guiParams = makeParams(dp(280), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
         guiPanel.onClose = { hideGui() }
-
-        guiPanel.onEnabledChanged = { on ->
-            aimbotOn.set(on)
-            overlayView.aimbotEnabled = on
-            Log.d("AimbotInfer", "开关切换: $on")
-            if (on) startInferLoop() else overlayView.postInvalidate()
+        guiPanel.onEnabledChanged = { on -> aimbotOn.set(on); overlayView.aimbotEnabled = on; Log.d("AimbotInfer", "开关切换: $on") }
+        guiPanel.onSpeedChanged = { currentSpeed = it }
+        guiPanel.onRangeChanged = { px -> overlayView.rangeRadius = px; overlayView.postInvalidate() }
+        guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it) }
+        guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
+        guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
+        guiPanel.onModelSelected = { idx ->
+            val e = ProjectionHolder.modelList.getOrNull(idx)
+            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
         }
+        guiPanel.onTriggerEnabled = { triggerEnabled = it }
+        guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it }
+        guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it }
+        guiPanel.onTriggerDownFluctuation = { triggerDownFluct = it }
+        guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it }
+        guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize() }
+        guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility() }
+        guiPanel.onToggleModel = { running -> if (running && !inferRunning.get()) startInferLoop() else if (!running) inferRunning.set(false) }
 
-        guiPanel.onSpeedChanged = { /* 供触摸注入模块使用 */ }
-
-        guiPanel.onRangeChanged = { px ->
-            overlayView.rangeRadius = px
-            overlayView.postInvalidate()
-        }
-
-        // 初始同步
-        overlayView.rangeRadius = guiPanel.range
-
-        wm.addView(guiPanel, guiParams)
-        guiAdded   = true
-        guiVisible = true
+        overlayView.rangeRadius = guiPanel.range; JniCallBack.setConfidence(guiPanel.confidence)
+        setupTriggerOverlay()
+        wm.addView(guiPanel, guiParams); guiAdded = true; guiVisible = true
+        guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
+        guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start()
     }
 
     private fun hideGui() {
-        if (guiAdded) guiPanel.visibility = View.GONE
+        if (guiAdded) guiPanel.animate().alpha(0f).scaleX(0.85f).scaleY(0.85f).setDuration(150).withEndAction { guiPanel.visibility = View.GONE }.start()
         guiVisible = false
     }
 
-    // ─────────────────────────────────────────
-    //  MediaProjection / ImageReader
-    // ─────────────────────────────────────────
     private fun setupImageReader() {
-        imageReader = ImageReader.newInstance(
-            screenWidth, screenHeight,
-            PixelFormat.RGBA_8888, 2
-        )
-
-        // 安卓15必须先注册 callback 再 createVirtualDisplay
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                Log.d("AimbotInfer", "MediaProjection 停止")
-                inferRunning.set(false)
-                imageReader?.close()
-            }
+            override fun onStop() { Log.d("AimbotInfer", "MediaProjection 停止"); inferRunning.set(false); imageReader?.close() }
         }, Handler(Looper.getMainLooper()))
-
-        mediaProjection?.createVirtualDisplay(
-            "AimbotCapture",
-            screenWidth, screenHeight, screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface, null, null
-        )
-
+        mediaProjection?.createVirtualDisplay("AimbotCapture", screenWidth, screenHeight, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null)
         Log.d("AimbotInfer", "imageReader 创建成功")
     }
 
-    // ─────────────────────────────────────────
-//  推理循环（优化版）
-// ─────────────────────────────────────────
     private fun startInferLoop() {
-        if (inferRunning.getAndSet(true)) return
-
-        // 预计算屏幕中心
-        centerX = screenWidth / 2f
-        centerY = screenHeight / 2f
-
+        if (inferRunning.getAndSet(true)) { Log.d(TAG, "infer loop already running"); return }
+        centerX = screenWidth / 2f; centerY = screenHeight / 2f
+        Log.d(TAG, "infer loop started, center=($centerX,$centerY)")
         executor.execute {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
-
-            while (inferRunning.get() && aimbotOn.get()) {
-                // 更新缓存的guiPanel参数（只在值变化时更新）
+            var aliveCtr = 0
+            while (inferRunning.get()) {
+                if (++aliveCtr % 30 == 0) { touchInjector?.keepAlive(); Log.d(TAG, "alive trigger=$triggerEnabled injector=${touchInjector?.available} detects=$hasDetects") }
                 val currentRange = guiPanel.range
-                if (currentRange != cachedRangePx) {
-                    cachedRangePx = currentRange
-                    cachedRange = currentRange.toFloat()
-                }
-
+                if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
                 val image = imageReader?.acquireLatestImage()
-                if (image == null) {
-                    // 轻量级spin wait替代sleep
-                    Thread.yield()
-                    continue
-                }
-
+                if (image == null) { Thread.yield(); continue }
                 try {
-                    val plane = image.planes[0]
-                    val buffer = plane.buffer
+                    hasDetects = false
+                    val plane = image.planes[0]; val buffer = plane.buffer
+                    val regionW = cachedRangePx * 2; val regionH = cachedRangePx * 2
+                    val offsetX = (screenWidth - regionW) / 2; val offsetY = (screenHeight - regionH) / 2
 
-                    val regionW = cachedRangePx * 2
-                    val regionH = cachedRangePx * 2
-                    val offsetX = (screenWidth - regionW) / 2
-                    val offsetY = (screenHeight - regionH) / 2
-
-                    val result = JniCallBack.detect(
-                        buffer,
-                        offsetX, offsetY,
-                        regionW, regionH,
-                        screenWidth, screenHeight,
-                        plane.rowStride, plane.pixelStride
-                    )
+                    val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, screenWidth, screenHeight, plane.rowStride, plane.pixelStride)
 
                     if (result != null) {
-                        val count = result.size / 6
-
-                        // 复用rectBuffer，避免每帧分配
-                        var rectCount = 0
-                        var i = 0
+                        val count = result.size / 6; var rectCount = 0; var i = 0
                         while (i < count && rectCount < rectBuffer.size) {
-                            val x1 = result[i * 6 + 2] * screenWidth
-                            val y1 = result[i * 6 + 3] * screenHeight
-                            val x2 = result[i * 6 + 4] * screenWidth
-                            val y2 = result[i * 6 + 5] * screenHeight
-                            rectBuffer[rectCount].set(x1, y1, x2, y2)
-                            rectCount++
-                            i++
+                            rectBuffer[rectCount].set(result[i*6+2]*screenWidth, result[i*6+3]*screenHeight, result[i*6+4]*screenWidth, result[i*6+5]*screenHeight)
+                            rectCount++; i++
                         }
-
-                        // 创建不可变list给UI层
+                        hasDetects = rectCount > 0
                         lastDetections = rectBuffer.take(rectCount)
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
-                        // 瞄准计算（内联避免函数调用开销）
                         if (aimbotOn.get() && rectCount > 0) {
-                            var bestDistSq = Float.MAX_VALUE
-                            var bestX = centerX
-                            var bestY = centerY
-                            var bestIdx = 0
-
-                            // 缓存range避免重复访问
-                            val rangeVal = cachedRange
-                            val centerXVal = centerX
-                            val centerYVal = centerY
-
+                            var bestDistSq = Float.MAX_VALUE; var bestX = centerX; var bestY = centerY
+                            val rangeVal = cachedRange; val cx = centerX; val cy = centerY
                             for (idx in 0 until rectCount) {
-                                val rect = rectBuffer[idx]
-                                val bcx = (rect.left + rect.right) * 0.5f
-                                val bcy = rect.top + (rect.bottom - rect.top) * 0.2f
-                                val dx = bcx - centerXVal
-                                val dy = bcy - centerYVal
-                                val distSq = dx * dx + dy * dy
-                                if (distSq < bestDistSq && dx * dx + dy * dy < rangeVal * rangeVal) {
-                                    bestDistSq = distSq
-                                    bestX = bcx
-                                    bestY = bcy
-                                    bestIdx = idx
-                                }
+                                val r = rectBuffer[idx]; val bcx = (r.left+r.right)*0.5f; val bcy = r.top+(r.bottom-r.top)*0.2f
+                                val dx = bcx-cx; val dy = bcy-cy; val d = dx*dx+dy*dy
+                                if (d < bestDistSq && d < rangeVal*rangeVal) { bestDistSq = d; bestX = bcx; bestY = bcy }
                             }
-                            // TODO: TouchInjector.moveTo(bestX, bestY, guiPanel.speed)
                         }
-                    } else {
-                        lastDetections = emptyList()
-                        mainHandler.post { overlayView.updateDetections(lastDetections) }
                     }
 
-                } catch (e: Exception) {
-                    Log.e(TAG, "推理帧异常: ${e.message}")
-                } finally {
-                    image.close()
-                }
+                    // detection-based trigger: center in any detection box
+                    if (triggerEnabled && hasDetects && touchInjector?.available == true) {
+                        val cx = centerX.toInt(); val cy = centerY.toInt()
+                        var onTarget = false
+                        for (r in lastDetections) {
+                            if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) { onTarget = true; break }
+                        }
+                        if (onTarget) {
+                            val now = System.currentTimeMillis()
+                            val cd = triggerReactionSpeed.toInt().coerceIn(10, 500)
+                            if (now - lastTriggerMs >= cd) {
+                                lastTriggerMs = now
+                                val px = (triggerTouchRange * resources.displayMetrics.density).toInt()
+                                val rndX = triggerAreaX + (Math.random() * px).toInt()
+                                val rndY = triggerAreaY + (Math.random() * px).toInt()
+                                Log.d(TAG, "trigger fire! tap=($rndX,$rndY)")
+                                touchInjector?.tap(rndX, rndY)
+                            }
+                        }
+                    }
+
+                    if (result == null) { hasDetects = false; lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
+                } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
+                finally { image.close() }
             }
             inferRunning.set(false)
         }
     }
 
-    // ─────────────────────────────────────────
-    //  工具
-    // ─────────────────────────────────────────
-    private fun makeParams(w: Int, h: Int, flags: Int): WindowManager.LayoutParams {
-        return WindowManager.LayoutParams(
-            w, h,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            flags,
-            PixelFormat.TRANSLUCENT
-        )
-    }
-
+    private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT)
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    // ─────────────────────────────────────────
-    //  通知
-    // ─────────────────────────────────────────
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CH_ID, "Aimbot", NotificationManager.IMPORTANCE_LOW)
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
-        }
-    }
+    private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val ch = NotificationChannel(CH_ID, "Aimbot", NotificationManager.IMPORTANCE_LOW); (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch) } }
+    private fun buildNotification() = NotificationCompat.Builder(this, CH_ID).setContentTitle("Aimbot").setContentText("运行中").setSmallIcon(android.R.drawable.ic_menu_view).build()
 
-    private fun buildNotification(): Notification {
-        return NotificationCompat.Builder(this, CH_ID)
-            .setContentTitle("Aimbot")
-            .setContentText("运行中")
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .build()
-    }
-
-    // ─────────────────────────────────────────
     override fun onDestroy() {
-        inferRunning.set(false)
-        executor.shutdown()
-        mediaProjection?.stop()
-        if (ballAdded)    wm.removeView(ballView)
-        if (overlayAdded) wm.removeView(overlayView)
-        if (guiAdded)     wm.removeView(guiPanel)
+        inferRunning.set(false); executor.shutdown(); touchInjector?.destroy(); mediaProjection?.stop()
+        if (ballAdded) wm.removeView(ballView); if (overlayAdded) wm.removeView(overlayView); if (guiAdded) wm.removeView(guiPanel)
+        if (triggerOverlayAdded) { try { wm.removeView(triggerOverlay) } catch (_: Exception) {} }
         super.onDestroy()
     }
 
