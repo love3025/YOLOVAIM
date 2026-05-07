@@ -1,0 +1,25 @@
+package team.maodie.aimbot
+
+import java.nio.ByteBuffer
+
+object JniCallBack {
+    // 初始化模型
+    init {
+        System.loadLibrary("aimbot")
+    }
+
+    external fun init(modelPath: String): Boolean
+
+    // 传入图像数据，返回坐标数组 [id, score, x1, y1, x2, y2, ...]
+    // regionWidth/regionHeight: 要检测的区域大小（像素）
+    // screenWidth/screenHeight: 原始屏幕尺寸，用于坐标转换
+    external fun detect(
+        buffer: ByteBuffer,
+        offsetX: Int, offsetY: Int,
+        regionWidth: Int, regionHeight: Int,
+        screenWidth: Int, screenHeight: Int,
+        rowStride: Int, pixelStride: Int
+    ): FloatArray?
+
+    external fun release()
+}

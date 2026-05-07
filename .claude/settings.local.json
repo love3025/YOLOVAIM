@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew assembleDebug)",
+      "Bash(/g/python3.11.9/python *)",
+      "Read(//g/ai/模型/2026-0505_V1/**)",
+      "Bash(PYTHONPATH=\"G:/qnn/v2.45.0.260326/qairt/2.45.0.260326/lib/python\" /g/Python380/python.exe \"G:/qnn/v2.45.0.260326/qairt/2.45.0.260326/bin/x86_64-windows-msvc/qnn-onnx-converter\" --help)",
+      "WebFetch(domain:docs.qualcomm.com)",
+      "WebSearch",
+      "Bash(adb logcat *)",
+      "Bash(adb shell *)",
+      "Bash(G:/Python380/python.exe -c ' *)",
+      "Bash(rm -rf \"G:/ai/模型/2026-0505_V1/best_192_saved_model\" \"G:/ai/模型/2026-0505_V1/best_256_saved_model\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
