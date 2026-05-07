@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Android FPS game AI aiming assistant using Qualcomm QNN (Snapdragon Neural Processing) for real-time object detection with Hexagon DSP/NPU acceleration. The app captures the screen via MediaProjection, runs inference on a DLC model, and draws detection overlays.
+Android FPS game AI aiming assistant using TFLite with NNAPI delegate for real-time object detection on Qualcomm Snapdragon (Hexagon DSP/NPU). The app captures the screen via MediaProjection, runs YOLOv8n inference, and draws detection overlays.
 
 ## Build Commands
 
@@ -18,37 +18,30 @@ Android FPS game AI aiming assistant using Qualcomm QNN (Snapdragon Neural Proce
 # Clean and rebuild
 ./gradlew clean assembleDebug
 
-# Run unit tests
-./gradlew test
-
-# Run instrumented tests
-./gradlew connectedAndroidTest
+# Install to device
+./gradlew installDebug
 ```
 
 ## Architecture
 
 ```
-MainActivity.kt                    # Entry point - permissions, AI init
+MainActivity.kt                    # Entry point - permissions, model loading from JSON
     ↓
 FloatService.kt                    # Foreground service - owns the UI layer
-    ├── FloatBallView.kt            # Draggable toggle widget (black/white circle)
-    ├── OverlayCanvasView.kt        # Full-screen transparent overlay (detection boxes)
-    └── GuiPanelView.kt             # Control panel (Aimbot/Triggerbot/AntiFlash tabs)
+    ├── FloatBallView.kt           # Draggable toggle widget (black/white circle)
+    ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes)
+    └── GuiPanelView.kt           # Control panel (Aimbot/Triggerbot/AntiFlash tabs)
                                      ↓
-JniCallBack.kt ──────────────────── # JNI bridge (native libaimbot.so)
-    └── aimbot.cpp (cpp/)           # QNN DLC inference with HTP backend
-            ├── libQnnHtp.so        # QNN HTP runtime
-            ├── libQnnSystem.so     # QNN System API
-            ├── libQnnHtpV75Stub.so  # HTP Stub (V75 version)
-            ├── libQnnHtpV75Skel.so # HTP Skeleton (DSP bytecode - loaded at runtime)
-            └── libcdsprpc.so        # DSP RPC library (vendor system lib)
+JniCallBack.kt ───────────────────# JNI bridge (native libaimbot.so)
+    └── aimbot.cpp (cpp/)          # TFLite inference with NNAPI delegate
+            └── TFLite C API       # Uses NNAPI for Hexagon DSP/NPU acceleration
 ```
 
 ### Data Flow
 
 1. `MediaProjection` captures screen into `ImageReader`
 2. Inference thread reads `ImageReader.acquireLatestImage()` via JNI
-3. `JniCallBack.detect()` runs QNN DLC model on Hexagon DSP, returns detection boxes
+3. `JniCallBack.detect()` runs TFLite model via NNAPI, returns detection boxes
 4. `FloatService` converts normalized coords to pixels, posts to `OverlayCanvasView`
 5. Aiming logic finds closest detection within `rangeRadius`, calls touch injection (TODO)
 
@@ -57,112 +50,115 @@ JniCallBack.kt ──────────────────── # JN
 - **ProjectionHolder**: Static singleton holding MediaProjection result code/data between Activity and Service
 - **FloatService**: Owns all overlay views, the inference executor, and the aimbot state machine
 - **GuiPanelView**: Build UI programmatically via `buildUI()` - rebuilds entire view on tab switch
+- **models.json**: Dynamic model configuration (filename, displayName, precision, inputSize, outputSize)
 
-## Native Code (cpp/)
+## Model Files
 
-### QNN API Implementation
+Models are stored in `app/src/main/assets/` and loaded dynamically via `models.json`:
 
-- **aimbot.cpp**: Rewritten from ONNX Runtime to QNN API for HTP (Hexagon Tensor Processor) acceleration
-- Uses QNN v2.34 API with System API v1.9 for DLC model loading
-- Supports multiple HTP versions: V68, V69, V73, V75, V79, V81
-- Skeleton (.skel.so) and Stub (.stub.so) libraries for each HTP version
+| File | Description |
+|------|-------------|
+| `models.json` | Model configuration (TFLite files below) |
+| `yolov8n_float_192.tflite` | Float32 model (onnx2tf conversion) |
+| `yolov8n_int8_192_calibrated.tflite` | INT8 model (ultralytics export with valorant.yaml calibration) |
+| `yolov8n_int8_256_calibrated.tflite` | INT8 256x256 model (same calibration) |
 
-### QNN Library Dependencies
+**Note**: Model files are excluded from git (too large). Download from release or convert from .pt files.
 
-The QNN HTP backend requires several library types:
+## Model Conversion
 
-| Library Type | Example | Purpose |
-|-------------|---------|---------|
-| Main Runtime | libQnnHtp.so, libQnnSystem.so | Core QNN functionality |
-| HTP Stub | libQnnHtpV75Stub.so | DSP transport layer interface |
-| HTP Skeleton | libQnnHtpV75Skel.so | DSP bytecode (loaded at runtime via dlopen) |
-| DSP RPC | libcdsprpc.so | Vendor system library - DSP communication |
+### INT8 Quantization (Recommended)
 
-**Important**: Skeleton (.skel.so) libraries are NOT linked at build time. They are loaded at runtime via `dlopen()` from the app's files directory.
+Use ultralytics to export with INT8 quantization and calibration:
 
-## ONNX to DLC Conversion (QNN SDK)
-
-QNN SDK 需要 Python 3.8 来运行转换器（Python 3.11+ 不兼容 SDK 的 .pyd DLL）。
-
-### 环境准备
-
-假设 QNN SDK 在 `G:\qnn\v2.45.0.260326`，Python 3.8 在 `G:\Python380`。
-
-1. 安装 Python 3.8（如果还没有）
-2. 安装 pip 和依赖：
-```bash
-G:\Python380\python.exe -m ensurepip
-G:\Python380\python.exe -m pip install numpy pyyaml onnx packaging pandas
-```
-3. 给 QNN SDK 的 transform_manager.py 打补丁（添加 `from __future__ import annotations`）：
 ```python
-# 在 transform_manager.py 的 import 部分添加
-from __future__ import annotations
-```
-或者手动在文件开头加这一行。
+from ultralytics import YOLO
 
-### 转换命令
-
-```bash
-cd G:\ai\模型\2026-0505_V1
-
-PYTHONPATH="G:\qnn\v2.45.0.260326\qairt\2.45.0.260326\lib\python" \
-G:\Python380\python.exe \
-G:\qnn\v2.45.0.260326\qairt\2.45.0.260326\bin\x86_64-windows-msvc\qnn-onnx-converter \
---input_network best_192.onnx \
---output_path best_192.dlc
+model = YOLO('best_192.pt')
+model.export(
+    format='tflite',
+    int8=True,
+    data='valorant.yaml'  # Use your dataset yaml for calibration
+)
 ```
 
-输出文件：`best_192.dlc`, `best_192.bin`
+Output: `best_192_saved_model/best_192_full_integer_quant.tflite`
 
-### 常见问题
+Rename to `yolov8n_int8_192_calibrated.tflite` and place in `app/src/main/assets/`.
 
-- `ModuleNotFoundError: No module named 'numpy'` → 装依赖：`pip install numpy pyyaml onnx packaging pandas`
-- `TypeError: unsupported operand type(s) for |: 'type' and 'ABCMeta'` → 需要 Python 3.8，或者给 SDK 的 Python 文件加 `from __future__ import annotations`
-- `PermissionError` 输出路径是 `.` → 输出路径必须指定具体文件名（如 `best_192.dlc`），不能只写目录
+### Float32 (For testing)
+
+If INT8 has issues, use onnx2tf for Float32 conversion:
+
+```python
+import onnx2tf
+onnx2tf.convert(
+    input_onnx_file_path='best_192.onnx',
+    output_folder_path='output_dir',
+    non_verbose=True
+)
+```
+
+## Native Code (cpp/aimbot.cpp)
+
+### TFLite with NNAPI Delegate
+
+- Uses TFLite C API (`libtensorflowlite_jni.so`)
+- NNAPI delegate provides Hexagon DSP/NPU acceleration on Qualcomm devices
+- `disallow_nnapi_cpu=1` forces hardware acceleration (no CPU fallback)
+- Supports INT8 and Float32 models automatically
+
+### INT8 Preprocessing
+
+Models are calibrated with normalized [0,1] input:
+```cpp
+float r = src[pixelIdx] / 255.0f;  // Normalize to [0,1]
+data[idx] = (int8_t)std::round(r / input_scale + input_zero_point);
+```
+
+### Output Format
+
+YOLOv8n output shape: `[1, 5, num_outputs]`
+- Channel 0: cx (center X, normalized [0,1])
+- Channel 1: cy (center Y, normalized [0,1])
+- Channel 2: bw (box width, normalized [0,1])
+- Channel 3: bh (box height, normalized [0,1])
+- Channel 4: objectness score
+
+Detection threshold: 0.25 (configurable in aimbot.cpp)
 
 ## Known Issues
 
-### 1. libcdsprpc.so Not Found on OnePlus Pad Pro
+### 1. OnePlus Pad Pro - libcdsprpc.so Not Found
 
 **症状**:
 ```
-dlopen failed: library "libcdsprpc.so" not found: needed by .../libQnnHtpV75Stub.so
+dlopen failed: library "libcdsprpc.so" not found
 QnnDsp <E> Transport layer setup failed: 14001
 ```
 
-**原因**: `libcdsprpc.so` 位于 `/vendor/lib64/` 目录下，这是供应商系统库，第三方应用无法访问。QNN HTP DSP 传输层需要这个库才能与 Hexagon DSP 通信。
+**原因**: `libcdsprpc.so` is in `/vendor/lib64/` (vendor system library), inaccessible to third-party apps.
 
-**受影响设备**: OnePlus Pad Pro (Snapdragon 8 Gen 3)
+**解决**: Use TFLite with NNAPI delegate instead of direct QNN API. NNAPI handles DSP communication internally.
 
-**状态**: 未解决 - 需要以下之一:
-- Root 设备后复制 `libcdsprpc.so` 到应用私有目录
-- 使用 QNN CPU 后端（无 DSP 加速）
-- 使用已获系统签名或 OEM 合作的 app
+### 2. Inference Very Slow on Some Devices
 
-### 2. QNN HTP Backend requires Skeleton Libraries
+**症状**: Inference takes 50ms+ instead of 10-15ms
 
-**症状**: DSP 推理失败，错误码 14001
+**原因**: NNAPI fell back to CPU execution (no DSP/NPU available)
 
-**解决**: Skeleton (.skel.so) 文件必须存在于 APK 中，并通过 `dlopen()` 在运行时从应用 files 目录加载。参考 `VisiAim_99999.apk` 获取完整的 QNN 库集。
-
-### 3. Skeleton Libraries Incompatible with aarch64-linux
-
-**症状**: 链接器错误 "incompatible with aarch64linux"
-
-**原因**: 不要将 Skeleton 库添加到 CMake `target_link_libraries()`。它们应该在运行时加载，不是在链接时。
+**解决**: Check if your device supports NNAPI acceleration. Some devices may need different TFLite builds.
 
 ## Dependencies
 
-- `onnxruntime.android` - 原 ONNX 推理（已弃用）
+- `org.tensorflow:tensorflow-lite` - TFLite runtime
 - `com.github.topjohnwu.libsu:core` / `libsu:io` - Root shell access
 - AndroidX libraries - standard Android components
 
 ## Important Notes
 
 - minSdk=31 (Android 12), targetSdk=35
-- Model file (`.dlc`) is copied from assets to internal storage on first launch
-- Inference runs on a single-threaded `Executors.newSingleThreadExecutor` at `THREAD_PRIORITY_URGENT_DISPLAY`
-- Touch injection stub exists at line 278 of `FloatService.kt` but is commented out (TODO)
-- libsu (Superuser) is used for root detection and shell commands
-- QNN SDK 版本: v2.34.0 (QNN API v2.34, System API v1.9)
+- Model files are copied from assets to internal storage on first launch
+- Inference runs on single-threaded `Executors.newSingleThreadExecutor` at `THREAD_PRIORITY_URGENT_DISPLAY`
+- Touch injection stub exists in FloatService.kt but is commented out (TODO)
+- INT8 quantization must use calibration dataset (valorant.yaml) for proper objectness output
