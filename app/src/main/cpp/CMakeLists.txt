@@ -28,14 +28,18 @@ set_target_properties(tensorflowlite_jni PROPERTIES
 # Stub libraries in cpp/lib/ will be packaged in APK and loaded from app's lib dir.
 
 # Compile aimbot.cpp
-add_library(${CMAKE_PROJECT_NAME} SHARED aimbot.cpp)
+add_library(aimbot SHARED aimbot.cpp)
 
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+# Compile uinput injector
+add_library(uinput_inject SHARED uinput_inject.cpp)
+target_link_libraries(uinput_inject android log)
+
+target_include_directories(aimbot PRIVATE
         ${QNN_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include/qnn)
 
 # Link TFLite and QNN libraries
-target_link_libraries(${CMAKE_PROJECT_NAME}
+target_link_libraries(aimbot
         libQnnHtp
         libQnnSystem
         libQnnGpu
