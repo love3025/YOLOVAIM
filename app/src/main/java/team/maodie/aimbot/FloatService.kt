@@ -47,7 +47,53 @@ class FloatService : Service() {
     private var cachedRange = 0f; private var cachedRangePx = 0
 
     private var touchInjector: TouchInjector? = null
+    private var shizukuClient: ShizukuInjectorClient? = null
+    private var uinputInjector: UinputInjector? = null
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
+
+    // Device resolution for uinput (queried from real touchpanel)
+    private var deviceAbsMaxX = 21199
+    private var deviceAbsMaxY = 29999
+
+    private fun queryDeviceResolution(): Pair<Int, Int> {
+        try {
+            val process = Runtime.getRuntime().exec("getevent -p")
+            val reader = process.inputStream.bufferedReader()
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                val l = line!!
+                if (l.contains("touchpanel") && !l.contains("Aimbot")) {
+                    // Found real touchpanel, get ABS_X (0x35) and ABS_Y (0x36) ranges
+                    while (reader.readLine().also { line = it } != null) {
+                        val cur = line!!
+                        if (!cur.contains("ABS")) break
+                        // ABS_X is 0035 in hex, ABS_Y is 0036
+                        if (cur.contains("0035")) {
+                            val maxMatch = Regex("max\\s*(\\d+)").find(cur)
+                            if (maxMatch != null) {
+                                deviceAbsMaxX = maxMatch.groupValues[1].toInt()
+                                Log.d(TAG, "Found ABS_X max=$deviceAbsMaxX from: $cur")
+                            }
+                        }
+                        if (cur.contains("0036")) {
+                            val maxMatch = Regex("max\\s*(\\d+)").find(cur)
+                            if (maxMatch != null) {
+                                deviceAbsMaxY = maxMatch.groupValues[1].toInt()
+                                Log.d(TAG, "Found ABS_Y max=$deviceAbsMaxY from: $cur")
+                            }
+                        }
+                    }
+                    reader.close()
+                    Log.d(TAG, "Detected device ABS: X max=$deviceAbsMaxX, Y max=$deviceAbsMaxY")
+                    return Pair(deviceAbsMaxX, deviceAbsMaxY)
+                }
+            }
+            reader.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "queryDeviceResolution error: ${e.message}")
+        }
+        return Pair(21199, 29999) // fallback
+    }
 
     private var triggerEnabled = false; private var triggerReactionSpeed = 100f
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
@@ -91,10 +137,61 @@ class FloatService : Service() {
 
     private fun initTouchInjector() {
         executor.execute {
-            val injector = TouchInjector()
-            if (injector.init()) { touchInjector = injector; Log.d(TAG, "TouchInjector ready") }
-            else { Log.w(TAG, "TouchInjector unavailable") }
+            // Query real device resolution first
+            val (devW, devH) = queryDeviceResolution()
+
+            // Try Shizuku client first (runs in root helper process with proper uinput access)
+            try {
+                val client = ShizukuInjectorClient(this@FloatService)
+                client.connect(object : ShizukuInjectorClient.InjectorCallback {
+                    override fun onConnected() {
+                        shizukuClient = client
+                        // Call setResolution BEFORE init so C++ globals are set before uinput opens
+                        client.setResolution(screenWidth, screenHeight, devW, devH)
+                        Log.d(TAG, "ShizukuInjectorClient connected, resolution set, calling init...")
+
+                        // Now call init to open uinput
+                        try {
+                            val initOk = client.initRemote()
+                            Log.d(TAG, "RemoteInjector init: " + initOk)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "initRemote error: " + e.message)
+                        }
+                    }
+                    override fun onDisconnected() {
+                        shizukuClient = null
+                        Log.w(TAG, "ShizukuInjectorClient disconnected")
+                    }
+                    override fun onError(msg: String) {
+                        Log.e(TAG, "ShizukuInjectorClient error: $msg, falling back to other methods")
+                        fallbackToUinputOrInline(devW, devH)
+                    }
+                })
+            } catch (e: Exception) {
+                Log.e(TAG, "ShizukuInjectorClient init failed: ${e.message}")
+                fallbackToUinputOrInline(devW, devH)
+            }
         }
+    }
+
+    private fun fallbackToUinputOrInline(devW: Int = 21199, devH: Int = 29999) {
+        // Try UinputInjector next (direct uinput from app process)
+        try {
+            val uinput = UinputInjector.getInstance()
+            if (uinput.init()) {
+                uinputInjector = uinput
+                uinput.setResolution(screenWidth, screenHeight, devW, devH)
+                Log.d(TAG, "UinputInjector ready")
+                return
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "UinputInjector init failed: ${e.message}")
+        }
+
+        // Fallback to inline TouchInjector
+        val injector = TouchInjector()
+        if (injector.init()) { touchInjector = injector; Log.d(TAG, "TouchInjector ready (inline)") }
+        else { Log.w(TAG, "TouchInjector unavailable") }
     }
 
     private fun setupTriggerOverlay() {
@@ -198,7 +295,7 @@ class FloatService : Service() {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             while (inferRunning.get()) {
-                if (++aliveCtr % 30 == 0) { touchInjector?.keepAlive(); Log.d(TAG, "alive trigger=$triggerEnabled injector=${touchInjector?.available} detects=$hasDetects") }
+                if (++aliveCtr % 30 == 0) { touchInjector?.keepAlive(); Log.d(TAG, "alive trigger=$triggerEnabled uinput=${uinputInjector?.isAvailable()} shizuku=${shizukuClient?.isConnected()} detects=$hasDetects") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
                 val image = imageReader?.acquireLatestImage()
@@ -233,7 +330,8 @@ class FloatService : Service() {
                     }
 
                     // detection-based trigger: center in any detection box
-                    if (triggerEnabled && hasDetects && touchInjector?.available == true) {
+                    val triggerAvailable = touchInjector?.available == true || shizukuClient?.isConnected() == true
+                    if (triggerEnabled && hasDetects && triggerAvailable) {
                         val cx = centerX.toInt(); val cy = centerY.toInt()
                         var onTarget = false
                         for (r in lastDetections) {
@@ -248,7 +346,14 @@ class FloatService : Service() {
                                 val rndX = triggerAreaX + (Math.random() * px).toInt()
                                 val rndY = triggerAreaY + (Math.random() * px).toInt()
                                 Log.d(TAG, "trigger fire! tap=($rndX,$rndY)")
-                                touchInjector?.tap(rndX, rndY)
+                                // Prefer uinput > shizuku > inline injector
+                                if (uinputInjector?.isAvailable() == true) {
+                                    uinputInjector?.tap(rndX, rndY)
+                                } else if (shizukuClient?.isConnected() == true) {
+                                    shizukuClient?.tap(rndX, rndY)
+                                } else {
+                                    touchInjector?.tap(rndX, rndY)
+                                }
                             }
                         }
                     }
@@ -268,7 +373,9 @@ class FloatService : Service() {
     private fun buildNotification() = NotificationCompat.Builder(this, CH_ID).setContentTitle("Aimbot").setContentText("运行中").setSmallIcon(android.R.drawable.ic_menu_view).build()
 
     override fun onDestroy() {
-        inferRunning.set(false); executor.shutdown(); touchInjector?.destroy(); mediaProjection?.stop()
+        inferRunning.set(false); executor.shutdown()
+        touchInjector?.destroy(); shizukuClient?.disconnect(); uinputInjector?.destroy()
+        mediaProjection?.stop()
         if (ballAdded) wm.removeView(ballView); if (overlayAdded) wm.removeView(overlayView); if (guiAdded) wm.removeView(guiPanel)
         if (triggerOverlayAdded) { try { wm.removeView(triggerOverlay) } catch (_: Exception) {} }
         super.onDestroy()

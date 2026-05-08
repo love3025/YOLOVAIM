@@ -32,9 +32,12 @@ FloatService.kt                    # Foreground service - owns the UI layer
     ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes)
     ├── GuiPanelView.kt           # MD3 control panel (自瞄/扳机/防闪/模型 tabs)
     ├── TouchInjector.kt          # Touch injection via Shizuku (+ IInputManager reflection)
+    ├── UinputInjector.kt         # Direct uinput from app process (fallback)
+    ├── ShizukuInjectorClient.kt  # AIDL client for RemoteInjectorService
     └── JniCallBack.kt            # JNI bridge (native libaimbot.so)
             └── aimbot.cpp         # TFLite inference with NNAPI delegate
-                    └── TFLite C API
+RemoteInjectorService.java         # Shizuku UserService with uinput access (separate process)
+    └── uinput_inject.cpp         # Native uinput touch injection with 90° rotation
 ```
 
 ### Data Flow
@@ -45,12 +48,25 @@ FloatService.kt                    # Foreground service - owns the UI layer
 4. `FloatService` converts normalized coords to pixels, posts to `OverlayCanvasView`
 5. Detection overlay only — touch injection is NOT auto-triggered, must be called explicitly
 
+### Touch Injection Flow
+
+```
+FloatService
+    ├── ShizukuInjectorClient ──AIDL──> RemoteInjectorService (separate process)
+    │                                      └── uinput_inject.cpp (uinput device)
+    ├── UinputInjector (direct uinput, app process fallback)
+    └── TouchInjector (Shizuku + IInputManager reflection fallback)
+```
+
 ### Key Classes
 
 - **ProjectionHolder**: Static singleton holding MediaProjection result code/data + model list between Activity and Service
 - **FloatService**: Owns all overlay views, the inference executor, and TouchInjector
 - **GuiPanelView**: MD3 control panel with side navigation, Slider/Switch/ScrollView — rebuilt on tab switch
 - **TouchInjector**: Shizuku + IInputManager reflection for touch injection, provides `tap()`, `swipe()`, `aimAt()`
+- **UinputInjector**: Direct uinput access from app process (fallback if Shizuku unavailable)
+- **RemoteInjectorService**: Shizuku UserService running in separate process with uinput access
+- **uinput_inject.cpp**: Native uinput touch injection with 90° coordinate rotation for OPD2404
 - **JniCallBack**: JNI bridge to native `libaimbot.so`, also exposes `setConfidence(threshold)`
 - **models.json**: Dynamic model configuration
 
@@ -134,6 +150,20 @@ Detection threshold: configurable via `JniCallBack.setConfidence(threshold)`, de
 Touch injection is handled by `TouchInjector.kt` via Shizuku + IInputManager reflection.
 The ShizukuBinderWrapper proxies Binder calls to Shizuku's process (shell UID, which has `INJECT_EVENTS` permission).
 
+### Coordinate Mapping
+
+**Device**: OnePlus Pad Pro (OPD2404) - landscape screen, portrait touch panel
+- Screen resolution: 3000x2120 (landscape)
+- Touch device ABS range: X=[0,21199], Y=[0,29999] (portrait)
+- **90° rotation required**: screen Y → device X, screen X → device Y
+
+```
+dev_x = y * device_abs_max_x / screen_height  // screen Y → device X
+dev_y = x * device_abs_max_y / screen_width   // screen X → device Y
+```
+
+This is implemented in `uinput_inject.cpp` for all touch functions (sendDown, sendMove, sendTap).
+
 ### Setup
 
 ```kotlin
@@ -173,8 +203,8 @@ touchInjector?.aimAt(
 ### Detection avoidance
 
 - Events use `SOURCE_TOUCHSCREEN` (identical to real touch at framework level)
-- No `/dev/uinput` virtual devices created (more detectable)
-- Primary risk is MediaProjection (screen capture) and TYPE_APPLICATION_OVERLAY, not injection method
+- Primary injection via uinput virtual device (created in Shizuku helper process)
+- MediaProjection (screen capture) and TYPE_APPLICATION_OVERLAY are more detectable signals
 
 ## Known Issues
 
