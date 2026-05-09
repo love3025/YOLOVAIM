@@ -215,8 +215,8 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobjec
         return JNI_FALSE;
     }
 
-    // 90° rotation: landscape screen (3000x2120) -> portrait device (21199x29999)
-    int dev_x = (y * g_dev_abs_max_x) / g_screen_h;
+    // 90° rotation + Y flip: landscape screen (3000x2120) -> portrait device (21199x29999)
+    int dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
     int dev_y = (x * g_dev_abs_max_y) / g_screen_w;
 
     LOGD("TouchDown raw x=%d y=%d screen=%dx%d device=%dx%d dev=(%d,%d)",
@@ -252,7 +252,7 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendMove(JNIEnv *env, jobjec
         return JNI_FALSE;
     }
 
-    int dev_x = (y * g_dev_abs_max_x) / g_screen_h;
+    int dev_x = ((int)(g_screen_h - y)) * g_dev_abs_max_x / g_screen_h;
     int dev_y = (x * g_dev_abs_max_y) / g_screen_w;
 
     send_mt_event(fd, EV_ABS, ABS_MT_SLOT, pointerId);
@@ -294,8 +294,8 @@ Java_team_maodie_aimbot_UinputInjector_sendTap(JNIEnv *env, jobject thiz, jint x
         return JNI_FALSE;
     }
 
-    // Down - direct mapping: screen -> device
-    int dev_x_down = (y * g_dev_abs_max_x) / g_screen_h;
+    // Down - 90° rotation + Y flip
+    int dev_x_down = ((int)(g_screen_h - y)) * g_dev_abs_max_x / g_screen_h;
     int dev_y_down = (x * g_dev_abs_max_y) / g_screen_w;
     send_mt_event(uinput_fd, EV_ABS, ABS_MT_SLOT, 15);
     send_mt_event(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, 15);
