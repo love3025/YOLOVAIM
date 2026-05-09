@@ -342,10 +342,13 @@ class FloatService : Service() {
                             val cd = triggerReactionSpeed.toInt().coerceIn(10, 500)
                             if (now - lastTriggerMs >= cd) {
                                 lastTriggerMs = now
-                                val px = (triggerTouchRange * resources.displayMetrics.density).toInt()
-                                val rndX = triggerAreaX + (Math.random() * px).toInt()
-                                val rndY = triggerAreaY + (Math.random() * px).toInt()
-                                Log.d(TAG, "trigger fire! tap=($rndX,$rndY)")
+                                val size = dp(triggerTouchRange.coerceAtLeast(30))
+                                val px = size / 2
+                                val centerX = triggerAreaX + size / 2
+                                val centerY = triggerAreaY + size / 2
+                                val rndX = centerX + ((Math.random() - 0.5) * 2 * px).toInt()
+                                val rndY = centerY + ((Math.random() - 0.5) * 2 * px).toInt()
+                                Log.d(TAG, "trigger fire! area=($triggerAreaX,$triggerAreaY) size=$size range=$px tap=($rndX,$rndY)")
                                 // Prefer uinput > shizuku > inline injector
                                 if (uinputInjector?.isAvailable() == true) {
                                     uinputInjector?.tap(rndX, rndY)
