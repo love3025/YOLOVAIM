@@ -34,7 +34,10 @@ struct uinput_abs_setup_manual {
 #define MAX_SLOTS        10
 #define VIRTUAL_SLOT     9
 #define VIRTUAL_TRACKING 1000
-#define TOUCH_DEVICE     "/dev/input/event6"
+
+// Touch device path — set dynamically from Java via setTouchDevicePath().
+// Defaults to /dev/input/event0.
+static char g_touch_device[256] = "/dev/input/event0";
 
 typedef struct {
     int active;
@@ -74,6 +77,69 @@ JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, jclass cls, jint screenW, jint screenH) {
     g_screen_w = screenW;
     g_screen_h = screenH;
+}
+
+// Auto-detect the real multi-touch device by running "getevent -p".
+// Looks for a device with "touchpanel" in its name (excluding "Aimbot" and "pen")
+// that supports multi-touch axes (ABS_MT_SLOT = 0x2f).
+// Falls back to /dev/input/event0 if detection fails.
+static void detect_touch_device() {
+    FILE* fp = popen("/system/bin/getevent -p 2>&1", "r");
+    if (!fp) {
+        LOGE("detect_touch_device: popen failed");
+        return;
+    }
+
+    char line[256];
+    char current_path[256] = "/dev/input/event0";
+    int is_touchpanel = 0;
+    int has_mt = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Track device path from "add device" lines
+        if (strstr(line, "add device") && strstr(line, "/dev/input/event")) {
+            // Starting a new device — commit previous if it was a good match
+            if (is_touchpanel && has_mt) {
+                strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
+                g_touch_device[sizeof(g_touch_device) - 1] = '\0';
+                pclose(fp);
+                LOGD("Detected touch device: %s", g_touch_device);
+                return;
+            }
+            // Reset for next device
+            char* p = strstr(line, "/dev/input/event");
+            if (p) {
+                strncpy(current_path, p, sizeof(current_path) - 1);
+                current_path[sizeof(current_path) - 1] = '\0';
+                char* end = current_path + strlen(current_path) - 1;
+                while (end > current_path && (*end == ' ' || *end == '\n' || *end == '\r')) {
+                    *end-- = '\0';
+                }
+            }
+            is_touchpanel = 0;
+            has_mt = 0;
+        }
+
+        // Check device name: must contain "touchpanel", exclude "Aimbot" and "pen"
+        if (strstr(line, "touchpanel") && !strstr(line, "Aimbot")
+            && !strstr(line, "pen") && !strstr(line, "Pen")) {
+            is_touchpanel = 1;
+        }
+
+        // Check for multi-touch support: ABS_MT_SLOT = 0x2f
+        if (strstr(line, "002f")) {
+            has_mt = 1;
+        }
+    }
+
+    // Check the last device
+    if (is_touchpanel && has_mt) {
+        strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
+        g_touch_device[sizeof(g_touch_device) - 1] = '\0';
+    }
+
+    pclose(fp);
+    LOGD("Touch device: %s", g_touch_device);
 }
 
 static void set_abs_range(int fd, int axis, int min, int max) {
@@ -160,10 +226,9 @@ static void send_frame_locked() {
 // updates real_slots[], and forwards to uinput on every SYN_REPORT.
 // =========================================================================
 static void* getevent_reader(void* arg) {
-    const char* device = TOUCH_DEVICE;
     char cmd[256];
     // Redirect stderr to stdout so we can see getevent errors in our logging
-    snprintf(cmd, sizeof(cmd), "/system/bin/getevent %s 2>&1", device);
+    snprintf(cmd, sizeof(cmd), "/system/bin/getevent %s 2>&1", g_touch_device);
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
@@ -186,7 +251,7 @@ static void* getevent_reader(void* arg) {
         getevent_running = 0;
         return NULL;
     }
-    LOGD("getevent reader started on %s", device);
+    LOGD("getevent reader started on %s", g_touch_device);
 
     // Per-slot accumulators — buffer data until SYN_REPORT, then commit
     // all slots at once to real_slots. This keeps real_slots consistent
@@ -300,6 +365,10 @@ static void* getevent_reader(void* arg) {
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_startGeteventListenerNative(JNIEnv *env, jobject thiz) {
     if (getevent_running) { LOGD("getevent already running"); return; }
+
+    // Auto-detect the real touch device before starting
+    detect_touch_device();
+
     getevent_running = 1;
     if (pthread_create(&getevent_thread, NULL, getevent_reader, NULL) != 0) {
         LOGE("pthread_create failed");
