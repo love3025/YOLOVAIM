@@ -65,7 +65,6 @@ class FloatService : Service() {
                     while (reader.readLine().also { line = it } != null) {
                         val cur = line!!
                         if (!cur.contains("ABS")) break
-                        // ABS_X is 0035 in hex, ABS_Y is 0036
                         if (cur.contains("0035")) {
                             val maxMatch = Regex("max\\s*(\\d+)").find(cur)
                             if (maxMatch != null) {
@@ -145,12 +144,11 @@ class FloatService : Service() {
                     override fun onConnected() {
                         shizukuClient = client
                         client.setResolution(screenWidth, screenHeight, devW, devH)
-                        Log.d(TAG, "ShizukuInjectorClient connected, resolution set, calling init...")
+                        Log.d(TAG, "ShizukuInjectorClient connected, resolution=$devW,$devH, calling init...")
 
                         try {
                             val initOk = client.initRemote()
                             Log.d(TAG, "RemoteInjector init: " + initOk)
-                            // Start getevent listener in native code (runs in Shizuku helper process)
                             client.startGeteventListener()
                         } catch (e: Exception) {
                             Log.e(TAG, "initRemote error: " + e.message)
