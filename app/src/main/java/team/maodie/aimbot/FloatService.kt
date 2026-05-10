@@ -2,6 +2,7 @@ package team.maodie.aimbot
 
 import android.app.*
 import android.content.*
+import android.content.res.Configuration
 import android.graphics.*
 import android.hardware.display.DisplayManager
 import android.media.ImageReader
@@ -48,6 +49,7 @@ class FloatService : Service() {
 
     private var shizukuClient: ShizukuInjectorClient? = null
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
+    private var modelRunning = false
 
     // Device resolution for uinput (queried from real touchpanel)
     private var deviceAbsMaxX = 21199
@@ -143,6 +145,7 @@ class FloatService : Service() {
                 client.connect(object : ShizukuInjectorClient.InjectorCallback {
                     override fun onConnected() {
                         shizukuClient = client
+                        client.setOrientationConfig(screenWidth > screenHeight)
                         client.setResolution(screenWidth, screenHeight, devW, devH)
                         Log.d(TAG, "ShizukuInjectorClient connected, resolution=$devW,$devH, calling init...")
 
@@ -213,13 +216,28 @@ class FloatService : Service() {
     private fun toggleGui() { if (guiVisible) hideGui() else showGui() }
 
     private fun showGui() {
-        if (guiAdded) {
+        if (guiAdded && guiVisible) {
             guiPanel.visibility = View.VISIBLE; guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
             guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start(); guiVisible = true; return
         }
+        if (guiAdded) { try { wm.removeView(guiPanel) } catch (_: Exception) {} }
+        guiAdded = false
         guiPanel = GuiPanelView(this)
+        guiPanel.aimbotEnabled = aimbotOn.get()
+        guiPanel.speed = currentSpeed
+        guiPanel.range = overlayView.rangeRadius.coerceIn(50, 800)
+        guiPanel.confidence = currentConfidence
+        guiPanel.triggerEnabled = triggerEnabled
+        guiPanel.triggerReactionSpeed = triggerReactionSpeed
+        guiPanel.triggerUpFluctuation = triggerUpFluct
+        guiPanel.triggerDownFluctuation = triggerDownFluct
+        guiPanel.triggerTouchDuration = triggerTouchDuration
+        guiPanel.triggerTouchRange = triggerTouchRange
+        guiPanel.triggerShowArea = triggerShowArea
+        guiPanel.modelRunning = modelRunning
+        guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
-        guiParams = makeParams(dp(280), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
+        guiParams = makeParams((280 * resources.displayMetrics.density).toInt(), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
         guiPanel.onClose = { hideGui() }
         guiPanel.onEnabledChanged = { on -> aimbotOn.set(on); overlayView.aimbotEnabled = on; Log.d("AimbotInfer", "开关切换: $on") }
         guiPanel.onSpeedChanged = { currentSpeed = it }
@@ -238,8 +256,25 @@ class FloatService : Service() {
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it }
         guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize() }
         guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility() }
-        guiPanel.onToggleModel = { running -> if (running && !inferRunning.get()) startInferLoop() else if (!running) inferRunning.set(false) }
-        guiPanel.onTestCircle = { drawTestCircle() }
+        guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) inferRunning.set(false) }
+        guiPanel.onTestCircle = {
+            mainHandler.post {
+                Thread {
+                    val cx = screenWidth / 2; val cy = screenHeight / 2
+                    val radius = 200; val steps = 72
+                    shizukuClient?.swipe(cx, cy, cx, cy, 0)
+                    Thread.sleep(50)
+                    for (i in 1 until steps) {
+                        val angle = (i * 360.0 / steps) * Math.PI / 180.0
+                        val x = (cx + radius * Math.cos(angle)).toInt()
+                        val y = (cy + radius * Math.sin(angle)).toInt()
+                        shizukuClient?.moveTo(x, y)
+                        Thread.sleep(20)
+                    }
+                    shizukuClient?.lift()
+                }.start()
+            }
+        }
 
         overlayView.rangeRadius = guiPanel.range; JniCallBack.setConfidence(guiPanel.confidence)
         setupTriggerOverlay()
@@ -343,6 +378,31 @@ class FloatService : Service() {
     private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val ch = NotificationChannel(CH_ID, "Aimbot", NotificationManager.IMPORTANCE_LOW); (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch) } }
     private fun buildNotification() = NotificationCompat.Builder(this, CH_ID).setContentTitle("Aimbot").setContentText("运行中").setSmallIcon(android.R.drawable.ic_menu_view).build()
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        Log.d(TAG, "orientation changed: w=${screenWidth} h=${screenHeight}")
+        shizukuClient?.setResolution(screenWidth, screenHeight, deviceAbsMaxX, deviceAbsMaxY)
+        centerX = screenWidth / 2f; centerY = screenHeight / 2f
+
+        if (triggerOverlayAdded) {
+            val ov = triggerOverlay ?: return
+            val size = dp(triggerTouchRange.coerceAtLeast(30))
+            val p = ov.layoutParams as? WindowManager.LayoutParams ?: return
+            p.width = size; p.height = size
+            p.x = screenWidth / 2 - size / 2; p.y = screenHeight / 2 - size / 2
+            triggerAreaX = p.x; triggerAreaY = p.y
+            wm.updateViewLayout(ov, p)
+        }
+        if (overlayAdded) {
+            val p = overlayView.layoutParams as? WindowManager.LayoutParams ?: return
+            p.width = screenWidth; p.height = screenHeight
+            wm.updateViewLayout(overlayView, p)
+        }
+        if (guiAdded && guiVisible) {
+            wm.removeView(guiPanel); guiAdded = false; showGui()
+        }
+    }
+
     override fun onDestroy() {
         inferRunning.set(false); executor.shutdown()
         shizukuClient?.stopGeteventListener()
@@ -354,20 +414,19 @@ class FloatService : Service() {
     }
 
     private fun drawTestCircle() {
-        executor.execute {
-            val cx = screenWidth / 2; val cy = screenHeight / 2
-            val radius = 200; val steps = 72
-            shizukuClient?.swipe(cx, cy, cx, cy, 0)
-            Thread.sleep(50)
-            for (i in 1 until steps) {
-                val angle = (i * 360.0 / steps) * Math.PI / 180.0
-                val x = (cx + radius * Math.cos(angle)).toInt()
-                val y = (cy + radius * Math.sin(angle)).toInt()
-                shizukuClient?.moveTo(x, y)
-                Thread.sleep(20)
-            }
-            shizukuClient?.lift()
+        val cx = screenWidth / 2; val cy = screenHeight / 2
+        val radius = 200; val steps = 72
+        shizukuClient?.swipe(cx, cy, cx, cy, 0)
+        Thread.sleep(50)
+        for (i in 1 until steps) {
+            val angle = (i * 360.0 / steps) * Math.PI / 180.0
+            val aspect = screenWidth.toFloat() / screenHeight.toFloat()
+                        val x = (cx + radius * aspect * Math.cos(angle)).toInt()
+            val y = (cy + radius * Math.sin(angle)).toInt()
+            shizukuClient?.moveTo(x, y)
+            Thread.sleep(20)
         }
+        shizukuClient?.lift()
     }
 
     override fun onBind(intent: Intent?) = null

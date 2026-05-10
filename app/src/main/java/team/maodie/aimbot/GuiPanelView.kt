@@ -59,9 +59,9 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         buildUI()
     }
 
-    private fun buildUI() {
+    fun buildUI() {
         removeAllViews()
-        val root = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT) }
+        val root = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LayoutParams(MATCH_PARENT, WRAP_CONTENT) }
         addView(root)
         root.addView(buildNavRail())
         root.addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(dp(1), MATCH_PARENT); setBackgroundColor(clOutline) })

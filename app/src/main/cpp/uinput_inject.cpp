@@ -64,6 +64,8 @@ static int g_dev_abs_max_x = 21199;
 static int g_dev_abs_max_y = 29999;
 static int g_screen_w = 2120;
 static int g_screen_h = 3000;
+// 0=landscape启动(需要旋转), 1=portrait启动(不需要旋转)
+static int g_landscape_start = 1;
 
 extern "C" {
 
@@ -75,8 +77,15 @@ Java_team_maodie_aimbot_RemoteInjectorService_setDeviceResolution(JNIEnv *env, j
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, jclass cls, jint screenW, jint screenH) {
+    LOGD("setScreenResolution: screenW=%d screenH=%d (g_landscape_start=%d)", screenW, screenH, g_landscape_start);
     g_screen_w = screenW;
     g_screen_h = screenH;
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_setLandscapeStart(JNIEnv *env, jclass cls, jint isLandscape) {
+    LOGD("setLandscapeStart called with %d (was %d)", isLandscape, g_landscape_start);
+    g_landscape_start = isLandscape;
 }
 
 // Auto-detect the real multi-touch device by running "getevent -p".
@@ -490,8 +499,23 @@ Java_team_maodie_aimbot_RemoteInjectorService_closeUinputNative(JNIEnv *env, job
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobject thiz, jint fd, jint x, jint y, jint pointerId) {
     if (uinput_fd < 0) return JNI_FALSE;
-    int dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
-    int dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+    int dev_x, dev_y;
+    // g_landscape_start=1 means landscape, 0 means portrait
+    // But device is physically portrait, so we need to check screen aspect ratio
+    int screen_is_landscape = (g_screen_w > g_screen_h);
+    LOGD("BRANCH CHECK: g_screen_w=%d g_screen_h=%d screen_is_landscape=%d g_landscape_start=%d",
+         g_screen_w, g_screen_h, screen_is_landscape, g_landscape_start);
+    if (screen_is_landscape) {
+        // Landscape screen -> device portrait: need 90° rotation
+        dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
+        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+        LOGD("LANDSCAPE branch: x=%d y=%d -> dev_x=%d dev_y=%d", x, y, dev_x, dev_y);
+    } else {
+        // Portrait screen -> device portrait: use uniform scale for both axes
+        float scale = (float)g_dev_abs_max_x / g_screen_h;
+        dev_x = (int)(y * scale);
+        dev_y = (int)(x * scale);
+    }
     inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
 }
@@ -499,8 +523,16 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobjec
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_uinputSendMove(JNIEnv *env, jobject thiz, jint fd, jint x, jint y, jint pointerId) {
     if (uinput_fd < 0) return JNI_FALSE;
-    int dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
-    int dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+    int dev_x, dev_y;
+    int screen_is_landscape = (g_screen_w > g_screen_h);
+    if (screen_is_landscape) {
+        dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
+        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+    } else {
+        float scale = (float)g_dev_abs_max_x / g_screen_h;
+        dev_x = (int)(y * scale);
+        dev_y = (int)(x * scale);
+    }
     inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
 }

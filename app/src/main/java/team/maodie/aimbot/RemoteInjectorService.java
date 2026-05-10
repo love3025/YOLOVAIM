@@ -42,6 +42,10 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         setScreenResolution(sw, sh);
     }
 
+    public void setOrientationConfig(boolean landscapeStart) {
+        setLandscapeStart(landscapeStart ? 1 : 0);
+    }
+
     public void startGeteventListener() {
         startGeteventListenerNative();
     }
@@ -306,6 +310,7 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static native void uinputSendUp(int fd, int pointerId);
     private static native void setDeviceResolution(int devW, int devH);
     private static native void setScreenResolution(int screenW, int screenH);
+    private static native void setLandscapeStart(int isLandscape);
     private static native void startGeteventListenerNative();
     private static native void stopGeteventListenerNative();
 

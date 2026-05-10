@@ -169,6 +169,18 @@ public class ShizukuInjectorClient {
         }
     }
 
+    public void setOrientationConfig(boolean landscapeStart) {
+        if (remoteService != null) {
+            try {
+                java.lang.reflect.Method m = remoteService.getClass().getMethod("setOrientationConfig", boolean.class);
+                m.invoke(remoteService, landscapeStart);
+                Log.d(TAG, "setOrientationConfig: landscapeStart=" + landscapeStart);
+            } catch (Exception e) {
+                Log.e(TAG, "setOrientationConfig: " + e.getMessage());
+            }
+        }
+    }
+
     public void startGeteventListener() {
         if (remoteService != null) {
             try {
