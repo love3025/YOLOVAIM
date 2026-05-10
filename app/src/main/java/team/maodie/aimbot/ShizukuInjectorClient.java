@@ -129,6 +129,18 @@ public class ShizukuInjectorClient {
         }
     }
 
+    public void moveTo(int x, int y) {
+        if (remoteService != null) {
+            try { remoteService.moveTo(x, y); } catch (Exception e) { Log.e(TAG, "moveTo: " + e.getMessage()); }
+        }
+    }
+
+    public void lift() {
+        if (remoteService != null) {
+            try { remoteService.lift(); } catch (Exception e) { Log.e(TAG, "lift: " + e.getMessage()); }
+        }
+    }
+
     public void keepAlive() {
         if (remoteService != null) {
             try { remoteService.keepAlive(); } catch (Exception e) { Log.e(TAG, "keepAlive: " + e.getMessage()); }
@@ -153,6 +165,29 @@ public class ShizukuInjectorClient {
                 Log.d(TAG, "setResolution: screen=" + screenW + "x" + screenH + " device=" + devW + "x" + devH);
             } catch (Exception e) {
                 Log.e(TAG, "setResolution: " + e.getMessage());
+            }
+        }
+    }
+
+    public void startGeteventListener() {
+        if (remoteService != null) {
+            try {
+                // Use reflection to call the actual service instance, not the AIDL proxy
+                java.lang.reflect.Method m = remoteService.getClass().getMethod("startGeteventListener");
+                m.invoke(remoteService);
+            } catch (Exception e) {
+                Log.e(TAG, "startGeteventListener: " + e.getMessage());
+            }
+        }
+    }
+
+    public void stopGeteventListener() {
+        if (remoteService != null) {
+            try {
+                java.lang.reflect.Method m = remoteService.getClass().getMethod("stopGeteventListener");
+                m.invoke(remoteService);
+            } catch (Exception e) {
+                Log.e(TAG, "stopGeteventListener: " + e.getMessage());
             }
         }
     }

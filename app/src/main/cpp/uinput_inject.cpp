@@ -1,9 +1,12 @@
 #include <jni.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <pthread.h>
 #include <linux/uinput.h>
 #include <linux/input.h>
-#include <string.h>
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <android/log.h>
@@ -12,12 +15,10 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// uinput_abs_setup for setting ABS axis ranges (kernel 5.14+)
 #ifndef UI_ABS_SETUP
 #define UI_ABS_SETUP _IOW(UINPUT_IOCTL_BASE, 5, struct uinput_abs_setup)
 #endif
 
-// Manually define uinput_abs_setup since Android headers may not have correct field names
 struct uinput_abs_setup_manual {
     __u32 code;
     struct {
@@ -30,90 +31,325 @@ struct uinput_abs_setup_manual {
     } absinfo;
 };
 
+#define MAX_SLOTS        10
+#define VIRTUAL_SLOT     9
+#define VIRTUAL_TRACKING 1000
+#define TOUCH_DEVICE     "/dev/input/event6"
+
+typedef struct {
+    int active;
+    int tracking_id;
+    int x;
+    int y;
+} slot_state_t;
+
 static int uinput_fd = -1;
+static slot_state_t real_slots[MAX_SLOTS];
+static int uinput_slot_active[MAX_SLOTS];
+static pthread_mutex_t uinput_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-extern "C" {
+static volatile int virtual_active = 0;
+static int virtual_x = 0;
+static int virtual_y = 0;
 
-// Force hardcoded correct values for OPD2404 (OnePlus Pad Pro)
+// getevent thread
+static pthread_t getevent_thread;
+static volatile int getevent_running = 0;
+static FILE* getevent_fp = NULL;
+
 static int g_dev_abs_max_x = 21199;
 static int g_dev_abs_max_y = 29999;
 static int g_screen_w = 2120;
 static int g_screen_h = 3000;
 
+extern "C" {
+
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setDeviceResolution(JNIEnv *env, jclass cls, jint devW, jint devH) {
     g_dev_abs_max_x = devW;
     g_dev_abs_max_y = devH;
-    LOGD("setDeviceResolution: device_abs_max=%dx%d", devW, devH);
 }
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, jclass cls, jint screenW, jint screenH) {
     g_screen_w = screenW;
     g_screen_h = screenH;
-    LOGD("setScreenResolution: screen=%dx%d", screenW, screenH);
 }
 
-JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_UinputInjector_1setDeviceResolutionNative(JNIEnv *env, jclass cls, jint devW, jint devH) {
-    g_dev_abs_max_x = devW;
-    g_dev_abs_max_y = devH;
-    LOGD("UinputInjector_setDeviceResolutionNative: device_abs_max=%dx%d", devW, devH);
-}
-
-JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_UinputInjector_1setScreenResolution(JNIEnv *env, jclass cls, jint screenW, jint screenH) {
-    g_screen_w = screenW;
-    g_screen_h = screenH;
-    LOGD("setScreenResolution: screen=%dx%d", screenW, screenH);
-}
-
-static void set_abs_range(int fd, int axis, int min, int max, int fuzz, int flat, int res) {
+static void set_abs_range(int fd, int axis, int min, int max) {
     struct uinput_abs_setup_manual abs_setup;
     memset(&abs_setup, 0, sizeof(abs_setup));
     abs_setup.code = axis;
     abs_setup.absinfo.min = min;
     abs_setup.absinfo.max = max;
-    abs_setup.absinfo.fuzz = fuzz;
-    abs_setup.absinfo.flat = flat;
-    abs_setup.absinfo.res = res;
-    int ret = ioctl(fd, UI_ABS_SETUP, &abs_setup);
-    if (ret < 0) {
-        LOGE("UI_ABS_SETUP for axis %d failed: %s (errno=%d)", axis, strerror(errno), errno);
-    } else {
-        LOGD("UI_ABS_SETUP axis %d range [%d,%d] OK", axis, min, max);
-    }
+    ioctl(fd, UI_ABS_SETUP, &abs_setup);
 }
+
+static inline void ev(int fd, int type, int code, int value) {
+    struct input_event e;
+    memset(&e, 0, sizeof(e));
+    e.type = type;
+    e.code = code;
+    e.value = value;
+    write(fd, &e, sizeof(e));
+}
+
+static inline void sync(int fd) {
+    ev(fd, EV_SYN, SYN_REPORT, 0);
+}
+
+// =========================================================================
+// Send complete frame: physical slots (changed only) + virtual slot.
+// Called with uinput_mutex HELD.
+// =========================================================================
+static void send_frame_locked() {
+    int any_physical = 0;
+
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (i == VIRTUAL_SLOT) continue;
+
+        if (real_slots[i].active) {
+            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
+            ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, real_slots[i].tracking_id);
+            ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, real_slots[i].x);
+            ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, real_slots[i].y);
+            ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
+            ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+            uinput_slot_active[i] = 1;
+            any_physical = 1;
+        } else if (uinput_slot_active[i]) {
+            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
+            ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+            uinput_slot_active[i] = 0;
+        }
+    }
+
+    ev(uinput_fd, EV_ABS, ABS_MT_SLOT, VIRTUAL_SLOT);
+    if (virtual_active) {
+        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, VIRTUAL_TRACKING);
+        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, virtual_x);
+        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, virtual_y);
+        ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
+        ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+    } else {
+        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+    }
+
+    int touch_down = any_physical || virtual_active;
+    ev(uinput_fd, EV_KEY, BTN_TOUCH, touch_down ? 1 : 0);
+    ev(uinput_fd, EV_KEY, BTN_TOOL_FINGER, touch_down ? 1 : 0);
+
+    if (any_physical) {
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            if (i != VIRTUAL_SLOT && real_slots[i].active) {
+                ev(uinput_fd, EV_ABS, ABS_X, real_slots[i].x);
+                ev(uinput_fd, EV_ABS, ABS_Y, real_slots[i].y);
+                break;
+            }
+        }
+    } else if (virtual_active) {
+        ev(uinput_fd, EV_ABS, ABS_X, virtual_x);
+        ev(uinput_fd, EV_ABS, ABS_Y, virtual_y);
+    }
+
+    sync(uinput_fd);
+}
+
+// =========================================================================
+// getevent reader — reads physical events via getevent command,
+// updates real_slots[], and forwards to uinput on every SYN_REPORT.
+// =========================================================================
+static void* getevent_reader(void* arg) {
+    const char* device = TOUCH_DEVICE;
+    char cmd[256];
+    // Redirect stderr to stdout so we can see getevent errors in our logging
+    snprintf(cmd, sizeof(cmd), "/system/bin/getevent %s 2>&1", device);
+
+    FILE* fp = popen(cmd, "r");
+    if (!fp) {
+        LOGE("getevent: popen failed, errno=%d", errno);
+        getevent_running = 0;
+        return NULL;
+    }
+    getevent_fp = fp;
+
+    // Read the first line to check if getevent started successfully.
+    // If getevent fails (e.g. permission denied), the error message
+    // will appear here thanks to 2>&1.
+    char first[256];
+    if (fgets(first, sizeof(first), fp)) {
+        LOGD("getevent first line: %s", first);
+    } else {
+        LOGE("getevent: no output, process may have failed");
+        pclose(fp);
+        getevent_fp = NULL;
+        getevent_running = 0;
+        return NULL;
+    }
+    LOGD("getevent reader started on %s", device);
+
+    // Per-slot accumulators — buffer data until SYN_REPORT, then commit
+    // all slots at once to real_slots. This keeps real_slots consistent
+    // so inject_virtual_touch can safely call send_frame_locked() anytime.
+    int cur_slot = 0;
+    int slot_tid[MAX_SLOTS] = {0};
+    int slot_x[MAX_SLOTS] = {0};
+    int slot_y[MAX_SLOTS] = {0};
+    int slot_has_tid[MAX_SLOTS] = {0};
+    int slot_moved[MAX_SLOTS] = {0};   // received position update this frame
+    char line[256];
+    strncpy(line, first, sizeof(line) - 1);
+    line[sizeof(line) - 1] = '\0';
+    int first_line_processed = 0;
+
+    while (getevent_running) {
+        if (!first_line_processed) {
+            first_line_processed = 1;
+        } else {
+            if (!fgets(line, sizeof(line), fp)) break;
+        }
+
+        char* p = line;
+
+        unsigned int type, code, value;
+        if (sscanf(p, "%x %x %x", &type, &code, &value) != 3) continue;
+
+        switch (type) {
+        case EV_ABS:
+            switch (code) {
+            case ABS_MT_SLOT:
+                cur_slot = (int)value;
+                break;
+            case ABS_MT_TRACKING_ID:
+                if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
+                    slot_tid[cur_slot] = (int)value;
+                    slot_has_tid[cur_slot] = 1;
+                }
+                break;
+            case ABS_MT_POSITION_X:
+                if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
+                    slot_x[cur_slot] = (int)value;
+                    slot_moved[cur_slot] = 1;
+                }
+                break;
+            case ABS_MT_POSITION_Y:
+                if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
+                    slot_y[cur_slot] = (int)value;
+                    slot_moved[cur_slot] = 1;
+                }
+                break;
+            }
+            break;
+
+        case EV_SYN:
+            // SYN_MT_REPORT (code=2): do nothing, just accumulate.
+            // SYN_REPORT (code=0): commit ALL slots at once.
+            // Only send frame when virtual injection is active; otherwise
+            // physical touches go through event6 directly (no duplicates).
+            if (code == 0) {
+                pthread_mutex_lock(&uinput_mutex);
+
+                for (int i = 0; i < MAX_SLOTS; i++) {
+                    if (slot_has_tid[i]) {
+                        int tid = slot_tid[i];
+                        if (tid == -1) {
+                            real_slots[i].active = 0;
+                        } else {
+                            real_slots[i].active = 1;
+                            real_slots[i].tracking_id = tid;
+                            real_slots[i].x = slot_x[i];
+                            real_slots[i].y = slot_y[i];
+                        }
+                        slot_has_tid[i] = 0;
+                        slot_moved[i] = 0;
+                    } else if (slot_moved[i] && real_slots[i].active) {
+                        real_slots[i].x = slot_x[i];
+                        real_slots[i].y = slot_y[i];
+                        slot_moved[i] = 0;
+                    }
+                }
+
+                // Forward if virtual is active, OR if any physical slot is
+                // still active on uinput (needs to be sent its lift event).
+                int need_frame = virtual_active;
+                if (!need_frame) {
+                    for (int i = 0; i < MAX_SLOTS; i++) {
+                        if (uinput_slot_active[i]) { need_frame = 1; break; }
+                    }
+                }
+                if (uinput_fd >= 0 && need_frame) {
+                    send_frame_locked();
+                }
+                pthread_mutex_unlock(&uinput_mutex);
+            }
+            break;
+        }
+    }
+
+    LOGD("getevent reader stopped");
+    pclose(fp);
+    getevent_fp = NULL;
+    getevent_running = 0;
+    return NULL;
+}
+
+// =========================================================================
+// Start / stop forwarder
+// =========================================================================
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_startGeteventListenerNative(JNIEnv *env, jobject thiz) {
+    if (getevent_running) { LOGD("getevent already running"); return; }
+    getevent_running = 1;
+    if (pthread_create(&getevent_thread, NULL, getevent_reader, NULL) != 0) {
+        LOGE("pthread_create failed");
+        getevent_running = 0;
+        return;
+    }
+    LOGD("getevent reader started");
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_stopGeteventListenerNative(JNIEnv *env, jobject thiz) {
+    if (!getevent_running) return;
+    getevent_running = 0;
+    if (getevent_fp) { pclose(getevent_fp); getevent_fp = NULL; }
+    pthread_join(getevent_thread, NULL);
+    LOGD("getevent reader stopped");
+}
+
+// =========================================================================
+// Virtual touch injection — sends a complete frame with physical + virtual.
+// =========================================================================
+static void inject_virtual_touch(int dev_x, int dev_y, int is_down) {
+    if (uinput_fd < 0) return;
+
+    pthread_mutex_lock(&uinput_mutex);
+
+    virtual_x = dev_x;
+    virtual_y = dev_y;
+    virtual_active = is_down;
+
+    send_frame_locked();
+
+    pthread_mutex_unlock(&uinput_mutex);
+}
+
+// =========================================================================
+// Uinput open / close
+// =========================================================================
 
 JNIEXPORT jint JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobject thiz) {
-    if (uinput_fd >= 0) {
-        close(uinput_fd);
-        uinput_fd = -1;
-    }
+    if (uinput_fd >= 0) { close(uinput_fd); uinput_fd = -1; }
 
-    // Try to open /dev/uinput
-    uinput_fd = open("/dev/uinput", O_RDWR | O_NONBLOCK);
-    if (uinput_fd < 0) {
-        LOGE("Failed to open /dev/uinput (O_RDWR): %s", strerror(errno));
-        uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    const char* paths[] = {"/dev/uinput", "/dev/input/uinput", "/dev/misc/uinput"};
+    for (int i = 0; i < 3; i++) {
+        uinput_fd = open(paths[i], O_RDWR | O_NONBLOCK);
+        if (uinput_fd >= 0) break;
     }
-    if (uinput_fd < 0) {
-        LOGE("Failed to open /dev/uinput (O_WRONLY): %s", strerror(errno));
-        uinput_fd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
-    }
-    if (uinput_fd < 0) {
-        LOGE("Failed to open /dev/input/uinput: %s", strerror(errno));
-        uinput_fd = open("/dev/misc/uinput", O_WRONLY | O_NONBLOCK);
-    }
-    if (uinput_fd < 0) {
-        LOGE("Failed to open all uinput paths: %s", strerror(errno));
-        return -1;
-    }
+    if (uinput_fd < 0) { LOGE("Cannot open uinput"); return -1; }
 
-    LOGD("Opened uinput, fd=%d", uinput_fd);
-
-    // Setup the device
     struct uinput_setup usetup;
     memset(&usetup, 0, sizeof(usetup));
     usetup.id.bustype = BUS_VIRTUAL;
@@ -123,23 +359,14 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
     strcpy(usetup.name, "AimbotTouch");
 
     if (ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0) {
-        LOGE("UI_DEV_SETUP failed: %s", strerror(errno));
-        close(uinput_fd);
-        uinput_fd = -1;
-        return -1;
+        LOGE("UI_DEV_SETUP failed"); close(uinput_fd); uinput_fd = -1; return -1;
     }
 
-    LOGD("UI_DEV_SETUP OK");
-
-    // Enable event types
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
     ioctl(uinput_fd, UI_SET_EVBIT, EV_SYN);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT);
     ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
-
-    // Multi-touch ABS bits
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
@@ -148,178 +375,71 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TOOL_TYPE);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
-
-    // Set INPUT_PROP_DIRECT so the system treats this as a direct touch device
     ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
-    LOGD("ABS bits set, g_dev_abs_max_x=%d g_screen_w=%d", g_dev_abs_max_x, g_screen_w);
+    set_abs_range(uinput_fd, ABS_X, 0, g_dev_abs_max_x);
+    set_abs_range(uinput_fd, ABS_Y, 0, g_dev_abs_max_y);
+    set_abs_range(uinput_fd, ABS_MT_POSITION_X, 0, g_dev_abs_max_x);
+    set_abs_range(uinput_fd, ABS_MT_POSITION_Y, 0, g_dev_abs_max_y);
+    set_abs_range(uinput_fd, ABS_MT_SLOT, 0, 9);
+    set_abs_range(uinput_fd, ABS_MT_TRACKING_ID, 0, 65535);
 
-    // Set the actual ABS ranges via UI_ABS_SETUP (kernel 5.14+)
-    set_abs_range(uinput_fd, ABS_X, 0, g_dev_abs_max_x, 0, 0, 0);
-    set_abs_range(uinput_fd, ABS_Y, 0, g_dev_abs_max_y, 0, 0, 0);
-    set_abs_range(uinput_fd, ABS_MT_POSITION_X, 0, g_dev_abs_max_x, 0, 0, 0);
-    set_abs_range(uinput_fd, ABS_MT_POSITION_Y, 0, g_dev_abs_max_y, 0, 0, 0);
-    set_abs_range(uinput_fd, ABS_MT_SLOT, 0, 9, 0, 0, 0);
-    set_abs_range(uinput_fd, ABS_MT_TRACKING_ID, 0, 65535, 0, 0, 0);
-
-    LOGD("ABS ranges set, calling UI_DEV_CREATE");
-
-    // Create device
     if (ioctl(uinput_fd, UI_DEV_CREATE) < 0) {
-        LOGE("UI_DEV_CREATE failed: %s", strerror(errno));
-        close(uinput_fd);
-        uinput_fd = -1;
-        return -1;
+        LOGE("UI_DEV_CREATE failed"); close(uinput_fd); uinput_fd = -1; return -1;
     }
 
-    LOGD("Uinput device created successfully, returning fd=%d", uinput_fd);
+    memset(real_slots, 0, sizeof(real_slots));
+    memset(uinput_slot_active, 0, sizeof(uinput_slot_active));
+    virtual_active = 0;
+    LOGD("Uinput opened fd=%d", uinput_fd);
     return uinput_fd;
 }
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_closeUinputNative(JNIEnv *env, jobject thiz) {
+    if (getevent_running) {
+        getevent_running = 0;
+        if (getevent_fp) { pclose(getevent_fp); getevent_fp = NULL; }
+        pthread_join(getevent_thread, NULL);
+    }
+
     if (uinput_fd >= 0) {
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
         uinput_fd = -1;
-        LOGD("Uinput closed");
     }
+
+    virtual_active = 0;
+    memset(uinput_slot_active, 0, sizeof(uinput_slot_active));
+    LOGD("Uinput closed");
 }
 
-static void send_mt_event(int fd, int type, int code, int value) {
-    struct input_event ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = type;
-    ev.code = code;
-    ev.value = value;
-    ev.time.tv_sec = 0;
-    ev.time.tv_usec = 0;
-    write(fd, &ev, sizeof(ev));
-}
-
-static void send_sync(int fd) {
-    struct input_event ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = EV_SYN;
-    ev.code = SYN_REPORT;
-    ev.value = 0;
-    ev.time.tv_sec = 0;
-    ev.time.tv_usec = 0;
-    write(fd, &ev, sizeof(ev));
-}
+// =========================================================================
+// JNI send functions
+// =========================================================================
 
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobject thiz, jint fd, jint x, jint y, jint pointerId) {
-    if (fd < 0) {
-        LOGE("sendTouchDown: uinput_fd not open");
-        return JNI_FALSE;
-    }
-
-    // 90° rotation + Y flip: landscape screen (3000x2120) -> portrait device (21199x29999)
+    if (uinput_fd < 0) return JNI_FALSE;
     int dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
     int dev_y = (x * g_dev_abs_max_y) / g_screen_w;
-
-    LOGD("TouchDown raw x=%d y=%d screen=%dx%d device=%dx%d dev=(%d,%d)",
-         x, y, g_screen_w, g_screen_h, g_dev_abs_max_x, g_dev_abs_max_y, dev_x, dev_y);
-
-    // ABS_MT_SLOT to set slot first
-    send_mt_event(fd, EV_ABS, ABS_MT_SLOT, pointerId);
-    // ABS_MT_TRACKING_ID to claim slot with this pointer ID
-    send_mt_event(fd, EV_ABS, ABS_MT_TRACKING_ID, pointerId);
-    // ABS_MT_TOOL_TYPE to indicate finger
-    send_mt_event(fd, EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
-    // ABS_MT_PRESSURE
-    send_mt_event(fd, EV_ABS, ABS_MT_PRESSURE, 50);
-    // Position (both device coords and screen coords)
-    send_mt_event(fd, EV_ABS, ABS_X, dev_x);
-    send_mt_event(fd, EV_ABS, ABS_Y, dev_y);
-    send_mt_event(fd, EV_ABS, ABS_MT_POSITION_X, dev_x);
-    send_mt_event(fd, EV_ABS, ABS_MT_POSITION_Y, dev_y);
-    // BTN_TOUCH down
-    send_mt_event(fd, EV_KEY, BTN_TOUCH, 1);
-    send_mt_event(fd, EV_KEY, BTN_TOOL_FINGER, 1);
-    // Sync
-    send_sync(fd);
-
-    LOGD("TouchDown x=%d y=%d id=%d (dev=%d,%d)", x, y, pointerId, dev_x, dev_y);
+    inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_uinputSendMove(JNIEnv *env, jobject thiz, jint fd, jint x, jint y, jint pointerId) {
-    if (fd < 0) {
-        LOGE("sendTouchMove: uinput_fd not open");
-        return JNI_FALSE;
-    }
-
-    int dev_x = ((int)(g_screen_h - y)) * g_dev_abs_max_x / g_screen_h;
+    if (uinput_fd < 0) return JNI_FALSE;
+    int dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
     int dev_y = (x * g_dev_abs_max_y) / g_screen_w;
-
-    send_mt_event(fd, EV_ABS, ABS_MT_SLOT, pointerId);
-    send_mt_event(fd, EV_ABS, ABS_MT_TRACKING_ID, pointerId);
-    send_mt_event(fd, EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
-    send_mt_event(fd, EV_ABS, ABS_MT_PRESSURE, 50);
-    send_mt_event(fd, EV_ABS, ABS_X, dev_x);
-    send_mt_event(fd, EV_ABS, ABS_Y, dev_y);
-    send_mt_event(fd, EV_ABS, ABS_MT_POSITION_X, dev_x);
-    send_mt_event(fd, EV_ABS, ABS_MT_POSITION_Y, dev_y);
-    send_sync(fd);
-
+    inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_uinputSendUp(JNIEnv *env, jobject thiz, jint fd, jint pointerId) {
-    if (fd < 0) {
-        LOGE("sendTouchUp: uinput_fd not open");
-        return JNI_FALSE;
-    }
-
-    // Release tracking ID
-    send_mt_event(fd, EV_ABS, ABS_MT_SLOT, pointerId);
-    send_mt_event(fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
-    send_mt_event(fd, EV_ABS, ABS_MT_PRESSURE, 0);
-    send_mt_event(fd, EV_KEY, BTN_TOUCH, 0);
-    send_mt_event(fd, EV_KEY, BTN_TOOL_FINGER, 0);
-    send_sync(fd);
-
-    LOGD("TouchUp id=%d", pointerId);
-    return JNI_TRUE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_UinputInjector_sendTap(JNIEnv *env, jobject thiz, jint x, jint y) {
-    if (uinput_fd < 0) {
-        LOGE("sendTap: uinput_fd not open");
-        return JNI_FALSE;
-    }
-
-    // Down - 90° rotation + Y flip
-    int dev_x_down = ((int)(g_screen_h - y)) * g_dev_abs_max_x / g_screen_h;
-    int dev_y_down = (x * g_dev_abs_max_y) / g_screen_w;
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_SLOT, 15);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, 15);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, MT_TOOL_FINGER);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
-    send_mt_event(uinput_fd, EV_ABS, ABS_X, dev_x_down);
-    send_mt_event(uinput_fd, EV_ABS, ABS_Y, dev_y_down);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_POSITION_X, dev_x_down);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, dev_y_down);
-    send_mt_event(uinput_fd, EV_KEY, BTN_TOUCH, 1);
-    send_mt_event(uinput_fd, EV_KEY, BTN_TOOL_FINGER, 1);
-    send_sync(uinput_fd);
-
-    usleep(10000); // 10ms
-
-    // Up
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_SLOT, 15);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
-    send_mt_event(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 0);
-    send_mt_event(uinput_fd, EV_KEY, BTN_TOUCH, 0);
-    send_mt_event(uinput_fd, EV_KEY, BTN_TOOL_FINGER, 0);
-    send_sync(uinput_fd);
-
-    LOGD("Tap x=%d y=%d", x, y);
+    if (uinput_fd < 0) return JNI_FALSE;
+    inject_virtual_touch(0, 0, 0);
     return JNI_TRUE;
 }
 
