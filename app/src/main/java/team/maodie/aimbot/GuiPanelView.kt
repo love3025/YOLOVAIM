@@ -29,6 +29,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerTouchDuration: ((Int) -> Unit)? = null
     var onTriggerTouchRange: ((Int) -> Unit)? = null
     var onTriggerShowArea: ((Boolean) -> Unit)? = null
+    var onTestCircle: (() -> Unit)? = null
     var onToggleModel: ((Boolean) -> Unit)? = null
     var onClose: (() -> Unit)? = null
 
@@ -48,7 +49,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     private val clPrimaryLight = Color.argb(24, Color.red(clPrimary), Color.green(clPrimary), Color.blue(clPrimary))
 
     private data class TabDef(val label: String)
-    private val tabs = listOf(TabDef("自瞄"), TabDef("扳机"), TabDef("防闪"), TabDef("模型"))
+    private val tabs = listOf(TabDef("自瞄"), TabDef("扳机"), TabDef("防闪"), TabDef("模型"), TabDef("系统"))
     private var activeTab = 0
     private lateinit var contentContainer: LinearLayout
     private var switching = false
@@ -121,7 +122,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     private fun buildContent() {
         contentContainer.removeAllViews()
-        when (activeTab) { 0 -> buildAimbot(); 1 -> buildTriggerbot(); 3 -> buildModelTab(); else -> buildEmpty("防闪") }
+        when (activeTab) { 0 -> buildAimbot(); 1 -> buildTriggerbot(); 3 -> buildModelTab(); 4 -> buildSystem(); else -> buildEmpty("防闪") }
     }
 
     private fun buildAimbot() {
@@ -183,6 +184,15 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
         contentContainer.addView(buildSlider("阈值", confidence, 0.10f, 0.90f, "%.2f") { confidence = it; onConfidenceChanged?.invoke(it) })
         contentContainer.addView(MaterialTextView(context).apply { text = "低于此值的检测结果将被过滤"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+    }
+
+    private fun buildSystem() {
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "输入测试"; textSize = 13f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onTestCircle?.invoke(); isChecked = false } } })
+        })
+        contentContainer.addView(MaterialTextView(context).apply { text = "在屏幕中心画一个圆"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
     }
 
     private fun buildSlider(label: String, value: Float, min: Float, max: Float, fmt: String, onChange: (Float) -> Unit): LinearLayout {

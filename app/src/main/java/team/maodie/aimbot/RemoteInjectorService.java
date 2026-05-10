@@ -28,6 +28,8 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     public volatile boolean available = false;
     long bgDownTime;
     private int lastTapId = 6;
+    private int drawingPointerId = -1;
+    private boolean pointerDown = false;
 
     public static RemoteInjectorService instance;
 
@@ -36,10 +38,16 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         screen_h = sh;
         dev_abs_max_x = dw;
         dev_abs_max_y = dh;
-        // Call native to update C++ globals - must be called before init()
         setDeviceResolution(dw, dh);
         setScreenResolution(sw, sh);
-        Log.d(TAG, "setResolution: screen=" + screen_w + "x" + screen_h + " device=" + dev_abs_max_x + "x" + dev_abs_max_y);
+    }
+
+    public void startGeteventListener() {
+        startGeteventListenerNative();
+    }
+
+    public void stopGeteventListener() {
+        stopGeteventListenerNative();
     }
 
     private MotionEvent.PointerProperties ptr(int id) {
@@ -76,12 +84,10 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         if (available) return true;
         Log.d(TAG, "init: starting, pid=" + Process.myPid());
 
-        // Try uinput first in the remote process (runs as Shizuku helper, shell UID)
         try {
             uinputFd = openUinputNative();
             Log.d(TAG, "init: openUinputNative returned fd=" + uinputFd);
             if (uinputFd >= 0) {
-                Log.d(TAG, "init: uinput opened successfully, fd=" + uinputFd);
                 bgDownTime = SystemClock.uptimeMillis();
                 available = true;
                 Log.d(TAG, "init: RemoteInjectorService ready with uinput, pid=" + Process.myPid());
@@ -91,7 +97,6 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             Log.e(TAG, "init: uinput exception: " + e.getMessage());
         }
 
-        // Fallback: try InputManager.injectInputEvent
         try {
             Method getInstance = android.hardware.input.InputManager.class.getMethod("getInstance");
             android.hardware.input.InputManager inputMan = (android.hardware.input.InputManager) getInstance.invoke(null);
@@ -126,7 +131,6 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     public void keepAlive() {
         if (!available) return;
         if (uinputFd >= 0) {
-            // Send move event via uinput
             uinputSendMove(uinputFd, 5, 5, BG_ID);
         } else if (inputManager != null && injectMethod != null) {
             try {
@@ -148,12 +152,10 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             lastTapId = tapId;
 
             if (uinputFd >= 0) {
-                // Use uinput for tap
                 uinputSendDown(uinputFd, x, y, tapId);
                 try { Thread.sleep(8); } catch (InterruptedException e) {}
                 uinputSendUp(uinputFd, tapId);
             } else {
-                // Use injectInputEvent
                 int shift = 1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT;
                 MotionEvent down = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_POINTER_DOWN | shift, 2,
                     new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
@@ -181,29 +183,97 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             lastTapId = tapId;
 
             if (uinputFd >= 0) {
-                uinputSendDown(uinputFd, x1, y1, tapId);
-                try { Thread.sleep(durationMs); } catch (InterruptedException e) {}
-                uinputSendMove(uinputFd, x2, y2, tapId);
-                uinputSendUp(uinputFd, tapId);
+                if (!pointerDown && x1 == x2 && y1 == y2) {
+                    drawingPointerId = tapId;
+                    uinputSendDown(uinputFd, x1, y1, drawingPointerId);
+                    pointerDown = true;
+                } else if (pointerDown) {
+                    uinputSendMove(uinputFd, x2, y2, drawingPointerId);
+                } else {
+                    uinputSendDown(uinputFd, x1, y1, tapId);
+                    try { Thread.sleep(durationMs); } catch (InterruptedException e) {}
+                    uinputSendMove(uinputFd, x2, y2, tapId);
+                    uinputSendUp(uinputFd, tapId);
+                }
             } else {
                 int shift = 1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT;
-                MotionEvent down = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_POINTER_DOWN | shift, 2,
-                    new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
-                    new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x1, y1)},
-                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-                MotionEvent move = MotionEvent.obtain(bgDownTime, now + durationMs, MotionEvent.ACTION_MOVE, 2,
-                    new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
-                    new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x2, y2)},
-                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-                MotionEvent up = MotionEvent.obtain(bgDownTime, now + durationMs + 4, MotionEvent.ACTION_POINTER_UP | shift, 2,
-                    new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
-                    new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x2, y2)},
-                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-                injectMethod.invoke(inputManager, down, INJECT_MODE_ASYNC);
-                injectMethod.invoke(inputManager, move, INJECT_MODE_ASYNC);
-                injectMethod.invoke(inputManager, up, INJECT_MODE_ASYNC);
-                down.recycle(); move.recycle(); up.recycle();
+                if (!pointerDown && x1 == x2 && y1 == y2) {
+                    drawingPointerId = tapId;
+                    pointerDown = true;
+                    MotionEvent down = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_POINTER_DOWN | shift, 2,
+                        new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(drawingPointerId)},
+                        new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x1, y1)},
+                        0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                    injectMethod.invoke(inputManager, down, INJECT_MODE_ASYNC);
+                    down.recycle();
+                } else if (pointerDown) {
+                    MotionEvent move = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_MOVE, 2,
+                        new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(drawingPointerId)},
+                        new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x2, y2)},
+                        0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                    injectMethod.invoke(inputManager, move, INJECT_MODE_ASYNC);
+                    move.recycle();
+                } else {
+                    MotionEvent down = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_POINTER_DOWN | shift, 2,
+                        new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
+                        new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x1, y1)},
+                        0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                    MotionEvent move = MotionEvent.obtain(bgDownTime, now + durationMs, MotionEvent.ACTION_MOVE, 2,
+                        new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
+                        new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x2, y2)},
+                        0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                    MotionEvent up = MotionEvent.obtain(bgDownTime, now + durationMs + 4, MotionEvent.ACTION_POINTER_UP | shift, 2,
+                        new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(tapId)},
+                        new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x2, y2)},
+                        0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                    injectMethod.invoke(inputManager, down, INJECT_MODE_ASYNC);
+                    injectMethod.invoke(inputManager, move, INJECT_MODE_ASYNC);
+                    injectMethod.invoke(inputManager, up, INJECT_MODE_ASYNC);
+                    down.recycle(); move.recycle(); up.recycle();
+                }
             }
+        } catch (Exception e) {
+            throw new android.os.RemoteException(e.getMessage());
+        }
+    }
+
+    public void moveTo(int x, int y) throws android.os.RemoteException {
+        if (!available || !pointerDown) return;
+        try {
+            if (uinputFd >= 0) {
+                uinputSendMove(uinputFd, x, y, drawingPointerId);
+            } else {
+                long now = SystemClock.uptimeMillis();
+                int shift = 1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT;
+                MotionEvent move = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_MOVE, 2,
+                    new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(drawingPointerId)},
+                    new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(x, y)},
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                injectMethod.invoke(inputManager, move, INJECT_MODE_ASYNC);
+                move.recycle();
+            }
+        } catch (Exception e) {
+            throw new android.os.RemoteException(e.getMessage());
+        }
+    }
+
+    public void lift() throws android.os.RemoteException {
+        if (!available || !pointerDown) return;
+        try {
+            if (uinputFd >= 0) {
+                uinputSendUp(uinputFd, drawingPointerId);
+            } else {
+                long now = SystemClock.uptimeMillis();
+                int shift = 1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT;
+                MotionEvent up = MotionEvent.obtain(bgDownTime, now + 4, MotionEvent.ACTION_POINTER_UP | shift, 2,
+                    new MotionEvent.PointerProperties[]{ptr(BG_ID), ptr(drawingPointerId)},
+                    new MotionEvent.PointerCoords[]{coord(5f, 5f), coord(5f, 5f)},
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                injectMethod.invoke(inputManager, up, INJECT_MODE_ASYNC);
+                up.recycle();
+            }
+            pointerDown = false;
+            drawingPointerId = -1;
         } catch (Exception e) {
             throw new android.os.RemoteException(e.getMessage());
         }
@@ -229,7 +299,6 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     @Override
     public boolean isAvailable() { return available; }
 
-    // Native methods - these run in the Shizuku helper process (shell UID)
     private static native int openUinputNative();
     private static native void closeUinputNative();
     private static native void uinputSendDown(int fd, int x, int y, int pointerId);
@@ -237,6 +306,8 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static native void uinputSendUp(int fd, int pointerId);
     private static native void setDeviceResolution(int devW, int devH);
     private static native void setScreenResolution(int screenW, int screenH);
+    private static native void startGeteventListenerNative();
+    private static native void stopGeteventListenerNative();
 
     static {
         try {

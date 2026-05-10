@@ -56,9 +56,10 @@ class MainActivity : AppCompatActivity() {
     private val captureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        Log.d("AimbotInfer", "resultCode=${result.resultCode}, data=${result.data}")
+        Log.d("AimbotInfer", "captureLauncher result: resultCode=${result.resultCode}, data=${result.data}, result=${result}")
         val data = result.data
         if (data != null) {
+            Log.d("AimbotInfer", "captureLauncher data not null, starting FloatService")
             ProjectionHolder.resultCode = result.resultCode
             ProjectionHolder.resultData = data
             // 同步模型列表到服务
@@ -67,6 +68,8 @@ class MainActivity : AppCompatActivity() {
             }
             ProjectionHolder.selectedModelIndex = selectedModelIndex
             startForegroundService(Intent(this, FloatService::class.java))
+        } else {
+            Log.d("AimbotInfer", "captureLauncher data is null, not starting service")
         }
     }
 

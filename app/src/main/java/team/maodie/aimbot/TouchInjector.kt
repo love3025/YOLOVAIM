@@ -23,6 +23,7 @@ class TouchInjector {
     private var inputManager: Any? = null
     private var bgDownTime = 0L
     private var lastTapId = 6
+    private var drawingPointerId = -1
 
     @Volatile
     var available: Boolean = false
@@ -99,27 +100,55 @@ class TouchInjector {
         down.recycle(); up.recycle()
     }
 
+    fun moveTo(x: Int, y: Int) {
+        if (!available || drawingPointerId < 0) return
+        val now = SystemClock.uptimeMillis()
+        try {
+            val move = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_MOVE, 2,
+                arrayOf(ptr(BG_ID), ptr(drawingPointerId)), arrayOf(coord(5f, 5f), coord(x.toFloat(), y.toFloat())),
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            injectMethod?.invoke(inputManager, move, INJECT_MODE_ASYNC); move.recycle()
+        } catch (e: Exception) { Log.e(TAG, "moveTo fail: ${e.message}") }
+    }
+
     fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int = 1) {
         if (!available) return
         val now = SystemClock.uptimeMillis()
-        val tapId = { var n: Int; do { n = 7 + (Math.random() * 3).toInt() } while (n == lastTapId); lastTapId = n; n }()
         val shift = 1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT
 
         try {
-            val down = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_POINTER_DOWN or shift, 2,
-                arrayOf(ptr(BG_ID), ptr(tapId)), arrayOf(coord(5f, 5f), coord(x1.toFloat(), y1.toFloat())), 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
-            injectMethod?.invoke(inputManager, down, INJECT_MODE_ASYNC); down.recycle()
+            if (drawingPointerId < 0) {
+                // Start of drawing: DOWN at first point
+                val newId = { var n: Int; do { n = 7 + (Math.random() * 3).toInt() } while (n == lastTapId); lastTapId = n; n }()
+                drawingPointerId = newId
+                val down = MotionEvent.obtain(bgDownTime, now, MotionEvent.ACTION_POINTER_DOWN or shift, 2,
+                    arrayOf(ptr(BG_ID), ptr(drawingPointerId)), arrayOf(coord(5f, 5f), coord(x1.toFloat(), y1.toFloat())),
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+                injectMethod?.invoke(inputManager, down, INJECT_MODE_ASYNC); down.recycle()
+            }
+            // MOVE to end point
             val move = MotionEvent.obtain(bgDownTime, now + durationMs, MotionEvent.ACTION_MOVE, 2,
-                arrayOf(ptr(BG_ID), ptr(tapId)), arrayOf(coord(5f, 5f), coord(x2.toFloat(), y2.toFloat())), 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+                arrayOf(ptr(BG_ID), ptr(drawingPointerId)), arrayOf(coord(5f, 5f), coord(x2.toFloat(), y2.toFloat())),
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
             injectMethod?.invoke(inputManager, move, INJECT_MODE_ASYNC); move.recycle()
-            val up = MotionEvent.obtain(bgDownTime, now + durationMs + 4, MotionEvent.ACTION_POINTER_UP or shift, 2,
-                arrayOf(ptr(BG_ID), ptr(tapId)), arrayOf(coord(5f, 5f), coord(x2.toFloat(), y2.toFloat())), 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
-            injectMethod?.invoke(inputManager, up, INJECT_MODE_ASYNC); up.recycle()
         } catch (e: Exception) { Log.e(TAG, "swipe fail: ${e.message}"); available = false }
     }
 
+    fun lift() {
+        if (!available || drawingPointerId < 0) return
+        val now = SystemClock.uptimeMillis()
+        val shift = 1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT
+        try {
+            val up = MotionEvent.obtain(bgDownTime, now + 4, MotionEvent.ACTION_POINTER_UP or shift, 2,
+                arrayOf(ptr(BG_ID), ptr(drawingPointerId)), arrayOf(coord(5f, 5f), coord(5f, 5f)),
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            injectMethod?.invoke(inputManager, up, INJECT_MODE_ASYNC); up.recycle()
+            drawingPointerId = -1
+        } catch (e: Exception) { Log.e(TAG, "lift fail: ${e.message}") }
+    }
+
     fun destroy() {
-        available = false
+        available = false; drawingPointerId = -1
         try {
             val up = MotionEvent.obtain(bgDownTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, 1,
                 arrayOf(ptr(BG_ID)), arrayOf(coord(5f, 5f)),
