@@ -32,9 +32,16 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTestCircle: (() -> Unit)? = null
     var onToggleModel: ((Boolean) -> Unit)? = null
     var onClose: (() -> Unit)? = null
+    var onAimOffsetXChanged: ((Int) -> Unit)? = null
+    var onAimOffsetYChanged: ((Int) -> Unit)? = null
+    var onAimPidEnabled: ((Boolean) -> Unit)? = null
+    var onAimTouchDisplay: ((Boolean) -> Unit)? = null
+    var onAimTouchSize: ((Int) -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
+    var aimOffsetX = 0; var aimOffsetY = 0; var aimPidEnabled = false
+    var aimTouchDisplay = false; var aimTouchSize = 20
     var triggerEnabled = false; var triggerReactionSpeed = 100f
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
     var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false
@@ -135,6 +142,28 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(buildSlider("速度", speed, 0.05f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(8)))
         contentContainer.addView(buildSlider("范围", range.toFloat(), 50f, 800f, "0px") { range = it.toInt(); onRangeChanged?.invoke(range) })
+        contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
+        // PID 自瞄开关
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "PID追踪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = aimPidEnabled; setOnCheckedChangeListener { _, c -> aimPidEnabled = c; onAimPidEnabled?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(buildSliderInt("X偏移", aimOffsetX, -500, 500, "px") { aimOffsetX = it; onAimOffsetXChanged?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("Y偏移", aimOffsetY, -500, 500, "px") { aimOffsetY = it; onAimOffsetYChanged?.invoke(it) })
+        contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        // Touch display toggle
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "显示触摸地点"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = aimTouchDisplay; setOnCheckedChangeListener { _, c -> aimTouchDisplay = c; onAimTouchDisplay?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(4)))
+        contentContainer.addView(buildSliderInt("触摸大小", aimTouchSize, 5, 80, "px") { aimTouchSize = it; onAimTouchSize?.invoke(it) })
     }
 
     private fun buildTriggerbot() {
