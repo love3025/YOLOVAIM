@@ -12,7 +12,19 @@
       "Bash(G:/Python380/python.exe -c ' *)",
       "Bash(rm -rf \"G:/ai/模型/2026-0505_V1/best_192_saved_model\" \"G:/ai/模型/2026-0505_V1/best_256_saved_model\")",
       "Bash(python -c ' *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(wmic logicaldisk *)",
+      "Bash(powershell *)",
+      "Bash(./gradlew clean *)",
+      "Bash(./gradlew :app:tasks)",
+      "Bash(./gradlew :app:tasks --all)",
+      "Bash(./gradlew installDebug)",
+      "Bash(./gradlew :app:configureCMakeDebug :app:buildCMakeDebug)",
+      "Bash(./gradlew :app:assembleDebug)",
+      "Bash(./gradlew :app:externalNativeBuildDebug)",
+      "Bash(./gradlew assembleDebug installDebug)",
+      "WebFetch(domain:github.com)",
+      "Bash(adb install *)"
     ]
   }
 }
