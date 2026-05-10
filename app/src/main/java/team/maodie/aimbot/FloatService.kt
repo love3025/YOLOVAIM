@@ -51,6 +51,18 @@ class FloatService : Service() {
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
     private var modelRunning = false
 
+    // PID auto-aim state
+    private var aimPidEnabled = false
+    private var aimOffsetX = 0; private var aimOffsetY = 0
+    private var aimPointerDown = false
+    private var lastPidErrorX = 0f; private var lastPidErrorY = 0f
+    private var lastPidTime = 0L
+
+    // Touch display overlay
+    private var touchDisplayEnabled = false
+    private var touchDisplayView: TouchDisplayView? = null
+    private var touchDisplayAdded = false
+
     // Device resolution for uinput (queried from real touchpanel)
     private var deviceAbsMaxX = 21199
     private var deviceAbsMaxY = 29999
@@ -204,6 +216,16 @@ class FloatService : Service() {
         ov.areaSize = size; try { wm.updateViewLayout(ov, p) } catch (_: Exception) {}
     }
 
+    private fun setupTouchDisplayView() {
+        if (touchDisplayAdded) return
+        val defaultSize = dp(20)
+        val size = defaultSize * 4
+        touchDisplayView = TouchDisplayView(this).apply { dotRadius = defaultSize.toFloat(); visible = touchDisplayEnabled }
+        val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+        p.gravity = Gravity.CENTER
+        wm.addView(touchDisplayView, p); touchDisplayAdded = true
+    }
+
     private fun loadModel(filename: String) {
         val modelFile = java.io.File(applicationContext.filesDir, filename)
         try {
@@ -234,6 +256,11 @@ class FloatService : Service() {
         guiPanel.triggerTouchDuration = triggerTouchDuration
         guiPanel.triggerTouchRange = triggerTouchRange
         guiPanel.triggerShowArea = triggerShowArea
+        guiPanel.aimOffsetX = aimOffsetX
+        guiPanel.aimOffsetY = aimOffsetY
+        guiPanel.aimPidEnabled = aimPidEnabled
+        guiPanel.aimTouchDisplay = touchDisplayEnabled
+        guiPanel.aimTouchSize = dp(20)
         guiPanel.modelRunning = modelRunning
         guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
@@ -256,6 +283,28 @@ class FloatService : Service() {
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it }
         guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize() }
         guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility() }
+        guiPanel.onAimOffsetXChanged = { aimOffsetX = it }
+        guiPanel.onAimOffsetYChanged = { aimOffsetY = it }
+        guiPanel.onAimPidEnabled = {
+            enabled -> aimPidEnabled = enabled
+            if (!enabled && aimPointerDown) {
+                shizukuClient?.lift()
+                aimPointerDown = false
+            }
+        }
+        guiPanel.onAimTouchDisplay = { show ->
+            touchDisplayEnabled = show
+            if (show && !touchDisplayAdded) setupTouchDisplayView()
+            touchDisplayView?.visible = show
+        }
+        guiPanel.onAimTouchSize = { px ->
+            val p = dp(px)
+            touchDisplayView?.dotRadius = p.toFloat()
+            if (touchDisplayAdded) {
+                val lp = touchDisplayView?.layoutParams as? WindowManager.LayoutParams
+                if (lp != null) { lp.width = p * 4; lp.height = p * 4; wm.updateViewLayout(touchDisplayView, lp) }
+            }
+        }
         guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) inferRunning.set(false) }
         guiPanel.onTestCircle = {
             mainHandler.post {
@@ -329,6 +378,7 @@ class FloatService : Service() {
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
                         if (aimbotOn.get() && rectCount > 0) {
+                            // Find best target (head-like point, offset by aimOffsetX/Y)
                             var bestDistSq = Float.MAX_VALUE; var bestX = centerX; var bestY = centerY
                             val rangeVal = cachedRange; val cx = centerX; val cy = centerY
                             for (idx in 0 until rectCount) {
@@ -336,6 +386,47 @@ class FloatService : Service() {
                                 val dx = bcx-cx; val dy = bcy-cy; val d = dx*dx+dy*dy
                                 if (d < bestDistSq && d < rangeVal*rangeVal) { bestDistSq = d; bestX = bcx; bestY = bcy }
                             }
+                            val targetX = bestX + aimOffsetX
+                            val targetY = bestY + aimOffsetY
+
+                            if (aimPidEnabled && shizukuClient?.isConnected() == true) {
+                                // PID controller for smooth tracking
+                                val now = System.currentTimeMillis()
+                                val dt = if (lastPidTime > 0) (now - lastPidTime) / 1000f else 0.016f
+                                lastPidTime = now
+
+                                val errorX = targetX - centerX
+                                val errorY = targetY - centerY
+
+                                // PID parameters (tuned for ~30fps)
+                                val kp = 0.15f
+                                val ki = 0.02f
+                                val kd = 0.08f
+
+                                val pidX = kp * errorX + kd * (errorX - lastPidErrorX) / dt.coerceAtLeast(0.001f)
+                                val pidY = kp * errorY + kd * (errorY - lastPidErrorY) / dt.coerceAtLeast(0.001f)
+                                lastPidErrorX = errorX; lastPidErrorY = errorY
+
+                                val moveX = (centerX + pidX * currentSpeed).toInt().coerceIn(0, screenWidth)
+                                val moveY = (centerY + pidY * currentSpeed).toInt().coerceIn(0, screenHeight)
+
+                                if (!aimPointerDown) {
+                                    shizukuClient?.swipe(moveX, moveY, moveX, moveY, 0)
+                                    aimPointerDown = true
+                                } else {
+                                    shizukuClient?.moveTo(moveX, moveY)
+                                }
+
+                                // Update touch display
+                                mainHandler.post {
+                                    touchDisplayView?.apply { touchX = moveX.toFloat(); touchY = moveY.toFloat(); visible = touchDisplayEnabled }
+                                }
+                            }
+                        } else if (aimPidEnabled && aimPointerDown) {
+                            shizukuClient?.lift()
+                            aimPointerDown = false
+                            lastPidErrorX = 0f; lastPidErrorY = 0f; lastPidTime = 0L
+                            mainHandler.post { touchDisplayView?.visible = false }
                         }
                     }
 
@@ -405,11 +496,13 @@ class FloatService : Service() {
 
     override fun onDestroy() {
         inferRunning.set(false); executor.shutdown()
+        if (aimPointerDown) { shizukuClient?.lift(); aimPointerDown = false }
         shizukuClient?.stopGeteventListener()
         shizukuClient?.disconnect()
         mediaProjection?.stop()
         if (ballAdded) wm.removeView(ballView); if (overlayAdded) wm.removeView(overlayView); if (guiAdded) wm.removeView(guiPanel)
         if (triggerOverlayAdded) { try { wm.removeView(triggerOverlay) } catch (_: Exception) {} }
+        if (touchDisplayAdded) { try { wm.removeView(touchDisplayView) } catch (_: Exception) {} }
         super.onDestroy()
     }
 
