@@ -34,13 +34,14 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onClose: (() -> Unit)? = null
     var onAimOffsetXChanged: ((Int) -> Unit)? = null
     var onAimOffsetYChanged: ((Int) -> Unit)? = null
-    var onAimPidEnabled: ((Boolean) -> Unit)? = null
+    var onKiChanged: ((Float) -> Unit)? = null
+    var onKdChanged: ((Float) -> Unit)? = null
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
     var onAimTouchSize: ((Int) -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
-    var aimOffsetX = 0; var aimOffsetY = 0; var aimPidEnabled = false
+    var aimOffsetX = 0; var aimOffsetY = 0
     var aimTouchDisplay = false; var aimTouchSize = 20
     var triggerEnabled = false; var triggerReactionSpeed = 100f
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
@@ -138,23 +139,23 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "自瞄"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = aimbotEnabled; setOnCheckedChangeListener { _, c -> aimbotEnabled = c; onEnabledChanged?.invoke(c) } })
         })
-        contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(10)))
-        contentContainer.addView(buildSlider("速度", speed, 0.05f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
-        contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildSlider("范围", range.toFloat(), 50f, 800f, "0px") { range = it.toInt(); onRangeChanged?.invoke(range) })
-        contentContainer.addView(spacer(dp(8)))
-        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
-        // PID 自瞄开关
-        contentContainer.addView(LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(MaterialTextView(context).apply { text = "PID追踪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
-            addView(MaterialSwitch(context).apply { isChecked = aimPidEnabled; setOnCheckedChangeListener { _, c -> aimPidEnabled = c; onAimPidEnabled?.invoke(c) } })
-        })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
+        contentContainer.addView(spacer(dp(4)))
+        contentContainer.addView(buildSlider("Kp", speed, 0.01f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("Ki", 2, 0, 50, "") { val v = it.toFloat() / 100f; onKiChanged?.invoke(v) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("Kd", 8, 0, 100, "") { val v = it.toFloat() / 100f; onKdChanged?.invoke(v) })
         contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildSliderInt("X偏移", aimOffsetX, -500, 500, "px") { aimOffsetX = it; onAimOffsetXChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSliderInt("Y偏移", aimOffsetY, -500, 500, "px") { aimOffsetY = it; onAimOffsetYChanged?.invoke(it) })
-        contentContainer.addView(spacer(dp(8)))
+        contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         // Touch display toggle
         contentContainer.addView(LinearLayout(context).apply {
