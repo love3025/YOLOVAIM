@@ -108,6 +108,6 @@ class OverlayCanvasView(context: Context) : View(context) {
     /** 外部调用：更新检测结果并重绘 */
     fun updateDetections(rects: List<RectF>) {
         detections = rects
-        postInvalidate()
+        postInvalidateOnAnimation()
     }
 }
