@@ -1,28 +1,20 @@
 {
   "models": [
     {
-      "filename": "yolov8n_float_192.tflite",
-      "displayName": "YOLOv8n 192 (Float32)",
-      "precision": "FLOAT32",
-      "inputSize": 192,
-      "outputSize": 756,
-      "description": "onnx2tf转换"
-    },
-    {
       "filename": "yolov8n_int8_192_calibrated.tflite",
-      "displayName": "YOLOv8n 192 (INT8 NNAPI)",
+      "displayName": "Valorant YOLOv8n 192",
       "precision": "INT8",
       "inputSize": 192,
       "outputSize": 756,
-      "description": "ultralytics+val校准"
+      "description": "无畏契约-黄"
     },
     {
       "filename": "yolov8n_int8_256_calibrated.tflite",
-      "displayName": "YOLOv8n 256 (INT8 NNAPI)",
+      "displayName": "Valorant YOLOv8n 256",
       "precision": "INT8",
       "inputSize": 256,
       "outputSize": 1344,
-      "description": "ultralytics+val校准"
+      "description": "无畏契约-黄"
     }
   ]
 }
