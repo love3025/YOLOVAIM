@@ -16,7 +16,6 @@ endmacro()
 # QNN HTP Libraries (Hexagon DSP/NPU acceleration)
 add_qnn_lib(libQnnHtp)
 add_qnn_lib(libQnnSystem)
-add_qnn_lib(libQnnGpu)
 add_qnn_lib(libQnnTFLiteDelegate)
 
 # TFLite JNI library - use local copy
@@ -39,7 +38,6 @@ target_include_directories(aimbot PRIVATE
 target_link_libraries(aimbot
         libQnnHtp
         libQnnSystem
-        libQnnGpu
         libQnnTFLiteDelegate
         tensorflowlite_jni
         android
