@@ -10,7 +10,6 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <android/log.h>
-#include <sys/select.h>
 
 #define LOG_TAG "UinputInject"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -274,21 +273,8 @@ static void* getevent_reader(void* arg) {
     strncpy(line, first, sizeof(line) - 1);
     line[sizeof(line) - 1] = '\0';
     int first_line_processed = 0;
-    int select_fd = fileno(fp);
 
     while (getevent_running) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(select_fd, &rfds);
-        struct timeval tv = {0, 10000}; // 10ms timeout
-
-        int ret = select(select_fd + 1, &rfds, NULL, NULL, &tv);
-        if (ret <= 0) {
-            // timeout or error, loop to check getevent_running
-            if (ret < 0) break;
-            continue;
-        }
-
         if (!first_line_processed) {
             first_line_processed = 1;
         } else {
@@ -513,15 +499,13 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobjec
     if (uinput_fd < 0) return JNI_FALSE;
     int dev_x, dev_y;
     if (g_landscape_start) {
-        // Landscape screen -> device portrait: 90° rotation
+        // Landscape start: screen (landscape) -> device (portrait) with 90° rotation
         dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
         dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     } else {
-        // Portrait screen -> device portrait: no rotation
-        float scale_x = (float)g_dev_abs_max_x / g_screen_h;
-        float scale_y = (float)g_dev_abs_max_y / g_screen_w;
-        dev_x = (int)(y * scale_x);
-        dev_y = (int)(x * scale_y);
+        // Portrait start: screen matches device orientation, no rotation needed
+        dev_x = (y * g_dev_abs_max_x) / g_screen_h;
+        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     }
     inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
@@ -535,10 +519,8 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendMove(JNIEnv *env, jobjec
         dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
         dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     } else {
-        float scale_x = (float)g_dev_abs_max_x / g_screen_h;
-        float scale_y = (float)g_dev_abs_max_y / g_screen_w;
-        dev_x = (int)(y * scale_x);
-        dev_y = (int)(x * scale_y);
+        dev_x = (y * g_dev_abs_max_x) / g_screen_h;
+        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     }
     inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;

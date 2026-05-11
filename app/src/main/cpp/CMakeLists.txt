@@ -17,15 +17,12 @@ endmacro()
 add_qnn_lib(libQnnHtp)
 add_qnn_lib(libQnnSystem)
 add_qnn_lib(libQnnGpu)
+add_qnn_lib(libQnnTFLiteDelegate)
 
 # TFLite JNI library - use local copy
 add_library(tensorflowlite_jni SHARED IMPORTED)
 set_target_properties(tensorflowlite_jni PROPERTIES
     IMPORTED_LOCATION ${QNN_LIB_DIR}/libtensorflowlite_jni.so)
-
-# NOTE: Stub libraries are loaded at runtime via dlopen(), NOT linked at build time.
-# They depend on libcdsprpc.so which must be pre-loaded first.
-# Stub libraries in cpp/lib/ will be packaged in APK and loaded from app's lib dir.
 
 # Compile aimbot.cpp
 add_library(aimbot SHARED aimbot.cpp)
@@ -43,6 +40,7 @@ target_link_libraries(aimbot
         libQnnHtp
         libQnnSystem
         libQnnGpu
+        libQnnTFLiteDelegate
         tensorflowlite_jni
         android
         log
