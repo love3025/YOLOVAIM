@@ -23,10 +23,6 @@ best_*_saved_model/
 test_float/
 calibration_image_sample_data_20x128x128x3_float32.npy
 
-# Prebuilt native libraries (too large, build locally)
-app/src/main/cpp/lib/
-app/src/main/jniLibs/
-
 # Build output
 app/build/
 
