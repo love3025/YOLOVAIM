@@ -562,6 +562,8 @@ class MainActivity : AppCompatActivity() {
     private fun loadModel(filename: String) {
         val modelFile = File(filesDir, filename)
         try {
+            // Create QNN model cache directory for fast subsequent loads
+            File(cacheDir, "qnn").mkdirs()
             if (!modelFile.exists()) {
                 assets.open(filename).use { input ->
                     FileOutputStream(modelFile).use { output ->

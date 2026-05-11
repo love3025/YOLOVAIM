@@ -1,6 +1,6 @@
 //==============================================================================
-//  TFLite with NNAPI Delegate
-//  Uses Android NNAPI for Hexagon DSP/NPU acceleration
+//  TFLite with Qualcomm QNN HTP Delegate
+//  Uses Hexagon DSP/NPU via QNN SDK for hardware acceleration
 //==============================================================================
 #include <jni.h>
 #include <android/log.h>
@@ -14,11 +14,11 @@
 // TFLite C API
 #include <tensorflow/lite/c/c_api.h>
 #include <tensorflow/lite/c/common.h>
-#include <tensorflow/lite/delegates/nnapi/nnapi_delegate_c_api.h>
+#include <qnn/TFLiteDelegate/QnnTFLiteDelegate.h>
 
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "TFLite_NNAPI", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "TFLite_NNAPI", __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "TFLite_NNAPI", __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "TFLite_QNN", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "TFLite_QNN", __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "TFLite_QNN", __VA_ARGS__)
 
 static inline long long getTimeUs() {
     struct timeval tv;
@@ -31,33 +31,66 @@ static inline long long getTimeUs() {
 //==============================================================================
 static TfLiteModel* g_model = nullptr;
 static TfLiteInterpreter* g_interpreter = nullptr;
-static TfLiteDelegate* g_nnapi_delegate = nullptr;
+static TfLiteDelegate* g_qnn_delegate = nullptr;
 static int g_input_height = 256;
 static int g_input_width = 256;
 static int g_num_outputs = 1344;
 static float g_conf_thresh = 0.25f;
 
 //==============================================================================
-//  Build NNAPI Delegate Options
+//  Build QNN TFLite Delegate Options
 //==============================================================================
-static TfLiteDelegate* buildNnapiDelegate() {
-    LOGD("Building NNAPI delegate...");
+static TfLiteDelegate* buildQnnDelegate() {
+    // Preload vendor DSP RPC libraries required by QNN HTP backend.
+    // These are NOT bundled with the APK — they live in /vendor/lib64 on
+    // Qualcomm devices and are gated by <uses-native-library> in AndroidManifest.
+    static bool preloaded = false;
+    static char g_native_lib_dir[512] = {0};
 
-    // NNAPI delegate options - use this instead of QNN delegate
-    // On Qualcomm devices, NNAPI will use Hexagon DSP/NPU via QNN backend
-    TfLiteNnapiDelegateOptions nnapi_options = TfLiteNnapiDelegateOptionsDefault();
-    // Disable using NNAPI CPU delegate - force hardware acceleration
-    nnapi_options.disallow_nnapi_cpu = 1;
-    nnapi_options.execution_preference = TfLiteNnapiDelegateOptions::kSustainedSpeed;
+    if (!preloaded) {
+        // FastRPC — required on all Qualcomm platforms
+        void* h = dlopen("libcdsprpc.so", RTLD_NOW);
+        if (h) {
+            LOGD("libcdsprpc.so preloaded");
+        } else {
+            LOGW("libcdsprpc.so not available: %s", dlerror());
+        }
 
-    TfLiteDelegate* delegate = TfLiteNnapiDelegateCreate(&nnapi_options);
-    if (!delegate) {
-        LOGE("Failed to create NNAPI delegate");
-        return nullptr;
+        // ADSP RPC — present on some platforms
+        h = dlopen("libadsprpc.so", RTLD_NOW);
+        if (h) {
+            LOGD("libadsprpc.so preloaded");
+        } else {
+            LOGW("libadsprpc.so not available: %s", dlerror());
+        }
+
+        // Resolve native library directory — needed for QNN skel library path
+        Dl_info info;
+        if (dladdr((void*)buildQnnDelegate, &info)) {
+            std::string libPath(info.dli_fname);
+            size_t pos = libPath.find_last_of('/');
+            if (pos != std::string::npos) {
+                std::string dir = libPath.substr(0, pos);
+                strncpy(g_native_lib_dir, dir.c_str(), sizeof(g_native_lib_dir) - 1);
+                LOGD("Native lib dir: %s", g_native_lib_dir);
+            }
+        }
+
+        preloaded = true;
     }
 
-    LOGD("NNAPI delegate created successfully");
-    return delegate;
+    TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
+    qnn_options.backend_type = kHtpBackend;
+    qnn_options.log_level = kLogLevelInfo;
+    qnn_options.skel_library_dir = g_native_lib_dir;
+    // Model cache — first compile is slow (~minutes), subsequent loads are instant.
+    qnn_options.cache_dir = "/data/data/team.maodie.aimbot/cache/qnn";
+    qnn_options.model_token = "yolov8n_int8_v2";
+    qnn_options.htp_options.performance_mode = kHtpSustainedHighPerformance;
+    // Let QNN auto-detect precision from the model (don't force kHtpQuantized)
+    qnn_options.htp_options.optimization_strategy = kHtpOptimizeForPrepare;
+
+    return TfLiteQnnDelegateCreate(&qnn_options);
 }
 
 //==============================================================================
@@ -78,9 +111,9 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         TfLiteModelDelete(g_model);
         g_model = nullptr;
     }
-    if (g_nnapi_delegate) {
-        TfLiteNnapiDelegateDelete(g_nnapi_delegate);
-        g_nnapi_delegate = nullptr;
+    if (g_qnn_delegate) {
+        TfLiteQnnDelegateDelete(g_qnn_delegate);
+        g_qnn_delegate = nullptr;
     }
 
     // Load model
@@ -91,8 +124,6 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         return JNI_FALSE;
     }
 
-    LOGD("Model loaded successfully");
-
     // Build interpreter options
     TfLiteInterpreterOptions* options = TfLiteInterpreterOptionsCreate();
     if (!options) {
@@ -102,16 +133,19 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         return JNI_FALSE;
     }
 
-    // Try NNAPI delegate for hardware acceleration
-    g_nnapi_delegate = buildNnapiDelegate();
-    if (g_nnapi_delegate) {
-        TfLiteInterpreterOptionsAddDelegate(options, g_nnapi_delegate);
-        LOGD("NNAPI delegate added to options");
-    } else {
-        LOGW("NNAPI delegate not available, using CPU fallback");
+    // Add QNN TFLite Delegate
+    g_qnn_delegate = buildQnnDelegate();
+    if (!g_qnn_delegate) {
+        LOGE("QNN TFLite Delegate creation failed — HTP backend unavailable. "
+             "Check that libQnnHtp.so and stub libs are in the APK.");
+        TfLiteInterpreterOptionsDelete(options);
+        TfLiteModelDelete(g_model);
+        g_model = nullptr;
+        env->ReleaseStringUTFChars(model_path, path);
+        return JNI_FALSE;
     }
-
-    // Set number of threads
+    LOGD("QNN delegate created, adding to interpreter options");
+    TfLiteInterpreterOptionsAddDelegate(options, g_qnn_delegate);
     TfLiteInterpreterOptionsSetNumThreads(options, 1);
 
     // Create interpreter
@@ -119,19 +153,25 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     TfLiteInterpreterOptionsDelete(options);
 
     if (!g_interpreter) {
-        LOGE("Failed to create interpreter");
+        LOGE("Failed to create interpreter with QNN delegate. "
+             "The model likely contains ops not supported by QNN HTP. "
+             "Try converting the model to QNN DLC format or check compatibility.");
+        TfLiteQnnDelegateDelete(g_qnn_delegate);
+        g_qnn_delegate = nullptr;
         TfLiteModelDelete(g_model);
+        g_model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
         return JNI_FALSE;
     }
-
-    LOGD("Interpreter created");
 
     // Allocate tensors
     if (TfLiteInterpreterAllocateTensors(g_interpreter) != kTfLiteOk) {
         LOGE("Failed to allocate tensors");
         TfLiteInterpreterDelete(g_interpreter);
+        TfLiteQnnDelegateDelete(g_qnn_delegate);
+        g_qnn_delegate = nullptr;
         TfLiteModelDelete(g_model);
+        g_model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
         return JNI_FALSE;
     }
@@ -143,30 +183,21 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         if (input_tensor) {
             g_input_height = TfLiteTensorDim(input_tensor, 1);
             g_input_width = TfLiteTensorDim(input_tensor, 2);
-            LOGD("Input: %dx%d, Output tensors: %d",
-                 g_input_height, g_input_width,
-                 TfLiteInterpreterGetOutputTensorCount(g_interpreter));
         }
     }
 
-    // Get output tensor info
-    int output_count = TfLiteInterpreterGetOutputTensorCount(g_interpreter);
-    if (output_count > 0) {
-        const TfLiteTensor* output_tensor = TfLiteInterpreterGetOutputTensor(g_interpreter, 0);
-        if (output_tensor) {
-            if (TfLiteTensorNumDims(output_tensor) >= 3) {
-                g_num_outputs = TfLiteTensorDim(output_tensor, 2);
-            }
-            LOGD("Output tensor: [%d, %d, %d]",
-                 TfLiteTensorDim(output_tensor, 0),
-                 TfLiteTensorDim(output_tensor, 1),
-                 TfLiteTensorDim(output_tensor, 2));
-            LOGD("Output type: %d", TfLiteTensorType(output_tensor));
+    // Get output tensor info — num_outputs is the detection count per channel
+    {
+        const TfLiteTensor* out = TfLiteInterpreterGetOutputTensor(g_interpreter, 0);
+        if (out) {
+            int ndim = TfLiteTensorNumDims(out);
+            g_num_outputs = TfLiteTensorDim(out, ndim - 1);  // last dim = detection count
+            LOGD("Input: %dx%d, Output dims: %d, num_outputs: %d",
+                 g_input_width, g_input_height, ndim, g_num_outputs);
         }
     }
 
     LOGD("TFLite + QNN HTP initialized successfully");
-    LOGD("  Input: %dx%d, Outputs: %d", g_input_height, g_input_width, g_num_outputs);
 
     env->ReleaseStringUTFChars(model_path, path);
     return JNI_TRUE;
@@ -481,13 +512,12 @@ Java_team_maodie_aimbot_JniCallBack_release(JNIEnv* /*env*/, jobject /*thiz*/) {
         TfLiteInterpreterDelete(g_interpreter);
         g_interpreter = nullptr;
     }
-    if (g_nnapi_delegate) {
-        TfLiteNnapiDelegateDelete(g_nnapi_delegate);
-        g_nnapi_delegate = nullptr;
+    if (g_qnn_delegate) {
+        TfLiteQnnDelegateDelete(g_qnn_delegate);
+        g_qnn_delegate = nullptr;
     }
     if (g_model) {
         TfLiteModelDelete(g_model);
         g_model = nullptr;
     }
-    LOGD("TFLite + QNN released");
 }

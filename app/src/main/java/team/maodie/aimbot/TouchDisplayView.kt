@@ -2,36 +2,78 @@ package team.maodie.aimbot
 
 import android.content.Context
 import android.graphics.*
+import android.view.MotionEvent
 import android.view.View
 
-/**
- * 显示自瞄PID追踪时的触摸点位置
- * 画一个圆点表示当前追踪目标的触摸位置
- */
 class TouchDisplayView(context: Context) : View(context) {
 
-    var touchX: Float = -1f
-        set(v) { field = v; invalidate() }
-    var touchY: Float = -1f
-        set(v) { field = v; invalidate() }
+    var onPositionChanged: ((left: Int, top: Int) -> Unit)? = null
     var dotRadius: Float = 20f
-        set(v) { field = v; invalidate() }
-    var visible: Boolean = false
-        set(v) { field = v; invalidate() }
+        set(v) { field = v; postInvalidate() }
+    var showDot: Boolean = false
+        set(v) { field = v; postInvalidate() }
 
-    private val paintDot = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FF4444")
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#33FF0000")
         style = Paint.Style.FILL
     }
-    private val paintRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#CCFF4444")
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        textSize = 36f
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+    }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#99FF0000")
         style = Paint.Style.STROKE
         strokeWidth = 3f
     }
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#FF4444")
+        style = Paint.Style.FILL
+    }
+
+    private var downX = 0f
+    private var downY = 0f
+    private var moved = false
 
     override fun onDraw(canvas: Canvas) {
-        if (!visible || touchX < 0 || touchY < 0) return
-        canvas.drawCircle(touchX, touchY, dotRadius, paintDot)
-        canvas.drawCircle(touchX, touchY, dotRadius * 1.5f, paintRing)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        canvas.drawRoundRect(0f, 0f, w, h, 12f, 12f, fillPaint)
+        canvas.drawRoundRect(0f, 0f, w, h, 12f, 12f, borderPaint)
+        canvas.drawText("触摸点", w / 2f, h / 2f + 10f, textPaint)
+        if (showDot && touchX >= 0 && touchY >= 0) {
+            canvas.drawCircle(touchX, touchY, dotRadius, dotPaint)
+        }
+    }
+
+    var touchX: Float = -1f
+        set(v) { field = v; postInvalidate() }
+    var touchY: Float = -1f
+        set(v) { field = v; postInvalidate() }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.rawX; downY = event.rawY; moved = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = (event.rawX - downX).toInt()
+                val dy = (event.rawY - downY).toInt()
+                if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                    moved = true
+                    val lp = layoutParams as? android.view.WindowManager.LayoutParams
+                    if (lp != null) {
+                        lp.x += dx; lp.y += dy
+                        val wm = context.getSystemService(Context.WINDOW_SERVICE) as? android.view.WindowManager
+                        wm?.updateViewLayout(this, lp)
+                        onPositionChanged?.invoke(lp.x, lp.y)
+                    }
+                    downX = event.rawX; downY = event.rawY
+                }
+            }
+        }
+        return true
     }
 }

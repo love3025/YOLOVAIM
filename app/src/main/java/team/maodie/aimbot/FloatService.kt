@@ -220,7 +220,7 @@ class FloatService : Service() {
         if (touchDisplayAdded) return
         val defaultDot = dp(20)
         val size = defaultDot * 2
-        touchDisplayView = TouchDisplayView(this).apply { dotRadius = defaultDot.toFloat(); visible = false }
+        touchDisplayView = TouchDisplayView(this).apply { dotRadius = defaultDot.toFloat(); showDot = false }
         val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
         p.gravity = Gravity.CENTER
         p.x = (screenWidth - size) / 2; p.y = (screenHeight - size) / 2
@@ -289,7 +289,7 @@ class FloatService : Service() {
         guiPanel.onKdChanged = { kd = it }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
-            touchDisplayView?.visible = show
+            touchDisplayView?.showDot = show
         }
         guiPanel.onAimTouchSize = { px ->
             val p = dp(px)
@@ -384,40 +384,7 @@ class FloatService : Service() {
                             val targetX = bestX + aimOffsetX
                             val targetY = bestY + aimOffsetY
 
-                            if (aimbotOn.get() && shizukuClient?.isConnected() == true) {
-                                // PID controller for smooth tracking
-                                val now = System.currentTimeMillis()
-                                val dt = if (lastPidTime > 0) (now - lastPidTime) / 1000f else 0.016f
-                                lastPidTime = now
-
-                                val errorX = targetX - centerX
-                                val errorY = targetY - centerY
-
-                                val pidX = kp * errorX + kd * (errorX - lastPidErrorX) / dt.coerceAtLeast(0.001f)
-                                val pidY = kp * errorY + kd * (errorY - lastPidErrorY) / dt.coerceAtLeast(0.001f)
-                                lastPidErrorX = errorX; lastPidErrorY = errorY
-
-                                val moveX = (centerX + pidX).toInt().coerceIn(0, screenWidth)
-                                val moveY = (centerY + pidY).toInt().coerceIn(0, screenHeight)
-
-                                if (!aimPointerDown) {
-                                    shizukuClient?.swipe(moveX, moveY, moveX, moveY, 0)
-                                    aimPointerDown = true
-                                } else {
-                                    shizukuClient?.moveTo(moveX, moveY)
-                                }
-
-                                // Update touch display
-                                mainHandler.post {
-                                    touchDisplayView?.apply { touchX = moveX.toFloat(); touchY = moveY.toFloat(); visible = touchDisplayEnabled }
-                                }
                             }
-                        } else if (aimPointerDown) {
-                            shizukuClient?.lift()
-                            aimPointerDown = false
-                            lastPidErrorX = 0f; lastPidErrorY = 0f; lastPidTime = 0L
-                            mainHandler.post { touchDisplayView?.visible = false }
-                        }
                     }
 
                     // detection-based trigger: center in any detection box
@@ -486,7 +453,6 @@ class FloatService : Service() {
 
     override fun onDestroy() {
         inferRunning.set(false); executor.shutdown()
-        if (aimPointerDown) { shizukuClient?.lift(); aimPointerDown = false }
         shizukuClient?.stopGeteventListener()
         shizukuClient?.disconnect()
         mediaProjection?.stop()
