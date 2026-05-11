@@ -42,8 +42,6 @@ static float g_conf_thresh = 0.25f;
 //==============================================================================
 static TfLiteDelegate* buildQnnDelegate() {
     // Preload vendor DSP RPC libraries required by QNN HTP backend.
-    // These are NOT bundled with the APK — they live in /vendor/lib64 on
-    // Qualcomm devices and are gated by <uses-native-library> in AndroidManifest.
     static bool preloaded = false;
     static char g_native_lib_dir[512] = {0};
 
@@ -81,14 +79,9 @@ static TfLiteDelegate* buildQnnDelegate() {
 
     TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
     qnn_options.backend_type = kHtpBackend;
-    qnn_options.log_level = kLogLevelInfo;
     qnn_options.skel_library_dir = g_native_lib_dir;
-    // Model cache — first compile is slow (~minutes), subsequent loads are instant.
     qnn_options.cache_dir = "/data/data/team.maodie.aimbot/cache/qnn";
-    qnn_options.model_token = "yolov8n_int8_v2";
-    qnn_options.htp_options.performance_mode = kHtpSustainedHighPerformance;
-    // Let QNN auto-detect precision from the model (don't force kHtpQuantized)
-    qnn_options.htp_options.optimization_strategy = kHtpOptimizeForPrepare;
+    qnn_options.model_token = "yolov8n_htp_v1";
 
     return TfLiteQnnDelegateCreate(&qnn_options);
 }
@@ -100,7 +93,7 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring model_path) {
     const char* path = env->GetStringUTFChars(model_path, nullptr);
-    LOGD("init called with path: %s", path);
+    LOGD("init: model_path = %s", path);
 
     // Release existing resources
     if (g_interpreter) {
@@ -129,6 +122,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     if (!options) {
         LOGE("Failed to create interpreter options");
         TfLiteModelDelete(g_model);
+        g_model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
         return JNI_FALSE;
     }
@@ -136,15 +130,14 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     // Add QNN TFLite Delegate
     g_qnn_delegate = buildQnnDelegate();
     if (!g_qnn_delegate) {
-        LOGE("QNN TFLite Delegate creation failed — HTP backend unavailable. "
-             "Check that libQnnHtp.so and stub libs are in the APK.");
+        LOGE("QNN TFLite Delegate creation failed — HTP backend unavailable.");
         TfLiteInterpreterOptionsDelete(options);
         TfLiteModelDelete(g_model);
         g_model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
         return JNI_FALSE;
     }
-    LOGD("QNN delegate created, adding to interpreter options");
+    LOGD("QNN delegate created, adding to options");
     TfLiteInterpreterOptionsAddDelegate(options, g_qnn_delegate);
     TfLiteInterpreterOptionsSetNumThreads(options, 1);
 
@@ -153,9 +146,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     TfLiteInterpreterOptionsDelete(options);
 
     if (!g_interpreter) {
-        LOGE("Failed to create interpreter with QNN delegate. "
-             "The model likely contains ops not supported by QNN HTP. "
-             "Try converting the model to QNN DLC format or check compatibility.");
+        LOGE("Failed to create interpreter with QNN delegate.");
         TfLiteQnnDelegateDelete(g_qnn_delegate);
         g_qnn_delegate = nullptr;
         TfLiteModelDelete(g_model);
@@ -168,6 +159,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     if (TfLiteInterpreterAllocateTensors(g_interpreter) != kTfLiteOk) {
         LOGE("Failed to allocate tensors");
         TfLiteInterpreterDelete(g_interpreter);
+        g_interpreter = nullptr;
         TfLiteQnnDelegateDelete(g_qnn_delegate);
         g_qnn_delegate = nullptr;
         TfLiteModelDelete(g_model);
@@ -191,7 +183,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         const TfLiteTensor* out = TfLiteInterpreterGetOutputTensor(g_interpreter, 0);
         if (out) {
             int ndim = TfLiteTensorNumDims(out);
-            g_num_outputs = TfLiteTensorDim(out, ndim - 1);  // last dim = detection count
+            g_num_outputs = TfLiteTensorDim(out, ndim - 1);
             LOGD("Input: %dx%d, Output dims: %d, num_outputs: %d",
                  g_input_width, g_input_height, ndim, g_num_outputs);
         }

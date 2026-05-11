@@ -562,8 +562,12 @@ class MainActivity : AppCompatActivity() {
     private fun loadModel(filename: String) {
         val modelFile = File(filesDir, filename)
         try {
-            // Create QNN model cache directory for fast subsequent loads
-            File(cacheDir, "qnn").mkdirs()
+            // Clear old QNN cache to avoid corrupted cache blocking load
+            val qnnCache = File(cacheDir, "qnn")
+            if (qnnCache.exists()) {
+                qnnCache.deleteRecursively()
+            }
+            qnnCache.mkdirs()
             if (!modelFile.exists()) {
                 assets.open(filename).use { input ->
                     FileOutputStream(modelFile).use { output ->
@@ -591,6 +595,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
+            val qnnCache = File(cacheDir, "qnn")
+            if (qnnCache.exists()) {
+                qnnCache.deleteRecursively()
+            }
+            qnnCache.mkdirs()
             val defaultModel = modelList[0]
             val modelFile = File(filesDir, defaultModel.filename)
             if (!modelFile.exists()) {
@@ -600,8 +609,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            JniCallBack.init(modelFile.absolutePath)
-            Log.d("Aimbot_AI", "默认模型加载成功: ${defaultModel.filename}")
+            val ok = JniCallBack.init(modelFile.absolutePath)
+            if (ok) {
+                Log.d("Aimbot_AI", "默认模型加载成功: ${defaultModel.filename}")
+            } else {
+                Log.e("Aimbot_AI", "默认模型加载失败: ${defaultModel.filename}")
+            }
         } catch (e: Exception) {
             Log.e("Aimbot_AI", "默认模型加载异常: ${e.message}", e)
         }
