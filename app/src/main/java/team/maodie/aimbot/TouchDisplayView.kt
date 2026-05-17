@@ -28,10 +28,6 @@ class TouchDisplayView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeWidth = 3f
     }
-    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FF4444")
-        style = Paint.Style.FILL
-    }
 
     private var downX = 0f
     private var downY = 0f
@@ -43,15 +39,7 @@ class TouchDisplayView(context: Context) : View(context) {
         canvas.drawRoundRect(0f, 0f, w, h, 12f, 12f, fillPaint)
         canvas.drawRoundRect(0f, 0f, w, h, 12f, 12f, borderPaint)
         canvas.drawText("触摸点", w / 2f, h / 2f + 10f, textPaint)
-        if (showDot && touchX >= 0 && touchY >= 0) {
-            canvas.drawCircle(touchX, touchY, dotRadius, dotPaint)
-        }
     }
-
-    var touchX: Float = -1f
-        set(v) { field = v; postInvalidate() }
-    var touchY: Float = -1f
-        set(v) { field = v; postInvalidate() }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.action) {

@@ -23,7 +23,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onConfidenceChanged: ((Float) -> Unit)? = null
     var onModelSelected: ((Int) -> Unit)? = null
     var onTriggerEnabled: ((Boolean) -> Unit)? = null
-    var onTriggerReactionSpeed: ((Float) -> Unit)? = null
+    var onTriggerReactionSpeed: ((Int) -> Unit)? = null
+    var onTriggerCooldown: ((Int) -> Unit)? = null
     var onTriggerUpFluctuation: ((Int) -> Unit)? = null
     var onTriggerDownFluctuation: ((Int) -> Unit)? = null
     var onTriggerTouchDuration: ((Int) -> Unit)? = null
@@ -34,16 +35,23 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onClose: (() -> Unit)? = null
     var onAimOffsetXChanged: ((Int) -> Unit)? = null
     var onAimOffsetYChanged: ((Int) -> Unit)? = null
+    var onAimDepthChanged: ((Float) -> Unit)? = null
     var onKiChanged: ((Float) -> Unit)? = null
     var onKdChanged: ((Float) -> Unit)? = null
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
     var onAimTouchSize: ((Int) -> Unit)? = null
+    var onCaptureRangeEnabled: ((Boolean) -> Unit)? = null
+    var onShowCaptureRangeChanged: ((Boolean) -> Unit)? = null
+    var onShowDetectionBoxChanged: ((Boolean) -> Unit)? = null
+    var onShowCenterDotChanged: ((Boolean) -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
-    var aimOffsetX = 0; var aimOffsetY = 0
+    var aimOffsetX = 0; var aimOffsetY = 0; var aimDepth = 0.20f
+    var ki = 0.02f; var kd = 0.08f
     var aimTouchDisplay = false; var aimTouchSize = 20
-    var triggerEnabled = false; var triggerReactionSpeed = 100f
+    var showCaptureRange = false; var showDetectionBox = false; var showCenterDot = false
+    var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
     var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false
     var modelRunning = false
@@ -140,16 +148,15 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = aimbotEnabled; setOnCheckedChangeListener { _, c -> aimbotEnabled = c; onEnabledChanged?.invoke(c) } })
         })
         contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(buildSlider("范围", range.toFloat(), 50f, 800f, "0px") { range = it.toInt(); onRangeChanged?.invoke(range) })
-        contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
         contentContainer.addView(spacer(dp(4)))
         contentContainer.addView(buildSlider("Kp", speed, 0.01f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("Ki", 2, 0, 50, "") { val v = it.toFloat() / 100f; onKiChanged?.invoke(v) })
+        contentContainer.addView(buildSlider("框内深度", aimDepth, 0.0f, 1.0f, "%.0f%%") { aimDepth = it; onAimDepthChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("Kd", 8, 0, 100, "") { val v = it.toFloat() / 100f; onKdChanged?.invoke(v) })
+        contentContainer.addView(buildSliderInt("Ki", (ki * 100).toInt(), 0, 100, "") { val v = it.toFloat() / 100f; ki = v; onKiChanged?.invoke(v) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("Kd", (kd * 100).toInt(), 0, 100, "") { val v = it.toFloat() / 100f; kd = v; onKdChanged?.invoke(v) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildSliderInt("X偏移", aimOffsetX, -500, 500, "px") { aimOffsetX = it; onAimOffsetXChanged?.invoke(it) })
@@ -180,7 +187,9 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = triggerShowArea; setOnCheckedChangeListener { _, c -> triggerShowArea = c; onTriggerShowArea?.invoke(c) } })
         })
         contentContainer.addView(spacer(dp(6))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(buildSliderInt("反应速度", triggerReactionSpeed.toInt(), 10, 500, "ms") { triggerReactionSpeed = it.toFloat(); onTriggerReactionSpeed?.invoke(it.toFloat()) })
+        contentContainer.addView(buildSliderInt("反应速度", triggerReactionSpeed, 10, 500, "ms") { triggerReactionSpeed = it; onTriggerReactionSpeed?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("冷却时间", triggerCooldown, 10, 1000, "ms") { triggerCooldown = it; onTriggerCooldown?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSliderInt("向上波动", triggerUpFluctuation, 0, 15, "ms") { triggerUpFluctuation = it; onTriggerUpFluctuation?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
@@ -219,7 +228,27 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     private fun buildSystem() {
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(MaterialTextView(context).apply { text = "输入测试"; textSize = 13f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialTextView(context).apply { text = "显示截取范围"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = showCaptureRange; setOnCheckedChangeListener { _, c -> showCaptureRange = c; onShowCaptureRangeChanged?.invoke(c) } })
+        })
+        contentContainer.addView(buildSliderInt("截取范围", range, 50, 800, "px") { range = it; onRangeChanged?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "显示检测框"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = showDetectionBox; setOnCheckedChangeListener { _, c -> showDetectionBox = c; onShowDetectionBoxChanged?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "显示中心点"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = showCenterDot; setOnCheckedChangeListener { _, c -> showCenterDot = c; onShowCenterDotChanged?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "输入测试"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onTestCircle?.invoke(); isChecked = false } } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "在屏幕中心画一个圆"; textSize = 10f; setTextColor(clOnSurfaceVariant) })

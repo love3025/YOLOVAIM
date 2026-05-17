@@ -15,6 +15,9 @@ class OverlayCanvasView(context: Context) : View(context) {
     var rangeRadius: Int = 300
     var detections: List<RectF> = emptyList()   // 归一化坐标已转成像素
     var aimbotEnabled: Boolean = false
+    var showCaptureRange: Boolean = false
+    var showDetectionBox: Boolean = false
+    var showCenterDot: Boolean = false
 
     // ── 预计算的绘制数据 ──────────────────────
     private val paintCorner = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -46,40 +49,32 @@ class OverlayCanvasView(context: Context) : View(context) {
     private var lastRange = 0
 
     override fun onDraw(canvas: Canvas) {
-        if (!aimbotEnabled) return
-
-        // 缓存检测结果避免每次重绘都触发列表创建
         val dets = detections
-        if (dets.isEmpty()) {
-            // 只画四角框
+
+        // ── 截取范围 ────────────────────────────
+        if (showCaptureRange) {
             val cx = width / 2f
             val cy = height / 2f
             val half = rangeRadius.toFloat()
             drawCornerBox(canvas, cx - half, cy - half, cx + half, cy + half)
-            canvas.drawCircle(cx, cy, 4f, paintCenter)
-            return
+            if (showCenterDot) canvas.drawCircle(cx, cy, 4f, paintCenter)
         }
 
-        val cx = width / 2f
-        val cy = height / 2f
-        val half = rangeRadius.toFloat()
-        val rangeSq = (rangeRadius * rangeRadius).toFloat()
+        // ── 检测框 ──────────────────────────────
+        if (showDetectionBox && dets.isNotEmpty()) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val half = rangeRadius.toFloat()
+            val rangeSq = (rangeRadius * rangeRadius).toFloat()
 
-        // ── 绘制四角框 ────────────────────────────
-        drawCornerBox(canvas, cx - half, cy - half, cx + half, cy + half)
-
-        // ── 中心小点 ─────────────────────────────
-        canvas.drawCircle(cx, cy, 4f, paintCenter)
-
-        // ── 绘制所有检测框（优化版） ─────────────────
-        for (rect in dets) {
-            val boxCx = (rect.left + rect.right) * 0.5f
-            val boxCy = (rect.top + rect.bottom) * 0.5f
-            val dx = boxCx - cx
-            val dy = boxCy - cy
-            // 用平方比较避免开方
-            val paint = if (dx * dx + dy * dy <= rangeSq) paintBoxIn else paintBoxOut
-            canvas.drawRect(rect, paint)
+            for (rect in dets) {
+                val boxCx = (rect.left + rect.right) * 0.5f
+                val boxCy = (rect.top + rect.bottom) * 0.5f
+                val dx = boxCx - cx
+                val dy = boxCy - cy
+                val paint = if (dx * dx + dy * dy <= rangeSq) paintBoxIn else paintBoxOut
+                canvas.drawRect(rect, paint)
+            }
         }
     }
 
