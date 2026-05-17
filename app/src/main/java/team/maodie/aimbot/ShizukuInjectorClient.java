@@ -204,6 +204,28 @@ public class ShizukuInjectorClient {
         }
     }
 
+    public void blockPhysicalTouch() {
+        if (remoteService != null) {
+            try {
+                remoteService.blockPhysicalTouch();
+                Log.d(TAG, "blockPhysicalTouch called");
+            } catch (Exception e) {
+                Log.e(TAG, "blockPhysicalTouch: " + e.getMessage());
+            }
+        }
+    }
+
+    public void unblockPhysicalTouch() {
+        if (remoteService != null) {
+            try {
+                remoteService.unblockPhysicalTouch();
+                Log.d(TAG, "unblockPhysicalTouch called");
+            } catch (Exception e) {
+                Log.e(TAG, "unblockPhysicalTouch: " + e.getMessage());
+            }
+        }
+    }
+
     public void destroyRemote() {
         if (remoteService != null) {
             try {

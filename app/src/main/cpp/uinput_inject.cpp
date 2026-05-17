@@ -35,8 +35,6 @@ struct uinput_abs_setup_manual {
 #define VIRTUAL_SLOT     9
 #define VIRTUAL_TRACKING 1000
 
-// Touch device path — set dynamically from Java via setTouchDevicePath().
-// Defaults to /dev/input/event0.
 static char g_touch_device[256] = "/dev/input/event0";
 
 typedef struct {
@@ -46,13 +44,17 @@ typedef struct {
     int y;
 } slot_state_t;
 
-// 物理设备的参数，从 getevent -p 解析
-// 只存 min/max，ABS/KEY 字段硬编码
 typedef struct {
     int abs_x_min, abs_x_max;
     int abs_y_min, abs_y_max;
     int abs_mt_x_min, abs_mt_x_max;
     int abs_mt_y_min, abs_mt_y_max;
+    int slot_min, slot_max;
+    int tracking_min, tracking_max;
+    int abs_0021_min, abs_0021_max;
+    int abs_0030_min, abs_0030_max;
+    int num_keys;
+    int keys[16];
 } physical_abs_params_t;
 
 static physical_abs_params_t g_physical_params = {0};
@@ -66,16 +68,15 @@ static volatile int virtual_active = 0;
 static int virtual_x = 0;
 static int virtual_y = 0;
 
-// getevent thread
-static pthread_t getevent_thread;
-static volatile int getevent_running = 0;
-static FILE* getevent_fp = NULL;
+// Direct fd reader state
+static pthread_t reader_thread;
+static volatile int reader_running = 0;
+static int grab_fd = -1;  // fd from opening physical device + EVIOCGRAB
 
 static int g_dev_abs_max_x = 21199;
 static int g_dev_abs_max_y = 29999;
 static int g_screen_w = 2120;
 static int g_screen_h = 3000;
-// 0=landscape启动(需要旋转), 1=portrait启动(不需要旋转)
 static int g_landscape_start = 1;
 
 extern "C" {
@@ -92,7 +93,6 @@ Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, j
     g_screen_h = screenH;
 }
 
-// Forward declaration
 static void parse_physical_abs_params();
 
 JNIEXPORT void JNICALL
@@ -100,16 +100,9 @@ Java_team_maodie_aimbot_RemoteInjectorService_setLandscapeStart(JNIEnv *env, jcl
     g_landscape_start = isLandscape;
 }
 
-// Auto-detect the real multi-touch device by running "getevent -p".
-// Looks for a device with "touchpanel" in its name (excluding "Aimbot" and "pen")
-// that supports multi-touch axes (ABS_MT_SLOT = 0x2f).
-// Falls back to /dev/input/event0 if detection fails.
 static void detect_touch_device() {
     FILE* fp = popen("/system/bin/getevent -p 2>&1", "r");
-    if (!fp) {
-        LOGE("detect_touch_device: popen failed");
-        return;
-    }
+    if (!fp) { LOGE("detect_touch_device: popen failed"); return; }
 
     char line[256];
     char current_path[256] = "/dev/input/event0";
@@ -117,9 +110,7 @@ static void detect_touch_device() {
     int has_mt = 0;
 
     while (fgets(line, sizeof(line), fp)) {
-        // Track device path from "add device" lines
         if (strstr(line, "add device") && strstr(line, "/dev/input/event")) {
-            // Starting a new device — commit previous if it was a good match
             if (is_touchpanel && has_mt) {
                 strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
                 g_touch_device[sizeof(g_touch_device) - 1] = '\0';
@@ -128,115 +119,88 @@ static void detect_touch_device() {
                 LOGD("Detected touch device: %s", g_touch_device);
                 return;
             }
-            // Reset for next device
             char* p = strstr(line, "/dev/input/event");
             if (p) {
                 strncpy(current_path, p, sizeof(current_path) - 1);
                 current_path[sizeof(current_path) - 1] = '\0';
                 char* end = current_path + strlen(current_path) - 1;
-                while (end > current_path && (*end == ' ' || *end == '\n' || *end == '\r')) {
-                    *end-- = '\0';
-                }
+                while (end > current_path && (*end == ' ' || *end == '\n' || *end == '\r')) *end-- = '\0';
             }
             is_touchpanel = 0;
             has_mt = 0;
         }
-
-        // Check device name: must contain "touchpanel", exclude "Aimbot" and "pen"
-        if (strstr(line, "touchpanel") && !strstr(line, "Aimbot")
-            && !strstr(line, "pen") && !strstr(line, "Pen")) {
+        if (strstr(line, "touchpanel") && !strstr(line, "Aimbot") && !strstr(line, "pen") && !strstr(line, "Pen")) {
             is_touchpanel = 1;
         }
-
-        // Check for multi-touch support: ABS_MT_SLOT = 0x2f
         if (strstr(line, "002f")) {
             has_mt = 1;
         }
     }
-
-    // Check the last device
     if (is_touchpanel && has_mt) {
         strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
         g_touch_device[sizeof(g_touch_device) - 1] = '\0';
     }
-
     pclose(fp);
     LOGD("Touch device: %s", g_touch_device);
 }
 
-// 解析物理设备的 min/max 参数
-// 只解析 X/Y/MT_X/MT_Y 四个轴，其他字段硬编码
 static void parse_physical_abs_params() {
     memset(&g_physical_params, 0, sizeof(g_physical_params));
+    g_physical_params.slot_max = 9;
+    g_physical_params.tracking_max = 65535;
 
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "/system/bin/getevent -p 2>&1");
-
-    FILE* fp = popen(cmd, "r");
-    if (!fp) {
-        LOGE("parse_physical_abs_params: popen failed");
-        return;
-    }
+    FILE* fp = popen("/system/bin/getevent -p 2>&1", "r");
+    if (!fp) { LOGE("parse_physical_abs_params: popen failed"); return; }
 
     char line[512];
     int in_our_device = 0;
+    int num_keys = 0;
 
     while (fgets(line, sizeof(line), fp)) {
-        // Parse "add device N: /dev/input/event6"
         if (strncmp(line, "add device", 9) == 0) {
             char* p = strstr(line, "/dev/input/event");
-            if (p) {
-                in_our_device = (strncmp(p, g_touch_device, strlen(g_touch_device)) == 0);
-            } else {
-                in_our_device = 0;
-            }
+            if (p) in_our_device = (strncmp(p, g_touch_device, strlen(g_touch_device)) == 0);
+            else in_our_device = 0;
             continue;
         }
-
         if (!in_our_device) continue;
 
-        // Parse "  name:     \"touchpanel\""
-        if (strncmp(line, "  name:", 7) == 0) {
-            if (strstr(line, "touchpanel") && !strstr(line, "Aimbot")
-                && !strstr(line, "pen") && !strstr(line, "Pen")) {
-                // This is our touchpanel device
-            }
-            continue;
-        }
-
-        // Parse ABS lines: "  0035  : value 0, min 0, max 21199, ..."
         unsigned int code_hex;
         int min_val = 0, max_val = 0;
-        if (sscanf(line, "                %x  : value %*d, min %d, max %d",
-                   &code_hex, &min_val, &max_val) == 3) {
+        if (sscanf(line, "                %x  : value %*d, min %d, max %d", &code_hex, &min_val, &max_val) == 3) {
             switch (code_hex) {
-            case 0x00:  // ABS_X
-                g_physical_params.abs_x_min = min_val;
-                g_physical_params.abs_x_max = max_val;
-                break;
-            case 0x01:  // ABS_Y
-                g_physical_params.abs_y_min = min_val;
-                g_physical_params.abs_y_max = max_val;
-                break;
-            case 0x35:  // ABS_MT_POSITION_X
-                g_physical_params.abs_mt_x_min = min_val;
-                g_physical_params.abs_mt_x_max = max_val;
-                break;
-            case 0x36:  // ABS_MT_POSITION_Y
-                g_physical_params.abs_mt_y_min = min_val;
-                g_physical_params.abs_mt_y_max = max_val;
-                break;
+                case 0x21: g_physical_params.abs_0021_min = min_val; g_physical_params.abs_0021_max = max_val; break;
+                case 0x2f: g_physical_params.slot_min = min_val; g_physical_params.slot_max = max_val ? max_val : 9; break;
+                case 0x30: g_physical_params.abs_0030_min = min_val; g_physical_params.abs_0030_max = max_val; break;
+                case 0x35: g_physical_params.abs_x_min = min_val; g_physical_params.abs_x_max = max_val; break;
+                case 0x36: g_physical_params.abs_y_min = min_val; g_physical_params.abs_y_max = max_val; break;
+                case 0x39: g_physical_params.tracking_min = min_val; g_physical_params.tracking_max = max_val ? max_val : 65535; break;
+            }
+        }
+        if (strncmp(line, "    KEY (0001):", 14) == 0) {
+            char* p = line + 14;
+            while (*p == ' ') p++;
+            while (num_keys < 16) {
+                while (*p == ' ') p++;
+                if (*p == '\0' || *p == '\n') break;
+                unsigned int k;
+                if (sscanf(p, "%x", &k) == 1) {
+                    int found = 0;
+                    for (int i = 0; i < num_keys; i++) { if (g_physical_params.keys[i] == (int)k) { found = 1; break; } }
+                    if (!found && k != 0) g_physical_params.keys[num_keys++] = (int)k;
+                    p += 4;
+                    while (*p == ' ') p++;
+                } else break;
             }
         }
     }
-
     pclose(fp);
-
-    LOGD("parse_physical_abs_params: X=(%d,%d) Y=(%d,%d) MT_X=(%d,%d) MT_Y=(%d,%d)",
+    g_physical_params.num_keys = num_keys;
+    LOGD("parse_physical_abs_params: device=%s keys=%d X=[%d,%d] Y=[%d,%d] SLOT=[%d,%d]",
+         g_touch_device, num_keys,
          g_physical_params.abs_x_min, g_physical_params.abs_x_max,
          g_physical_params.abs_y_min, g_physical_params.abs_y_max,
-         g_physical_params.abs_mt_x_min, g_physical_params.abs_mt_x_max,
-         g_physical_params.abs_mt_y_min, g_physical_params.abs_mt_y_max);
+         g_physical_params.slot_min, g_physical_params.slot_max);
 }
 
 static void set_abs_range(int fd, int axis, int min, int max) {
@@ -251,9 +215,7 @@ static void set_abs_range(int fd, int axis, int min, int max) {
 static inline void ev(int fd, int type, int code, int value) {
     struct input_event e;
     memset(&e, 0, sizeof(e));
-    e.type = type;
-    e.code = code;
-    e.value = value;
+    e.type = type; e.code = code; e.value = value;
     write(fd, &e, sizeof(e));
 }
 
@@ -262,7 +224,7 @@ static inline void sync(int fd) {
 }
 
 // =========================================================================
-// Send complete frame: physical slots (changed only) + virtual slot.
+// Send complete frame: physical slots + virtual slot.
 // Called with uinput_mutex HELD.
 // =========================================================================
 static void send_frame_locked() {
@@ -319,96 +281,82 @@ static void send_frame_locked() {
 }
 
 // =========================================================================
-// getevent reader — reads physical events via getevent command,
-// updates real_slots[], and forwards to uinput on every SYN_REPORT.
+// Direct event reader — opens physical device, EVIOCGRAB, reads raw events
 // =========================================================================
-static void* getevent_reader(void* arg) {
-    char cmd[256];
-    // Redirect stderr to stdout so we can see getevent errors in our logging
-    snprintf(cmd, sizeof(cmd), "/system/bin/getevent %s 2>&1", g_touch_device);
-
-    FILE* fp = popen(cmd, "r");
-    if (!fp) {
-        LOGE("getevent: popen failed, errno=%d", errno);
-        getevent_running = 0;
+static void* direct_reader(void* arg) {
+    // Open physical device
+    grab_fd = open(g_touch_device, O_RDONLY);
+    if (grab_fd < 0) {
+        LOGE("direct_reader: open %s failed errno=%d", g_touch_device, errno);
+        reader_running = 0;
         return NULL;
     }
-    getevent_fp = fp;
 
-    // Read the first line to check if getevent started successfully.
-    // If getevent fails (e.g. permission denied), the error message
-    // will appear here thanks to 2>&1.
-    char first[256];
-    if (fgets(first, sizeof(first), fp)) {
-        LOGD("getevent first line: %s", first);
-    } else {
-        LOGE("getevent: no output, process may have failed");
-        pclose(fp);
-        getevent_fp = NULL;
-        getevent_running = 0;
+    // EVIOCGRAB — exclusive access, InputReader won't see these events
+    if (ioctl(grab_fd, EVIOCGRAB, 1) < 0) {
+        LOGE("direct_reader: EVIOCGRAB failed errno=%d", errno);
+        close(grab_fd);
+        grab_fd = -1;
+        reader_running = 0;
         return NULL;
     }
-    LOGD("getevent reader started on %s", g_touch_device);
+    LOGD("direct_reader: opened fd=%d EVIOCGRAB success on %s", grab_fd, g_touch_device);
 
-    // Per-slot accumulators — buffer data until SYN_REPORT, then commit
-    // all slots at once to real_slots. This keeps real_slots consistent
-    // so inject_virtual_touch can safely call send_frame_locked() anytime.
+    // Per-slot accumulators
     int cur_slot = 0;
     int slot_tid[MAX_SLOTS] = {0};
     int slot_x[MAX_SLOTS] = {0};
     int slot_y[MAX_SLOTS] = {0};
     int slot_has_tid[MAX_SLOTS] = {0};
-    int slot_moved[MAX_SLOTS] = {0};   // received position update this frame
-    char line[256];
-    strncpy(line, first, sizeof(line) - 1);
-    line[sizeof(line) - 1] = '\0';
-    int first_line_processed = 0;
+    int slot_moved[MAX_SLOTS] = {0};
 
-    while (getevent_running) {
-        if (!first_line_processed) {
-            first_line_processed = 1;
-        } else {
-            if (!fgets(line, sizeof(line), fp)) break;
+    struct input_event ev;
+    while (reader_running) {
+        ssize_t n = read(grab_fd, &ev, sizeof(ev));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            LOGE("direct_reader: read error errno=%d", errno);
+            break;
         }
+        if (n != sizeof(ev)) continue;
 
-        char* p = line;
-
-        unsigned int type, code, value;
-        if (sscanf(p, "%x %x %x", &type, &code, &value) != 3) continue;
-
-        switch (type) {
+        switch (ev.type) {
         case EV_ABS:
-            switch (code) {
+            switch (ev.code) {
             case ABS_MT_SLOT:
-                cur_slot = (int)value;
+                cur_slot = ev.value;
                 break;
             case ABS_MT_TRACKING_ID:
                 if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
-                    slot_tid[cur_slot] = (int)value;
+                    slot_tid[cur_slot] = ev.value;
                     slot_has_tid[cur_slot] = 1;
                 }
                 break;
             case ABS_MT_POSITION_X:
                 if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
-                    slot_x[cur_slot] = (int)value;
+                    slot_x[cur_slot] = ev.value;
                     slot_moved[cur_slot] = 1;
                 }
                 break;
             case ABS_MT_POSITION_Y:
                 if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
-                    slot_y[cur_slot] = (int)value;
+                    if (!slot_moved[cur_slot]) {
+                        LOGD("direct_reader: slot=%d Y=%d", cur_slot, ev.value);
+                    }
+                    slot_y[cur_slot] = ev.value;
                     slot_moved[cur_slot] = 1;
                 }
+                break;
+            case ABS_MT_PRESSURE:
+                // just skip
+                break;
+            case ABS_MT_TOOL_TYPE:
                 break;
             }
             break;
 
         case EV_SYN:
-            // SYN_MT_REPORT (code=2): do nothing, just accumulate.
-            // SYN_REPORT (code=0): commit ALL slots at once.
-            // Only send frame when virtual injection is active; otherwise
-            // physical touches go through event6 directly (no duplicates).
-            if (code == 0) {
+            if (ev.code == SYN_REPORT) {
                 pthread_mutex_lock(&uinput_mutex);
 
                 for (int i = 0; i < MAX_SLOTS; i++) {
@@ -431,73 +379,81 @@ static void* getevent_reader(void* arg) {
                     }
                 }
 
-                // Forward if virtual is active, OR if any physical slot is
-                // still active on uinput (needs to be sent its lift event).
                 int need_frame = virtual_active;
                 if (!need_frame) {
                     for (int i = 0; i < MAX_SLOTS; i++) {
-                        if (uinput_slot_active[i]) { need_frame = 1; break; }
+                        // Forward if any physical slot is active OR uinput needs a lift
+                        if (real_slots[i].active || uinput_slot_active[i]) {
+                            need_frame = 1;
+                            break;
+                        }
                     }
                 }
                 if (uinput_fd >= 0 && need_frame) {
                     send_frame_locked();
                 }
                 pthread_mutex_unlock(&uinput_mutex);
+
             }
             break;
         }
     }
 
-    LOGD("getevent reader stopped");
-    pclose(fp);
-    getevent_fp = NULL;
-    getevent_running = 0;
+    LOGD("direct_reader: stopped, closing grab_fd=%d", grab_fd);
+    if (grab_fd >= 0) {
+        ioctl(grab_fd, EVIOCGRAB, 0);
+        close(grab_fd);
+        grab_fd = -1;
+    }
+    reader_running = 0;
     return NULL;
 }
 
 // =========================================================================
-// Start / stop forwarder
+// Start / stop reader
 // =========================================================================
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_startGeteventListenerNative(JNIEnv *env, jobject thiz) {
-    if (getevent_running) { LOGD("getevent already running"); return; }
+    if (reader_running) { LOGD("reader already running"); return; }
 
-    // Auto-detect the real touch device before starting
     detect_touch_device();
 
-    getevent_running = 1;
-    if (pthread_create(&getevent_thread, NULL, getevent_reader, NULL) != 0) {
+    reader_running = 1;
+    if (pthread_create(&reader_thread, NULL, direct_reader, NULL) != 0) {
         LOGE("pthread_create failed");
-        getevent_running = 0;
+        reader_running = 0;
         return;
     }
-    LOGD("getevent reader started");
+    LOGD("direct reader started on %s", g_touch_device);
 }
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_stopGeteventListenerNative(JNIEnv *env, jobject thiz) {
-    if (!getevent_running) return;
-    getevent_running = 0;
-    if (getevent_fp) { pclose(getevent_fp); getevent_fp = NULL; }
-    pthread_join(getevent_thread, NULL);
-    LOGD("getevent reader stopped");
+    if (!reader_running) return;
+    reader_running = 0;
+
+    // Close grab_fd to unblock the reader thread
+    if (grab_fd >= 0) {
+        ioctl(grab_fd, EVIOCGRAB, 0);
+        close(grab_fd);
+        grab_fd = -1;
+    }
+
+    pthread_join(reader_thread, NULL);
+    LOGD("direct reader stopped");
 }
 
 // =========================================================================
-// Virtual touch injection — sends a complete frame with physical + virtual.
+// Virtual touch injection
 // =========================================================================
 static void inject_virtual_touch(int dev_x, int dev_y, int is_down) {
     if (uinput_fd < 0) return;
-
     pthread_mutex_lock(&uinput_mutex);
-
     virtual_x = dev_x;
     virtual_y = dev_y;
     virtual_active = is_down;
-
     send_frame_locked();
-
     pthread_mutex_unlock(&uinput_mutex);
 }
 
@@ -507,10 +463,6 @@ static void inject_virtual_touch(int dev_x, int dev_y, int is_down) {
 
 JNIEXPORT jint JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobject thiz) {
-    // Ensure physical device params are populated before setting up uinput bits.
-    // Safe to call multiple times — only parses on first call or if not yet done.
-    detect_touch_device();
-
     if (uinput_fd >= 0) {
         LOGD("openUinputNative: closing existing fd=%d", uinput_fd);
         ioctl(uinput_fd, UI_DEV_DESTROY);
@@ -540,41 +492,29 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
     ioctl(uinput_fd, UI_SET_EVBIT, EV_SYN);
-
-    // Hardcoded ABS fields — only min/max from physical device
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_SLOT);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TOOL_TYPE);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_WIDTH_MAJOR);
-
-    // Set ranges from physical device
-    set_abs_range(uinput_fd, ABS_X,
-                  g_physical_params.abs_x_min, g_physical_params.abs_x_max);
-    set_abs_range(uinput_fd, ABS_MT_POSITION_X,
-                  g_physical_params.abs_mt_x_min, g_physical_params.abs_mt_x_max);
-    set_abs_range(uinput_fd, ABS_Y,
-                  g_physical_params.abs_y_min, g_physical_params.abs_y_max);
-    set_abs_range(uinput_fd, ABS_MT_POSITION_Y,
-                  g_physical_params.abs_mt_y_min, g_physical_params.abs_mt_y_max);
-    set_abs_range(uinput_fd, ABS_MT_SLOT, 0, 9);
-    set_abs_range(uinput_fd, ABS_MT_TRACKING_ID, 0, 65535);
-    set_abs_range(uinput_fd, ABS_MT_TOOL_TYPE, 0, 3);
-    set_abs_range(uinput_fd, ABS_MT_PRESSURE, 0, 255);
-    set_abs_range(uinput_fd, ABS_MT_TOUCH_MAJOR, 0, 255);
-    set_abs_range(uinput_fd, ABS_MT_WIDTH_MAJOR, 0, 255);
-
-    // Hardcoded KEY bits
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
-    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_BACK);
-
+    ioctl(uinput_fd, UI_SET_KEYBIT, 0x3e);
+    ioctl(uinput_fd, UI_SET_KEYBIT, 0x145);
+    ioctl(uinput_fd, UI_SET_KEYBIT, 0x14a);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x21);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x2f);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x30);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x32);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x35);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x36);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x37);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x39);
+    ioctl(uinput_fd, UI_SET_ABSBIT, 0x3a);
     ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+
+    set_abs_range(uinput_fd, 0x21, 0, 1000000);
+    set_abs_range(uinput_fd, 0x2f, 0, 9);
+    set_abs_range(uinput_fd, 0x30, 0, 255);
+    set_abs_range(uinput_fd, 0x32, 0, 0);
+    set_abs_range(uinput_fd, 0x35, 0, 21199);
+    set_abs_range(uinput_fd, 0x36, 0, 29999);
+    set_abs_range(uinput_fd, 0x37, 0, 0);
+    set_abs_range(uinput_fd, 0x39, 0, 65535);
+    set_abs_range(uinput_fd, 0x3a, 0, 0);
 
     if (ioctl(uinput_fd, UI_DEV_CREATE) < 0) {
         LOGE("UI_DEV_CREATE failed"); close(uinput_fd); uinput_fd = -1; return -1;
@@ -589,12 +529,15 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_closeUinputNative(JNIEnv *env, jobject thiz) {
-    LOGD("closeUinputNative: start, uinput_fd=%d", uinput_fd);
-    if (getevent_running) {
-        LOGD("closeUinputNative: stopping getevent thread");
-        getevent_running = 0;
-        if (getevent_fp) { pclose(getevent_fp); getevent_fp = NULL; }
-        pthread_join(getevent_thread, NULL);
+    LOGD("closeUinputNative: start, uinput_fd=%d, reader_running=%d", uinput_fd, reader_running);
+    if (reader_running) {
+        reader_running = 0;
+        if (grab_fd >= 0) {
+            ioctl(grab_fd, EVIOCGRAB, 0);
+            close(grab_fd);
+            grab_fd = -1;
+        }
+        pthread_join(reader_thread, NULL);
     }
 
     if (uinput_fd >= 0) {
@@ -602,9 +545,6 @@ Java_team_maodie_aimbot_RemoteInjectorService_closeUinputNative(JNIEnv *env, job
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
         uinput_fd = -1;
-        LOGD("closeUinputNative: uinput destroyed");
-    } else {
-        LOGD("closeUinputNative: uinput_fd was already -1");
     }
 
     virtual_active = 0;
@@ -621,11 +561,9 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobjec
     if (uinput_fd < 0) return JNI_FALSE;
     int dev_x, dev_y;
     if (g_landscape_start) {
-        // Landscape start: screen (landscape) -> device (portrait) with 90° rotation
         dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
         dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     } else {
-        // Portrait start: screen matches device orientation, no rotation needed
         dev_x = (y * g_dev_abs_max_x) / g_screen_h;
         dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     }

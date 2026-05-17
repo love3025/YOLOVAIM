@@ -13,4 +13,6 @@ interface IRemoteInjector {
     void setResolution(int screenW, int screenH, int devW, int devH);
     void startGeteventListener();
     void stopGeteventListener();
+    void blockPhysicalTouch();
+    void unblockPhysicalTouch();
 }
