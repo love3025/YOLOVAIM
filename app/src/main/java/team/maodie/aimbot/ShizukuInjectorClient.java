@@ -150,7 +150,12 @@ public class ShizukuInjectorClient {
     public boolean initRemote() {
         if (remoteService != null) {
             try {
-                return remoteService.init();
+                boolean ok = remoteService.init();
+                if (ok) {
+                    // Register death recipient so service cleans up if we're killed
+                    remoteService.linkToDeath(new android.os.Binder());
+                }
+                return ok;
             } catch (Exception e) {
                 Log.e(TAG, "initRemote error: " + e.getMessage());
             }

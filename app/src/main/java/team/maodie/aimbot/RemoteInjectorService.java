@@ -1,7 +1,9 @@
 package team.maodie.aimbot;
 
 import android.annotation.SuppressLint;
+import android.os.IBinder;
 import android.os.Process;
+import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
@@ -30,6 +32,7 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private int lastTapId = 6;
     private int drawingPointerId = -1;
     private boolean pointerDown = false;
+    private IBinder.DeathRecipient clientDeathRecipient;
 
     public static RemoteInjectorService instance;
 
@@ -275,8 +278,26 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         swipe(centerX, centerY, centerX + (int)dx, centerY + (int)dy, duration);
     }
 
+    public void linkToDeath(IBinder token) {
+        if (token == null) return;
+        try {
+            clientDeathRecipient = () -> {
+                Log.w(TAG, "Client process died, cleaning up...");
+                destroy();
+            };
+            token.linkToDeath(clientDeathRecipient, 0);
+            Log.d(TAG, "linkToDeath registered");
+        } catch (RemoteException e) {
+            Log.e(TAG, "linkToDeath failed: " + e.getMessage());
+        }
+    }
+
     public void destroy() {
         Log.d(TAG, "destroy called");
+        if (clientDeathRecipient != null) {
+            // Token is stale anyway since client died, just drop reference
+            clientDeathRecipient = null;
+        }
         available = false;
         closeUinput();
         inputManager = null;
