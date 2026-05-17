@@ -53,10 +53,12 @@ class FloatService : Service() {
 
     // PID auto-aim state
     private var aimOffsetX = 0; private var aimOffsetY = 0
-    private var kp = 0.15f; private var ki = 0.02f; private var kd = 0.08f
+    private var aimDepth = 0.20f   // target depth into box (0=top, 0.5=center, 1=bottom)
+    private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
     private var aimPointerDown = false
-    private var lastPidErrorX = 0f; private var lastPidErrorY = 0f
-    private var lastPidTime = 0L
+    private var aimCenterX = 0f; private var aimCenterY = 0f
+    private var aimStartX = 0f; private var aimStartY = 0f  // initial DOWN position
+    private var maxDragDist = 400f  // max drag distance from start before lift+re-down
 
     // Touch display overlay
     private var touchDisplayEnabled = false
@@ -106,7 +108,7 @@ class FloatService : Service() {
         return Pair(21199, 29999) // fallback
     }
 
-    private var triggerEnabled = false; private var triggerReactionSpeed = 100f
+    private var triggerEnabled = false; private var triggerReactionSpeed = 100
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
     private var triggerTouchDuration = 10; private var triggerTouchRange = 100
     private var triggerShowArea = false
@@ -247,14 +249,14 @@ class FloatService : Service() {
 
     private fun setupTouchDisplayView() {
         if (touchDisplayAdded) return
-        val defaultDot = dp(20)
-        val size = defaultDot * 2
-        touchDisplayView = TouchDisplayView(this).apply { dotRadius = defaultDot.toFloat(); showDot = false }
+        val size = dp(60)
+        touchDisplayView = TouchDisplayView(this)
         ProjectionHolder.touchDisplayView = touchDisplayView
         val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
-        p.gravity = Gravity.CENTER
-        p.x = (screenWidth - size) / 2; p.y = (screenHeight - size) / 2
+        p.gravity = Gravity.TOP or Gravity.START
+        p.x = screenWidth / 2 - size / 2; p.y = screenHeight / 2 - size / 2
         wm.addView(touchDisplayView, p); touchDisplayAdded = true
+        touchDisplayView!!.alpha = 0f
     }
 
     private fun loadModel(filename: String) {
@@ -290,15 +292,25 @@ class FloatService : Service() {
         guiPanel.triggerShowArea = triggerShowArea
         guiPanel.aimOffsetX = aimOffsetX
         guiPanel.aimOffsetY = aimOffsetY
+        guiPanel.aimDepth = aimDepth
+        guiPanel.ki = ki; guiPanel.kd = kd
         guiPanel.aimTouchDisplay = touchDisplayEnabled
         guiPanel.aimTouchSize = dp(20)
         guiPanel.modelRunning = modelRunning
+        guiPanel.showCaptureRange = overlayView.showCaptureRange
+        guiPanel.showDetectionBox = overlayView.showDetectionBox
+        guiPanel.showCenterDot = overlayView.showCenterDot
         guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
         guiParams = makeParams((280 * resources.displayMetrics.density).toInt(), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
         guiPanel.onClose = { hideGui() }
-        guiPanel.onEnabledChanged = { on -> aimbotOn.set(on); overlayView.aimbotEnabled = on; Log.d("AimbotInfer", "开关切换: $on") }
-        guiPanel.onSpeedChanged = { kp = it }
+        guiPanel.onEnabledChanged = { on ->
+            aimbotOn.set(on)
+            overlayView.aimbotEnabled = on
+            if (on) { maxDragDist = (screenWidth.coerceAtMost(screenHeight) * 0.2f).coerceIn(100f, 600f) }
+            Log.d("AimbotInfer", "开关切换: $on")
+        }
+        guiPanel.onSpeedChanged = { kp = it; currentSpeed = it }
         guiPanel.onRangeChanged = { px -> overlayView.rangeRadius = px; overlayView.postInvalidate() }
         guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it) }
         guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
@@ -316,11 +328,19 @@ class FloatService : Service() {
         guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility() }
         guiPanel.onAimOffsetXChanged = { aimOffsetX = it }
         guiPanel.onAimOffsetYChanged = { aimOffsetY = it }
-        guiPanel.onKiChanged = { ki = it }
-        guiPanel.onKdChanged = { kd = it }
+        guiPanel.onAimDepthChanged = { aimDepth = it }
+        guiPanel.onKiChanged = { ki = it; guiPanel.ki = it }
+        guiPanel.onKdChanged = { kd = it; guiPanel.kd = it }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
-            touchDisplayView?.showDot = show
+            if (touchDisplayAdded) {
+                val lp = touchDisplayView?.layoutParams as? WindowManager.LayoutParams
+                if (lp != null) {
+                    lp.flags = if (show) WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    touchDisplayView?.alpha = if (show) 1f else 0f
+                    try { wm.updateViewLayout(touchDisplayView, lp) } catch (_: Exception) {}
+                }
+            }
         }
         guiPanel.onAimTouchSize = { px ->
             val p = dp(px)
@@ -329,6 +349,18 @@ class FloatService : Service() {
                 val lp = touchDisplayView?.layoutParams as? WindowManager.LayoutParams
                 if (lp != null) { lp.width = p * 2; lp.height = p * 2; wm.updateViewLayout(touchDisplayView, lp) }
             }
+        }
+        guiPanel.onShowCaptureRangeChanged = { on ->
+            overlayView.showCaptureRange = on
+            overlayView.postInvalidate()
+        }
+        guiPanel.onShowDetectionBoxChanged = { on ->
+            overlayView.showDetectionBox = on
+            overlayView.postInvalidate()
+        }
+        guiPanel.onShowCenterDotChanged = { on ->
+            overlayView.showCenterDot = on
+            overlayView.postInvalidate()
         }
         guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) { inferRunning.set(false); broadcastState(1) } }
         guiPanel.onTestCircle = {
@@ -405,18 +437,67 @@ class FloatService : Service() {
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
                         if (aimbotOn.get() && rectCount > 0) {
-                            // Find best target (head-like point, offset by aimOffsetX/Y)
+                            // Find best target (closest to current aim position)
                             var bestDistSq = Float.MAX_VALUE; var bestX = centerX; var bestY = centerY
-                            val rangeVal = cachedRange; val cx = centerX; val cy = centerY
                             for (idx in 0 until rectCount) {
-                                val r = rectBuffer[idx]; val bcx = (r.left+r.right)*0.5f; val bcy = r.top+(r.bottom-r.top)*0.2f
-                                val dx = bcx-cx; val dy = bcy-cy; val d = dx*dx+dy*dy
-                                if (d < bestDistSq && d < rangeVal*rangeVal) { bestDistSq = d; bestX = bcx; bestY = bcy }
+                                val r = rectBuffer[idx]; val bcx = (r.left+r.right)*0.5f; val bcy = r.top+(r.bottom-r.top)*aimDepth
+                                val dx = bcx-aimCenterX; val dy = bcy-aimCenterY; val d = dx*dx+dy*dy
+                                if (d < bestDistSq) { bestDistSq = d; bestX = bcx; bestY = bcy }
                             }
                             val targetX = bestX + aimOffsetX
                             val targetY = bestY + aimOffsetY
 
+                            // === 连续移动 P-controller auto-aim ===
+                            if (!aimPointerDown) {
+                                val lp = touchDisplayView?.layoutParams as? WindowManager.LayoutParams
+                                if (lp != null) {
+                                    aimCenterX = lp.x + lp.width / 2f
+                                    aimCenterY = lp.y + lp.height / 2f
+                                    aimStartX = aimCenterX
+                                    aimStartY = aimCenterY
+                                    Log.d(TAG, "aim DOWN at ($aimCenterX, $aimCenterY) target=($targetX, $targetY)")
+                                    shizukuClient?.swipe(aimCenterX.toInt(), aimCenterY.toInt(), aimCenterX.toInt(), aimCenterY.toInt(), 0)
+                                    aimPointerDown = true
+                                }
+                            } else {
+                                val errorX = targetX - centerX
+                                val errorY = targetY - centerY
+
+                                // 收敛就松手
+                                if (Math.abs(errorX) < 10f && Math.abs(errorY) < 10f) {
+                                    Log.d(TAG, "aim converged error=($errorX, $errorY)")
+                                    shizukuClient?.lift()
+                                    aimPointerDown = false
+                                } else {
+                                    // 连续移动：触摸往目标方向移
+                                    var moveX = errorX * kp
+                                    var moveY = errorY * kp
+                                    val maxPerFrame = 600f
+                                    val moveDist = Math.sqrt((moveX*moveX + moveY*moveY).toDouble()).toFloat()
+                                    if (moveDist > maxPerFrame) {
+                                        moveX = moveX / moveDist * maxPerFrame
+                                        moveY = moveY / moveDist * maxPerFrame
+                                    }
+                                    aimCenterX += moveX
+                                    aimCenterY += moveY
+
+                                    // 超出拖动距离则抬手下一次（从触摸起点算，不是屏幕中心）
+                                    val dxFromStart = aimCenterX - aimStartX
+                                    val dyFromStart = aimCenterY - aimStartY
+                                    val dragDist = Math.sqrt((dxFromStart*dxFromStart + dyFromStart*dyFromStart).toDouble()).toFloat()
+                                    if (dragDist > maxDragDist) {
+                                        shizukuClient?.lift()
+                                        aimPointerDown = false
+                                        Log.d(TAG, "aim edge lift at ($aimCenterX, $aimCenterY) drag=$dragDist")
+                                    } else {
+                                        shizukuClient?.moveTo(aimCenterX.toInt(), aimCenterY.toInt())
+                                    }
+                                }
                             }
+                        }
+                    } else if (aimPointerDown) {
+                        shizukuClient?.lift()
+                        aimPointerDown = false
                     }
 
                     // detection-based trigger: center in any detection box
