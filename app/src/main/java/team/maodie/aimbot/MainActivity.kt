@@ -13,16 +13,33 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.coordinatorlayout.widget.CoordinatorLayout
+import androidx.core.widget.NestedScrollView
+import com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.textfield.MaterialAutoCompleteTextView
+import com.google.android.material.textfield.TextInputLayout
 import rikka.shizuku.Shizuku
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStreamReader
 
 class MainActivity : AppCompatActivity() {
+
+    enum class AimbotState { STANDBY, RUNNING, INFERENCING }
+
+    private val stateListener: (Int, String) -> Unit = { state, modelName ->
+        runOnUiThread { setAimbotState(AimbotState.entries[state], modelName) }
+    }
+
+    private fun loadStateFromPrefs() {
+        // 不要在打开app时恢复状态，app打开时应该是待机中
+    }
 
     data class ModelInfo(
         val filename: String,
@@ -35,19 +52,38 @@ class MainActivity : AppCompatActivity() {
 
     private var modelList: List<ModelInfo> = emptyList()
     private var selectedModelIndex = 0
+    private var aimbotState = AimbotState.STANDBY
 
-    // 缓存density避免重复访问
+    private lateinit var statusText: TextView
+    private lateinit var modelBadge: TextView
+    private lateinit var shizukuValue: TextView
+    private lateinit var overlayValue: TextView
+    private lateinit var touchValue: TextView
+    private lateinit var fab: ExtendedFloatingActionButton
+
+    private var permissionDialog: androidx.appcompat.app.AlertDialog? = null
+    private var permissionDialogShizukuStatus: TextView? = null
+    private var permissionDialogOverlayStatus: TextView? = null
+    private var permissionDialogShizukuGrant: TextView? = null
+    private var permissionDialogOverlayGrant: TextView? = null
+
+    // 彩蛋：连续点按 modelBadge
+    private var badgeTapCount = 0
+    private val badgeTapHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val badgeTapReset = Runnable { badgeTapCount = 0 }
+    private val badgeTaunts = arrayOf(
+        "雑魚～", "再戳也没有用哦～", "都说了换不了的啦！",
+        "你是不是傻，这又不能换", "憨憨，推理方式不能换的哦～",
+        "戳戳戳，戳你个头啊！", "哼！（扭头）",
+        "这只是一个普普通通的标签而已啦", "换不了换不了，死心吧～",
+        "MUA～ 还是死心吧", "欸嘿～ 不行哦", "杂鱼杂鱼～"
+    )
+
     private val displayDensity: Float by lazy { resources.displayMetrics.density }
-
-    // ── Shizuku 状态 ──────────────────────────
-    private var shizukuGranted = false
-    private var shizukuRunning = false
 
     private val shizukuListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode == REQ_SHIZUKU) {
-            shizukuGranted = grantResult == PackageManager.PERMISSION_GRANTED
-            Log.d("Shizuku", "permission result: $grantResult, granted=$shizukuGranted")
-            if (shizukuGranted) {
+            if (grantResult == PackageManager.PERMISSION_GRANTED) {
                 runOnUiThread { recreate() }
             }
         }
@@ -56,184 +92,618 @@ class MainActivity : AppCompatActivity() {
     private val captureLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        Log.d("AimbotInfer", "captureLauncher result: resultCode=${result.resultCode}, data=${result.data}, result=${result}")
         val data = result.data
         if (data != null) {
-            Log.d("AimbotInfer", "captureLauncher data not null, starting FloatService")
             ProjectionHolder.resultCode = result.resultCode
             ProjectionHolder.resultData = data
-            // 同步模型列表到服务
             ProjectionHolder.modelList = modelList.map { m ->
                 ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description)
             }
             ProjectionHolder.selectedModelIndex = selectedModelIndex
             startForegroundService(Intent(this, FloatService::class.java))
-        } else {
-            Log.d("AimbotInfer", "captureLauncher data is null, not starting service")
         }
     }
 
     companion object {
         private const val REQ_SHIZUKU = 10001
+        const val ACTION_STATE_CHANGE = "team.maodie.aimbot.STATE_CHANGE"
+        const val EXTRA_STATE = "state"
+        const val EXTRA_MODEL_NAME = "model_name"
     }
 
-    // 白色卡片风格颜色
-    private val COLOR_BG = Color.parseColor("#F5F5F7")
-    private val COLOR_CARD_BG = Color.WHITE
-    private val COLOR_PRIMARY = Color.parseColor("#007AFF")
-    private val COLOR_TEXT_DARK = Color.parseColor("#1C1C1E")
-    private val COLOR_TEXT_MUTED = Color.parseColor("#8E8E93")
-    private val COLOR_BORDER = Color.parseColor("#E5E5EA")
-    private val COLOR_SUCCESS = Color.parseColor("#34C759")
+    // MD3 colors
+    private val MD3_PRIMARY = Color.parseColor("#6750A4")
+    private val MD3_ON_PRIMARY = Color.WHITE
+    private val MD3_PRIMARY_CONTAINER = Color.parseColor("#EADDFF")
+    private val MD3_ON_PRIMARY_CONTAINER = Color.parseColor("#21005D")
+    private val MD3_SURFACE = Color.parseColor("#FFFBFE")
+    private val MD3_ON_SURFACE = Color.parseColor("#1C1B1F")
+    private val MD3_SURFACE_VARIANT = Color.parseColor("#E7E0EC")
+    private val MD3_ON_SURFACE_VARIANT = Color.parseColor("#49454F")
+    private val MD3_OUTLINE = Color.parseColor("#79747E")
+    private val MD3_SURFACE_CONTAINER = Color.parseColor("#F3EDF7")
+    private val MD3_START_BG = Color.parseColor("#DAE1FF")
+    private val MD3_STOP_BG = Color.parseColor("#FFCDD2")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Load models from JSON
         loadModelsFromJson()
+        setContentView(createRootLayout())
+        ProjectionHolder.setStateListener(stateListener)
+        loadStateFromPrefs()
+        android.os.Handler(mainLooper).postDelayed({ loadDefaultModel() }, 500)
+        android.os.Handler(mainLooper).postDelayed({
+            if (::statusText.isInitialized) checkPermissionsOnStart()
+        }, 1500)
+    }
 
-        // 根布局
-        val rootLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setBackgroundColor(COLOR_BG)
-            setPadding(dp(24), dp(32), dp(24), dp(32))
+    private fun createRootLayout(): View {
+        val root = CoordinatorLayout(this).apply {
+            setBackgroundColor(MD3_SURFACE)
         }
 
-        // 标题
-        rootLayout.addView(TextView(this).apply {
-            text = "Aimbot 设置"
-            textSize = 24f
-            setTextColor(COLOR_TEXT_DARK)
+        val scrollView = NestedScrollView(this)
+        scrollView.layoutParams = CoordinatorLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(24), dp(16), dp(100))
+        }
+
+        // Title
+        content.addView(TextView(this).apply {
+            text = "Aimbot"
+            textSize = 28f
+            setTextColor(MD3_ON_SURFACE)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, dp(24))
+            setPadding(0, 0, 0, dp(16))
         })
 
-        // 权限卡片
-        rootLayout.addView(buildPermissionCard())
-        rootLayout.addView(createSpacer(16))
+        // 状态面板
+        content.addView(buildStatusPanel())
+        content.addView(createSpacer(16))
 
         // 模型卡片
-        rootLayout.addView(buildModelCard())
-        rootLayout.addView(createSpacer(24))
+        content.addView(buildModelCard())
 
-        // 启动按钮
-        val btnStart = Button(this).apply {
-            text = "启动系统"
-            setTextColor(Color.WHITE)
-            textSize = 16f
+        scrollView.addView(content)
+        root.addView(scrollView)
+
+        // FAB 右下角
+        fab = ExtendedFloatingActionButton(this).apply {
+            text = "启动"
+            contentDescription = "启动系统"
+            setBackgroundColor(MD3_START_BG)
+            setTextColor(Color.parseColor("#21005D"))
+            icon = context.getDrawable(R.drawable.ic_triangle)
+            elevation = 0f
+            layoutParams = CoordinatorLayout.LayoutParams(
+                CoordinatorLayout.LayoutParams.WRAP_CONTENT,
+                CoordinatorLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                setMargins(dp(16), 0, dp(16), dp(16))
+            }
+            setOnClickListener { onFabClick() }
+        }
+        root.addView(fab)
+
+        return root
+    }
+
+    private fun buildStatusPanel(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
             background = GradientDrawable().apply {
-                setColor(COLOR_PRIMARY)
+                setColor(MD3_SURFACE_CONTAINER)
                 cornerRadius = dp(12).toFloat()
             }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(56)
+
+            val statusRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            statusText = TextView(context).apply {
+                text = "待机中"
+                textSize = 22f
+                setTextColor(MD3_ON_SURFACE)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            statusRow.addView(statusText)
+
+            statusRow.addView(View(context).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(12), 1)
+            })
+
+            modelBadge = TextView(context).apply {
+                text = "QNN HTP"
+                setTextColor(MD3_ON_PRIMARY)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setBackgroundDrawable(GradientDrawable().apply {
+                    setColor(MD3_PRIMARY)
+                    cornerRadius = dp(16).toFloat()
+                })
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                setOnClickListener {
+                    badgeTapCount++
+                    badgeTapHandler.removeCallbacks(badgeTapReset)
+                    if (badgeTapCount >= 5) {
+                        badgeTapCount = 0
+                        Toast.makeText(context, badgeTaunts[(Math.random() * badgeTaunts.size).toInt()], Toast.LENGTH_SHORT).show()
+                    } else {
+                        badgeTapHandler.postDelayed(badgeTapReset, 2000)
+                    }
+                }
+            }
+            statusRow.addView(modelBadge)
+
+            // Spacer to push help button to far right
+            statusRow.addView(View(context).apply {
+                layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+            })
+
+            // Help button - MD3 IconButton
+            statusRow.addView(MaterialButton(context, null, com.google.android.material.R.attr.materialIconButtonStyle).apply {
+                icon = context.getDrawable(R.drawable.ic_help)
+                iconSize = dp(24)
+                iconTint = android.content.res.ColorStateList.valueOf(MD3_ON_SURFACE_VARIANT)
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                stateListAnimator = null
+                isClickable = true
+                isFocusable = true
+                setOnClickListener { showPermissionHelpDialog() }
+                layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+            })
+
+            addView(statusRow)
+            addView(createSpacer(4))
+
+            // Version row
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TextView(context).apply {
+                    text = "Version"
+                    textSize = 14f
+                    setTextColor(MD3_ON_SURFACE_VARIANT)
+                })
+                addView(TextView(context).apply {
+                    text = ": "
+                    textSize = 14f
+                    setTextColor(MD3_ON_SURFACE_VARIANT)
+                })
+                addView(TextView(context).apply {
+                    text = "1.0.0"
+                    textSize = 14f
+                    setTextColor(MD3_ON_SURFACE)
+                    typeface = Typeface.DEFAULT_BOLD
+                })
+            })
+
+            addView(createSpacer(4))
+
+            val shizukuLabel = TextView(context).apply {
+                text = "Shizuku"
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+            }
+            shizukuValue = TextView(context).apply {
+                text = "-"
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(shizukuLabel)
+                addView(TextView(context).apply {
+                    text = ": "
+                    textSize = 14f
+                    setTextColor(MD3_ON_SURFACE_VARIANT)
+                })
+                addView(shizukuValue)
+            })
+
+            addView(createSpacer(4))
+
+            val overlayLabel = TextView(context).apply {
+                text = "Overlay"
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+            }
+            overlayValue = TextView(context).apply {
+                text = "-"
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(overlayLabel)
+                addView(TextView(context).apply {
+                    text = ": "
+                    textSize = 14f
+                    setTextColor(MD3_ON_SURFACE_VARIANT)
+                })
+                addView(overlayValue)
+            })
+
+            addView(createSpacer(4))
+
+            val touchLabel = TextView(context).apply {
+                text = "Touch Service"
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+            }
+            touchValue = TextView(context).apply {
+                text = "-"
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE)
+                typeface = Typeface.DEFAULT_BOLD
+            }
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(touchLabel)
+                addView(TextView(context).apply {
+                    text = ": "
+                    textSize = 14f
+                    setTextColor(MD3_ON_SURFACE_VARIANT)
+                })
+                addView(touchValue)
+            })
+        }
+    }
+
+    private fun buildModelCard(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = GradientDrawable().apply {
+                setColor(MD3_SURFACE_CONTAINER)
+                cornerRadius = dp(12).toFloat()
+            }
+
+            addView(TextView(context).apply {
+                text = "选择模型"
+                textSize = 16f
+                setTextColor(MD3_PRIMARY)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, dp(8))
+            })
+
+            val displayNames = modelList.map { it.displayName }
+            if (displayNames.isEmpty()) {
+                addView(TextView(context).apply {
+                    text = "无可用模型"
+                    textSize = 14f
+                    setTextColor(Color.parseColor("#B3261E"))
+                })
+                return@apply
+            }
+
+            // 从xml加载 MD3 外露下拉菜单
+            val dropdownLayout = layoutInflater.inflate(R.layout.dropdown_layout, null) as TextInputLayout
+            val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
+
+            autoComplete.setText(displayNames[0], false)
+
+            val adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_dropdown_item_1line,
+                displayNames
             )
-            setOnClickListener {
-                if (Settings.canDrawOverlays(this@MainActivity)) {
-                    val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    captureLauncher.launch(manager.createScreenCaptureIntent())
-                } else {
+            autoComplete.setAdapter(adapter)
+
+            autoComplete.setOnItemClickListener { _, _, position, _ ->
+                selectedModelIndex = position
+                val model = modelList[position]
+                loadModel(model.filename)
+            }
+
+            addView(dropdownLayout)
+            addView(createSpacer(16))
+
+            if (modelList.isNotEmpty()) {
+                val model = modelList[0]
+                addView(buildModelInfoCard(model))
+            }
+        }
+    }
+
+    private fun buildModelInfoCard(model: ModelInfo): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = GradientDrawable().apply {
+                setColor(MD3_SURFACE_VARIANT)
+                cornerRadius = dp(12).toFloat()
+            }
+
+            addView(TextView(context).apply {
+                text = "模型信息"
+                textSize = 12f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+                setPadding(0, 0, 0, dp(8))
+            })
+
+            addView(buildInfoRow("量化方式", model.precision))
+            addView(createSpacer(8))
+            addView(buildInfoRow("输入尺寸", "${model.inputSize}x${model.inputSize}"))
+            addView(createSpacer(8))
+            addView(buildInfoRow("输出数量", model.outputSize.toString()))
+            addView(createSpacer(8))
+            addView(buildInfoRow("描述", model.description))
+        }
+    }
+
+    private fun buildInfoRow(label: String, value: String): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+
+            addView(TextView(context).apply {
+                text = label
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+
+            addView(TextView(context).apply {
+                text = value
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            })
+        }
+    }
+
+    private fun createSpacer(h: Int): View {
+        return View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(1, dp(h))
+        }
+    }
+
+    private fun dp(v: Int): Int = (v * displayDensity).toInt()
+
+    private fun onFabClick() {
+        if (aimbotState != AimbotState.STANDBY) {
+            // 直接从 Activity 移除所有覆盖层视图（更可靠，不依赖 Service 生命周期）
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            ProjectionHolder.clearViews(wm)
+            // 停止 Service
+            stopService(Intent(this, FloatService::class.java))
+            ProjectionHolder.updateState(0, "QNN HTP") // STANDBY
+        } else {
+            // 启动
+            if (!Settings.canDrawOverlays(this)) {
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                intent.data = android.net.Uri.parse("package:$packageName")
+                startActivity(intent)
+                Toast.makeText(this, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
+                return
+            }
+            if (!isShizukuGranted()) {
+                showPermissionHelpDialog()
+                return
+            }
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            captureLauncher.launch(manager.createScreenCaptureIntent())
+        }
+    }
+
+    private fun updateFabState() {
+        if (!::fab.isInitialized) return
+        val isRunning = aimbotState != AimbotState.STANDBY
+        fab.text = if (isRunning) "停止" else "启动"
+        fab.setBackgroundColor(if (isRunning) MD3_STOP_BG else MD3_START_BG)
+        fab.setTextColor(if (isRunning) Color.parseColor("#B71C1C") else Color.parseColor("#21005D"))
+        fab.icon = getDrawable(if (isRunning) R.drawable.ic_stop_outline else R.drawable.ic_triangle)
+    }
+
+    private fun checkPermissionsOnStart() {
+        if (!Settings.canDrawOverlays(this) || !isShizukuGranted()) {
+            showPermissionHelpDialog()
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        try {
+            Shizuku.addRequestPermissionResultListener(shizukuListener)
+        } catch (_: Exception) {}
+        updatePermissionStates()
+
+        // 主动申请 Shizuku 权限
+        try {
+            if (Shizuku.pingBinder() && !isShizukuGranted()) {
+                Shizuku.requestPermission(REQ_SHIZUKU)
+            }
+        } catch (_: Exception) {}
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ProjectionHolder.removeStateListener()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try {
+            Shizuku.removeRequestPermissionResultListener(shizukuListener)
+        } catch (_: Exception) {}
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updatePermissionStates()
+        syncStateFromHolder()
+        if (permissionDialog?.isShowing == true) {
+            refreshPermissionDialog()
+        }
+    }
+
+    private fun updatePermissionStates() {
+        val overlay = Settings.canDrawOverlays(this)
+        val shizukuPing = Shizuku.pingBinder()
+        val shizukuGranted = isShizukuGranted()
+
+        shizukuValue.text = when {
+            !shizukuPing -> "Connecting"
+            shizukuGranted -> "Ready"
+            else -> "Not Granted"
+        }
+        overlayValue.text = if (overlay) "Granted" else "Not Granted"
+        touchValue.text = "Running"
+    }
+
+    private fun isShizukuGranted(): Boolean {
+        return try {
+            Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun showPermissionHelpDialog() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+
+        lateinit var shizukuStatusView: TextView
+        lateinit var shizukuGrantBtn: TextView
+        lateinit var overlayStatusView: TextView
+        lateinit var overlayGrantBtn: TextView
+
+        val ctx = this
+
+        // Shizuku row
+        layout.addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+
+            addView(TextView(ctx).apply {
+                text = "Shizuku"
+                textSize = 16f
+                setTextColor(MD3_ON_SURFACE)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+
+            shizukuStatusView = TextView(ctx).apply {
+                text = shizukuValue.text
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+            }
+            addView(shizukuStatusView)
+
+            shizukuGrantBtn = TextView(ctx).apply {
+                text = "  授权"
+                textSize = 14f
+                setTextColor(MD3_PRIMARY)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener { Shizuku.requestPermission(REQ_SHIZUKU) }
+            }
+            addView(shizukuGrantBtn)
+        })
+
+        // Overlay row
+        layout.addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(12), 0, dp(12))
+
+            addView(TextView(ctx).apply {
+                text = "Overlay"
+                textSize = 16f
+                setTextColor(MD3_ON_SURFACE)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            })
+
+            overlayStatusView = TextView(ctx).apply {
+                text = overlayValue.text
+                textSize = 14f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+            }
+            addView(overlayStatusView)
+
+            overlayGrantBtn = TextView(ctx).apply {
+                text = "  授权"
+                textSize = 14f
+                setTextColor(MD3_PRIMARY)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                setOnClickListener {
                     val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
                     intent.data = android.net.Uri.parse("package:$packageName")
                     startActivity(intent)
-                    Toast.makeText(this@MainActivity, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
                 }
             }
-        }
-        rootLayout.addView(btnStart)
-        rootLayout.addView(createSpacer(12))
-
-        // ── 触摸测试按钮 ───────────────────────
-        val testInjector = TouchInjector()
-        var injectorReady = false
-
-        // 主动初始化：先检查 Shizuku 状态，再初始化 TouchInjector
-        fun tryInitInjector(): Boolean {
-            try {
-                Log.d("Shizuku", "pingBinder=${Shizuku.pingBinder()} uid=${Shizuku.getUid()} perm=${Shizuku.checkSelfPermission()}")
-            } catch (e: Exception) {
-                Log.e("Shizuku", "binder not ready yet: ${e.message}")
-            }
-            if (Shizuku.pingBinder()) {
-                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                    Log.d("Shizuku", "permission not granted, requesting...")
-                    Shizuku.requestPermission(REQ_SHIZUKU)
-                    return false
-                }
-                val ok = testInjector.init()
-                injectorReady = ok
-                Log.d("Shizuku", "TouchInjector init: $ok")
-                return ok
-            }
-            return false
-        }
-
-        // 同时也注册 binder 到达监听，实现自动初始化
-        Shizuku.addBinderReceivedListenerSticky(object : Shizuku.OnBinderReceivedListener {
-            override fun onBinderReceived() {
-                Log.d("Shizuku", "binder received callback!")
-                runOnUiThread { tryInitInjector() }
-            }
+            addView(overlayGrantBtn)
         })
 
-        rootLayout.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+        permissionDialogShizukuStatus = shizukuStatusView
+        permissionDialogOverlayStatus = overlayStatusView
+        permissionDialogShizukuGrant = shizukuGrantBtn
+        permissionDialogOverlayGrant = overlayGrantBtn
 
-            addView(Button(this@MainActivity).apply {
-                text = "测试点击"
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginEnd = dp(8) }
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#FF9F0A"))
-                    cornerRadius = dp(10).toFloat()
-                }
-                setOnClickListener {
-                    if (!injectorReady && !tryInitInjector()) {
-                        Toast.makeText(this@MainActivity, "Shizuku 未就绪 (ping=${Shizuku.pingBinder()})", Toast.LENGTH_LONG).show()
-                        return@setOnClickListener
-                    }
-                    val x = resources.displayMetrics.widthPixels / 2
-                    val y = resources.displayMetrics.heightPixels / 2
-                    testInjector.tap(x, y)
-                    Toast.makeText(this@MainActivity, "点击 ($x, $y)", Toast.LENGTH_SHORT).show()
-                }
-            })
+        permissionDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("权限说明")
+            .setView(layout)
+            .setPositiveButton("关闭", null)
+            .create()
 
-            addView(Button(this@MainActivity).apply {
-                text = "测试滑动"
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(8) }
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#34C759"))
-                    cornerRadius = dp(10).toFloat()
-                }
-                setOnClickListener {
-                    if (!injectorReady && !tryInitInjector()) {
-                        Toast.makeText(this@MainActivity, "Shizuku 未就绪 (ping=${Shizuku.pingBinder()})", Toast.LENGTH_LONG).show()
-                        return@setOnClickListener
-                    }
-                    val cx = resources.displayMetrics.widthPixels / 2
-                    val cy = resources.displayMetrics.heightPixels / 2
-                    testInjector.swipe(cx - 100, cy, cx + 100, cy, 200)
-                    Toast.makeText(this@MainActivity, "滑动 ${cx-100},$cy → ${cx+100},$cy", Toast.LENGTH_SHORT).show()
-                }
-            })
-        })
+        permissionDialog!!.setOnShowListener {
+            refreshPermissionDialog()
+        }
 
-        setContentView(rootLayout)
+        permissionDialog!!.show()
+    }
 
-        // 延迟加载默认模型
-        android.os.Handler(mainLooper).postDelayed({
-            loadDefaultModel()
-        }, 500)
+    private fun refreshPermissionDialog() {
+        permissionDialogShizukuStatus?.text = shizukuValue.text
+        permissionDialogOverlayStatus?.text = overlayValue.text
+
+        val shizukuStatus = shizukuValue.text.toString()
+        permissionDialogShizukuGrant?.visibility = if (shizukuStatus == "Ready" || shizukuStatus == "Connecting") View.GONE else View.VISIBLE
+        permissionDialogOverlayGrant?.visibility = if (overlayValue.text == "Granted") View.GONE else View.VISIBLE
+    }
+
+    fun setAimbotState(state: AimbotState, modelName: String = "QNN HTP") {
+        aimbotState = state
+        if (!::statusText.isInitialized) return
+        runOnUiThread {
+            statusText.text = when (state) {
+                AimbotState.STANDBY -> "待机中"
+                AimbotState.RUNNING -> "运行中"
+                AimbotState.INFERENCING -> "推理中"
+            }
+            modelBadge.text = modelName
+            updateFabState()
+        }
+    }
+
+    private fun syncStateFromHolder() {
+        val stateOrdinal = ProjectionHolder.currentState
+        if (stateOrdinal > 0 && ::statusText.isInitialized) {
+            val state = AimbotState.entries[stateOrdinal]
+            val modelName = ProjectionHolder.currentModelName
+            statusText.text = when (state) {
+                AimbotState.STANDBY -> "待机中"
+                AimbotState.RUNNING -> "运行中"
+                AimbotState.INFERENCING -> "推理中"
+            }
+            modelBadge.text = modelName
+        }
+        updateFabState()
     }
 
     private fun loadModelsFromJson() {
@@ -257,312 +727,13 @@ class MainActivity : AppCompatActivity() {
             Log.d("Aimbot_AI", "Loaded ${modelList.size} models from JSON")
         } catch (e: Exception) {
             Log.e("Aimbot_AI", "Failed to load models from JSON: ${e.message}", e)
-            // Fallback to empty list
             modelList = emptyList()
         }
     }
 
-    private fun buildPermissionCard(): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = GradientDrawable().apply {
-                setColor(COLOR_CARD_BG)
-                cornerRadius = dp(12).toFloat()
-            }
-            elevation = dp(2).toFloat()
-
-            addView(TextView(context).apply {
-                text = "权限状态"
-                textSize = 13f
-                setTextColor(COLOR_TEXT_MUTED)
-                setPadding(0, 0, 0, dp(12))
-            })
-
-            // ── 屏幕录制 ──────────────────────────
-            addView(buildPermissionRow("屏幕录制", canCaptureScreen()))
-            addView(divider())
-
-            // ── 悬浮窗 ────────────────────────────
-            addView(buildPermissionRow("悬浮窗", Settings.canDrawOverlays(this@MainActivity)))
-            addView(divider())
-
-            // ── Shizuku ───────────────────────────
-            val shizukuOk = isShizukuGranted()
-            addView(buildPermissionRow("Shizuku 提权", shizukuOk))
-            if (!shizukuOk) {
-                val hintTv = TextView(context).apply {
-                    textSize = 11f
-                    setTextColor(Color.parseColor("#FF9F0A"))
-                    setPadding(dp(18), 0, 0, dp(4))
-                }
-                try {
-                    when {
-                        !Shizuku.pingBinder() -> {
-                            hintTv.text = "请通过无线调试启动 Shizuku 后再试"
-                            // 可选：加一个跳转按钮
-                        }
-                        else -> {
-                            hintTv.text = "Shizuku 运行中，点击下方按钮授权"
-                            addView(Button(context).apply {
-                                text = "授权 Shizuku"
-                                textSize = 13f
-                                setTextColor(Color.WHITE)
-                                setPadding(dp(12), dp(6), dp(12), dp(6))
-                                layoutParams = LinearLayout.LayoutParams(
-                                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)
-                                ).apply { setMargins(dp(18), dp(6), 0, 0) }
-                                background = GradientDrawable().apply {
-                                    setColor(COLOR_PRIMARY)
-                                    cornerRadius = dp(8).toFloat()
-                                }
-                                setOnClickListener { requestShizukuPermission() }
-                            })
-                        }
-                    }
-                } catch (_: Exception) {
-                    hintTv.text = "Shizuku 未安装或不可用"
-                }
-                addView(hintTv)
-            }
-        }
-    }
-
-    private fun buildPermissionRow(name: String, granted: Boolean): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(10), 0, dp(10))
-
-            addView(View(context).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(10) }
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(if (granted) COLOR_SUCCESS else Color.parseColor("#FF3B30"))
-                }
-            })
-
-            addView(TextView(context).apply {
-                text = name
-                textSize = 15f
-                setTextColor(COLOR_TEXT_DARK)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            })
-
-            addView(TextView(context).apply {
-                text = if (granted) "已授权" else "未授权"
-                textSize = 13f
-                setTextColor(if (granted) COLOR_SUCCESS else Color.parseColor("#FF3B30"))
-            })
-        }
-    }
-
-    private fun buildModelCard(): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = GradientDrawable().apply {
-                setColor(COLOR_CARD_BG)
-                cornerRadius = dp(12).toFloat()
-            }
-            elevation = dp(2).toFloat()
-
-            addView(TextView(context).apply {
-                text = "AI 模型"
-                textSize = 13f
-                setTextColor(COLOR_TEXT_MUTED)
-                setPadding(0, 0, 0, dp(12))
-            })
-
-            addView(TextView(context).apply {
-                text = "选择模型"
-                textSize = 12f
-                setTextColor(COLOR_TEXT_MUTED)
-                setPadding(0, 0, 0, dp(6))
-            })
-
-            val spinner = Spinner(this@MainActivity).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(44)
-                )
-            }
-
-            val displayNames = modelList.map { it.displayName }
-            if (displayNames.isEmpty()) {
-                // No models available
-                addView(TextView(context).apply {
-                    text = "无可用模型"
-                    textSize = 14f
-                    setTextColor(Color.parseColor("#FF3B30"))
-                })
-                return@apply
-            }
-
-            val adapter = object : ArrayAdapter<String>(
-                this@MainActivity,
-                android.R.layout.simple_spinner_item,
-                displayNames
-            ) {
-                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val view = super.getView(position, convertView, parent)
-                    if (view is TextView) {
-                        view.setPadding(dp(12), dp(8), dp(12), dp(8))
-                    }
-                    return view
-                }
-
-                override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val view = super.getDropDownView(position, convertView, parent)
-                    if (view is TextView) {
-                        view.setPadding(dp(12), dp(10), dp(12), dp(10))
-                    }
-                    return view
-                }
-            }
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            spinner.adapter = adapter
-
-            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    selectedModelIndex = position
-                    val model = modelList[position]
-                    loadModel(model.filename)
-                    updateModelInfoCard(model)
-                }
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
-            }
-
-            addView(spinner)
-
-            addView(createSpacer(12))
-            addView(divider())
-            addView(createSpacer(8))
-
-            // Model info card - starts with first model info
-            if (modelList.isNotEmpty()) {
-                addView(buildModelInfoCard(modelList[0]))
-            }
-        }
-    }
-
-    private fun buildModelInfoCard(model: ModelInfo): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F0F0F5"))
-                cornerRadius = dp(10).toFloat()
-            }
-            tag = "modelInfoCard"  // Tag to find and update later
-
-            addView(TextView(context).apply {
-                text = "模型信息"
-                textSize = 12f
-                setTextColor(COLOR_TEXT_MUTED)
-                setPadding(0, 0, 0, dp(8))
-            })
-
-            addView(buildInfoRow("量化方式", model.precision))
-            addView(createSpacer(6))
-            addView(buildInfoRow("输入尺寸", "${model.inputSize}x${model.inputSize}"))
-            addView(createSpacer(6))
-            addView(buildInfoRow("输出数量", model.outputSize.toString()))
-            addView(createSpacer(6))
-            addView(buildInfoRow("描述", model.description))
-        }
-    }
-
-    private fun updateModelInfoCard(model: ModelInfo) {
-        // This will be called when model selection changes
-        // For simplicity, we rebuild the info card when needed
-    }
-
-    private fun buildInfoRow(label: String, value: String): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-
-            addView(TextView(context).apply {
-                text = label
-                textSize = 14f
-                setTextColor(COLOR_TEXT_MUTED)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            })
-
-            addView(TextView(context).apply {
-                text = value
-                textSize = 14f
-                setTextColor(COLOR_TEXT_DARK)
-                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            })
-        }
-    }
-
-    // ── Shizuku 权限管理 ──────────────────────
-
-    private fun requestShizukuPermission() {
-        try {
-            Shizuku.requestPermission(REQ_SHIZUKU)
-        } catch (e: Exception) {
-            Toast.makeText(this, "Shizuku 请求失败: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun isShizukuGranted(): Boolean {
-        return try {
-            Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    // ── Lifecycle ──────────────────────────────
-
-    override fun onStart() {
-        super.onStart()
-        try {
-            Shizuku.addRequestPermissionResultListener(shizukuListener)
-        } catch (_: Exception) {}
-    }
-
-    override fun onStop() {
-        super.onStop()
-        try {
-            Shizuku.removeRequestPermissionResultListener(shizukuListener)
-        } catch (_: Exception) {}
-    }
-
-    private fun canCaptureScreen(): Boolean {
-        return try {
-            val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
-            pm != null
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun divider(): View {
-        return View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
-            ).apply { setMargins(0, dp(4), 0, dp(4)) }
-            setBackgroundColor(COLOR_BORDER)
-        }
-    }
-
-    private fun createSpacer(h: Int): View {
-        return View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(1, dp(h))
-        }
-    }
-
-    private fun dp(v: Int): Int = (v * displayDensity).toInt()
-
     private fun loadModel(filename: String) {
         val modelFile = File(filesDir, filename)
         try {
-            // Clear old QNN cache to avoid corrupted cache blocking load
             val qnnCache = File(cacheDir, "qnn")
             if (qnnCache.exists()) {
                 qnnCache.deleteRecursively()
@@ -577,11 +748,14 @@ class MainActivity : AppCompatActivity() {
             }
             val success = JniCallBack.init(modelFile.absolutePath)
             if (success) {
+                ProjectionHolder.currentModelName = JniCallBack.getBackend()
+                statusText.text = when (aimbotState) {
+                    AimbotState.STANDBY -> "待机中"
+                    AimbotState.RUNNING -> "运行中"
+                    AimbotState.INFERENCING -> "推理中"
+                }
+                modelBadge.text = ProjectionHolder.currentModelName
                 Toast.makeText(this, "模型加载成功", Toast.LENGTH_SHORT).show()
-                Log.d("Aimbot_AI", "模型加载成功: $filename")
-            } else {
-                Toast.makeText(this, "模型加载失败", Toast.LENGTH_SHORT).show()
-                Log.e("Aimbot_AI", "模型加载失败")
             }
         } catch (e: Exception) {
             Log.e("Aimbot_AI", "模型加载异常: ${e.message}", e)
@@ -589,10 +763,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadDefaultModel() {
-        if (modelList.isEmpty()) {
-            Log.e("Aimbot_AI", "No models available")
-            return
-        }
+        if (modelList.isEmpty()) return
 
         try {
             val qnnCache = File(cacheDir, "qnn")
@@ -611,9 +782,10 @@ class MainActivity : AppCompatActivity() {
             }
             val ok = JniCallBack.init(modelFile.absolutePath)
             if (ok) {
-                Log.d("Aimbot_AI", "默认模型加载成功: ${defaultModel.filename}")
-            } else {
-                Log.e("Aimbot_AI", "默认模型加载失败: ${defaultModel.filename}")
+                ProjectionHolder.currentModelName = JniCallBack.getBackend()
+                if (::statusText.isInitialized) {
+                    modelBadge.text = ProjectionHolder.currentModelName
+                }
             }
         } catch (e: Exception) {
             Log.e("Aimbot_AI", "默认模型加载异常: ${e.message}", e)

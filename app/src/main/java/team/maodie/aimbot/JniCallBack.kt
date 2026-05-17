@@ -21,6 +21,8 @@ object JniCallBack {
         rowStride: Int, pixelStride: Int
     ): FloatArray?
 
+    external fun getBackend(): String
+
     external fun setConfidence(threshold: Float)
 
     external fun release()
