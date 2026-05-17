@@ -35,7 +35,6 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onClose: (() -> Unit)? = null
     var onAimOffsetXChanged: ((Int) -> Unit)? = null
     var onAimOffsetYChanged: ((Int) -> Unit)? = null
-    var onAimDepthChanged: ((Float) -> Unit)? = null
     var onKiChanged: ((Float) -> Unit)? = null
     var onKdChanged: ((Float) -> Unit)? = null
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
@@ -47,7 +46,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
-    var aimOffsetX = 0; var aimOffsetY = 0; var aimDepth = 0.20f
+    var aimOffsetX = 0; var aimOffsetY = 0
     var ki = 0.02f; var kd = 0.08f
     var aimTouchDisplay = false; var aimTouchSize = 20
     var showCaptureRange = false; var showDetectionBox = false; var showCenterDot = false
@@ -66,7 +65,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     private data class TabDef(val label: String)
     private val tabs = listOf(TabDef("自瞄"), TabDef("扳机"), TabDef("防闪"), TabDef("模型"), TabDef("系统"))
-    private var activeTab = 0
+    var activeTab = 0
     private lateinit var contentContainer: LinearLayout
     private var switching = false
 
@@ -152,11 +151,9 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(spacer(dp(4)))
         contentContainer.addView(buildSlider("Kp", speed, 0.01f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSlider("框内深度", aimDepth, 0.0f, 1.0f, "%.0f%%") { aimDepth = it; onAimDepthChanged?.invoke(it) })
+        contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.20f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("Ki", (ki * 100).toInt(), 0, 100, "") { val v = it.toFloat() / 100f; ki = v; onKiChanged?.invoke(v) })
-        contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("Kd", (kd * 100).toInt(), 0, 100, "") { val v = it.toFloat() / 100f; kd = v; onKdChanged?.invoke(v) })
+        contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.30f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildSliderInt("X偏移", aimOffsetX, -500, 500, "px") { aimOffsetX = it; onAimOffsetXChanged?.invoke(it) })
