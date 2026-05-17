@@ -34,10 +34,8 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     public static RemoteInjectorService instance;
 
     public void setResolution(int sw, int sh, int dw, int dh) {
-        screen_w = sw;
-        screen_h = sh;
-        dev_abs_max_x = dw;
-        dev_abs_max_y = dh;
+        screen_w = sw; screen_h = sh;
+        dev_abs_max_x = dw; dev_abs_max_y = dh;
         setDeviceResolution(dw, dh);
         setScreenResolution(sw, sh);
     }
@@ -46,18 +44,12 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         setLandscapeStart(landscapeStart ? 1 : 0);
     }
 
-    public void startGeteventListener() {
-        startGeteventListenerNative();
-    }
-
-    public void stopGeteventListener() {
-        stopGeteventListenerNative();
-    }
+    public void startGeteventListener() { startGeteventListenerNative(); }
+    public void stopGeteventListener() { stopGeteventListenerNative(); }
 
     private MotionEvent.PointerProperties ptr(int id) {
         MotionEvent.PointerProperties p = new MotionEvent.PointerProperties();
-        p.id = id;
-        p.toolType = MotionEvent.TOOL_TYPE_FINGER;
+        p.id = id; p.toolType = MotionEvent.TOOL_TYPE_FINGER;
         return p;
     }
 
@@ -72,15 +64,10 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         Log.d(TAG, "RemoteInjectorService onCreate, pid=" + Process.myPid());
     }
 
-    private int openUinput() {
-        return openUinputNative();
-    }
+    private int openUinput() { return openUinputNative(); }
 
     private void closeUinput() {
-        if (uinputFd >= 0) {
-            closeUinputNative();
-            uinputFd = -1;
-        }
+        if (uinputFd >= 0) { closeUinputNative(); uinputFd = -1; }
     }
 
     @SuppressLint("PrivateApi")
@@ -104,18 +91,14 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         try {
             Method getInstance = android.hardware.input.InputManager.class.getMethod("getInstance");
             android.hardware.input.InputManager inputMan = (android.hardware.input.InputManager) getInstance.invoke(null);
-            Log.d(TAG, "init: inputManager=" + inputMan);
-
             Method injectInputEvent = android.hardware.input.InputManager.class.getMethod(
                 "injectInputEvent", InputEvent.class, int.class);
-            Log.d(TAG, "init: injectMethod=" + injectInputEvent);
 
             bgDownTime = SystemClock.uptimeMillis();
             MotionEvent bgDown = MotionEvent.obtain(bgDownTime, bgDownTime, MotionEvent.ACTION_DOWN, 1,
                 new MotionEvent.PointerProperties[]{ptr(BG_ID)}, new MotionEvent.PointerCoords[]{coord(5f, 5f)},
                 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-            Object result = injectInputEvent.invoke(inputMan, bgDown, INJECT_MODE_ASYNC);
-            Log.d(TAG, "init: injectInputEvent result=" + result);
+            injectInputEvent.invoke(inputMan, bgDown, INJECT_MODE_ASYNC);
             bgDown.recycle();
 
             inputManager = inputMan;
@@ -126,7 +109,6 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             return true;
         } catch (Exception e) {
             Log.e(TAG, "init: injectInputEvent failed: " + e.getMessage());
-            e.printStackTrace();
         }
 
         return false;
@@ -300,6 +282,10 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         inputManager = null;
         injectMethod = null;
     }
+
+    // EVIOCGRAB is now handled inside startGeteventListenerNative() — these are no-ops
+    public void blockPhysicalTouch() { Log.d(TAG, "blockPhysicalTouch: handled by native reader"); }
+    public void unblockPhysicalTouch() {}
 
     @Override
     public boolean isAvailable() { return available; }
