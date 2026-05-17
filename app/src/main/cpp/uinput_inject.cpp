@@ -46,6 +46,17 @@ typedef struct {
     int y;
 } slot_state_t;
 
+// 物理设备的参数，从 getevent -p 解析
+// 只存 min/max，ABS/KEY 字段硬编码
+typedef struct {
+    int abs_x_min, abs_x_max;
+    int abs_y_min, abs_y_max;
+    int abs_mt_x_min, abs_mt_x_max;
+    int abs_mt_y_min, abs_mt_y_max;
+} physical_abs_params_t;
+
+static physical_abs_params_t g_physical_params = {0};
+
 static int uinput_fd = -1;
 static slot_state_t real_slots[MAX_SLOTS];
 static int uinput_slot_active[MAX_SLOTS];
@@ -81,6 +92,9 @@ Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, j
     g_screen_h = screenH;
 }
 
+// Forward declaration
+static void parse_physical_abs_params();
+
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setLandscapeStart(JNIEnv *env, jclass cls, jint isLandscape) {
     g_landscape_start = isLandscape;
@@ -110,6 +124,7 @@ static void detect_touch_device() {
                 strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
                 g_touch_device[sizeof(g_touch_device) - 1] = '\0';
                 pclose(fp);
+                parse_physical_abs_params();
                 LOGD("Detected touch device: %s", g_touch_device);
                 return;
             }
@@ -147,6 +162,81 @@ static void detect_touch_device() {
 
     pclose(fp);
     LOGD("Touch device: %s", g_touch_device);
+}
+
+// 解析物理设备的 min/max 参数
+// 只解析 X/Y/MT_X/MT_Y 四个轴，其他字段硬编码
+static void parse_physical_abs_params() {
+    memset(&g_physical_params, 0, sizeof(g_physical_params));
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "/system/bin/getevent -p 2>&1");
+
+    FILE* fp = popen(cmd, "r");
+    if (!fp) {
+        LOGE("parse_physical_abs_params: popen failed");
+        return;
+    }
+
+    char line[512];
+    int in_our_device = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Parse "add device N: /dev/input/event6"
+        if (strncmp(line, "add device", 9) == 0) {
+            char* p = strstr(line, "/dev/input/event");
+            if (p) {
+                in_our_device = (strncmp(p, g_touch_device, strlen(g_touch_device)) == 0);
+            } else {
+                in_our_device = 0;
+            }
+            continue;
+        }
+
+        if (!in_our_device) continue;
+
+        // Parse "  name:     \"touchpanel\""
+        if (strncmp(line, "  name:", 7) == 0) {
+            if (strstr(line, "touchpanel") && !strstr(line, "Aimbot")
+                && !strstr(line, "pen") && !strstr(line, "Pen")) {
+                // This is our touchpanel device
+            }
+            continue;
+        }
+
+        // Parse ABS lines: "  0035  : value 0, min 0, max 21199, ..."
+        unsigned int code_hex;
+        int min_val = 0, max_val = 0;
+        if (sscanf(line, "                %x  : value %*d, min %d, max %d",
+                   &code_hex, &min_val, &max_val) == 3) {
+            switch (code_hex) {
+            case 0x00:  // ABS_X
+                g_physical_params.abs_x_min = min_val;
+                g_physical_params.abs_x_max = max_val;
+                break;
+            case 0x01:  // ABS_Y
+                g_physical_params.abs_y_min = min_val;
+                g_physical_params.abs_y_max = max_val;
+                break;
+            case 0x35:  // ABS_MT_POSITION_X
+                g_physical_params.abs_mt_x_min = min_val;
+                g_physical_params.abs_mt_x_max = max_val;
+                break;
+            case 0x36:  // ABS_MT_POSITION_Y
+                g_physical_params.abs_mt_y_min = min_val;
+                g_physical_params.abs_mt_y_max = max_val;
+                break;
+            }
+        }
+    }
+
+    pclose(fp);
+
+    LOGD("parse_physical_abs_params: X=(%d,%d) Y=(%d,%d) MT_X=(%d,%d) MT_Y=(%d,%d)",
+         g_physical_params.abs_x_min, g_physical_params.abs_x_max,
+         g_physical_params.abs_y_min, g_physical_params.abs_y_max,
+         g_physical_params.abs_mt_x_min, g_physical_params.abs_mt_x_max,
+         g_physical_params.abs_mt_y_min, g_physical_params.abs_mt_y_max);
 }
 
 static void set_abs_range(int fd, int axis, int min, int max) {
@@ -417,7 +507,16 @@ static void inject_virtual_touch(int dev_x, int dev_y, int is_down) {
 
 JNIEXPORT jint JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobject thiz) {
-    if (uinput_fd >= 0) { close(uinput_fd); uinput_fd = -1; }
+    // Ensure physical device params are populated before setting up uinput bits.
+    // Safe to call multiple times — only parses on first call or if not yet done.
+    detect_touch_device();
+
+    if (uinput_fd >= 0) {
+        LOGD("openUinputNative: closing existing fd=%d", uinput_fd);
+        ioctl(uinput_fd, UI_DEV_DESTROY);
+        close(uinput_fd);
+        uinput_fd = -1;
+    }
 
     const char* paths[] = {"/dev/uinput", "/dev/input/uinput", "/dev/misc/uinput"};
     for (int i = 0; i < 3; i++) {
@@ -441,24 +540,41 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
     ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS);
     ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY);
     ioctl(uinput_fd, UI_SET_EVBIT, EV_SYN);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
-    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
+
+    // Hardcoded ABS fields — only min/max from physical device
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_X);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_Y);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
-    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_SLOT);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TOOL_TYPE);
     ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
-    ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
+    ioctl(uinput_fd, UI_SET_ABSBIT, ABS_MT_WIDTH_MAJOR);
 
-    set_abs_range(uinput_fd, ABS_X, 0, g_dev_abs_max_x);
-    set_abs_range(uinput_fd, ABS_Y, 0, g_dev_abs_max_y);
-    set_abs_range(uinput_fd, ABS_MT_POSITION_X, 0, g_dev_abs_max_x);
-    set_abs_range(uinput_fd, ABS_MT_POSITION_Y, 0, g_dev_abs_max_y);
+    // Set ranges from physical device
+    set_abs_range(uinput_fd, ABS_X,
+                  g_physical_params.abs_x_min, g_physical_params.abs_x_max);
+    set_abs_range(uinput_fd, ABS_MT_POSITION_X,
+                  g_physical_params.abs_mt_x_min, g_physical_params.abs_mt_x_max);
+    set_abs_range(uinput_fd, ABS_Y,
+                  g_physical_params.abs_y_min, g_physical_params.abs_y_max);
+    set_abs_range(uinput_fd, ABS_MT_POSITION_Y,
+                  g_physical_params.abs_mt_y_min, g_physical_params.abs_mt_y_max);
     set_abs_range(uinput_fd, ABS_MT_SLOT, 0, 9);
     set_abs_range(uinput_fd, ABS_MT_TRACKING_ID, 0, 65535);
+    set_abs_range(uinput_fd, ABS_MT_TOOL_TYPE, 0, 3);
+    set_abs_range(uinput_fd, ABS_MT_PRESSURE, 0, 255);
+    set_abs_range(uinput_fd, ABS_MT_TOUCH_MAJOR, 0, 255);
+    set_abs_range(uinput_fd, ABS_MT_WIDTH_MAJOR, 0, 255);
+
+    // Hardcoded KEY bits
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOUCH);
+    ioctl(uinput_fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
+    ioctl(uinput_fd, UI_SET_KEYBIT, KEY_BACK);
+
+    ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
     if (ioctl(uinput_fd, UI_DEV_CREATE) < 0) {
         LOGE("UI_DEV_CREATE failed"); close(uinput_fd); uinput_fd = -1; return -1;
@@ -473,21 +589,27 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_closeUinputNative(JNIEnv *env, jobject thiz) {
+    LOGD("closeUinputNative: start, uinput_fd=%d", uinput_fd);
     if (getevent_running) {
+        LOGD("closeUinputNative: stopping getevent thread");
         getevent_running = 0;
         if (getevent_fp) { pclose(getevent_fp); getevent_fp = NULL; }
         pthread_join(getevent_thread, NULL);
     }
 
     if (uinput_fd >= 0) {
+        LOGD("closeUinputNative: destroying uinput device");
         ioctl(uinput_fd, UI_DEV_DESTROY);
         close(uinput_fd);
         uinput_fd = -1;
+        LOGD("closeUinputNative: uinput destroyed");
+    } else {
+        LOGD("closeUinputNative: uinput_fd was already -1");
     }
 
     virtual_active = 0;
     memset(uinput_slot_active, 0, sizeof(uinput_slot_active));
-    LOGD("Uinput closed");
+    LOGD("closeUinputNative: done");
 }
 
 // =========================================================================

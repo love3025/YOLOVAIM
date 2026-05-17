@@ -15,6 +15,7 @@
 #include <tensorflow/lite/c/c_api.h>
 #include <tensorflow/lite/c/common.h>
 #include <qnn/TFLiteDelegate/QnnTFLiteDelegate.h>
+#include <tensorflow/lite/delegates/nnapi/nnapi_delegate_c_api.h>
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "TFLite_QNN", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "TFLite_QNN", __VA_ARGS__)
@@ -31,11 +32,23 @@ static inline long long getTimeUs() {
 //==============================================================================
 static TfLiteModel* g_model = nullptr;
 static TfLiteInterpreter* g_interpreter = nullptr;
-static TfLiteDelegate* g_qnn_delegate = nullptr;
+static TfLiteDelegate* g_delegate = nullptr;
+static std::string g_backend_type = "QNN HTP";
 static int g_input_height = 256;
 static int g_input_width = 256;
 static int g_num_outputs = 1344;
 static float g_conf_thresh = 0.25f;
+
+static void deleteDelegate() {
+    if (g_delegate) {
+        if (g_backend_type == "QNN HTP") {
+            TfLiteQnnDelegateDelete(g_delegate);
+        } else {
+            TfLiteNnapiDelegateDelete(g_delegate);
+        }
+        g_delegate = nullptr;
+    }
+}
 
 //==============================================================================
 //  Build QNN TFLite Delegate Options
@@ -104,10 +117,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         TfLiteModelDelete(g_model);
         g_model = nullptr;
     }
-    if (g_qnn_delegate) {
-        TfLiteQnnDelegateDelete(g_qnn_delegate);
-        g_qnn_delegate = nullptr;
-    }
+    deleteDelegate();
 
     // Load model
     g_model = TfLiteModelCreateFromFile(path);
@@ -127,18 +137,30 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         return JNI_FALSE;
     }
 
-    // Add QNN TFLite Delegate
-    g_qnn_delegate = buildQnnDelegate();
-    if (!g_qnn_delegate) {
-        LOGE("QNN TFLite Delegate creation failed — HTP backend unavailable.");
-        TfLiteInterpreterOptionsDelete(options);
-        TfLiteModelDelete(g_model);
-        g_model = nullptr;
-        env->ReleaseStringUTFChars(model_path, path);
-        return JNI_FALSE;
+    // Try QNN HTP delegate first
+    g_delegate = buildQnnDelegate();
+    if (g_delegate) {
+        g_backend_type = "QNN HTP";
+        LOGD("Using QNN HTP delegate");
+    } else {
+        // Fallback to NNAPI delegate
+        LOGW("QNN HTP unavailable, falling back to NNAPI delegate");
+        TfLiteNnapiDelegateOptions nnapi_opts = TfLiteNnapiDelegateOptionsDefault();
+        nnapi_opts.disallow_nnapi_cpu = 1;
+        g_delegate = TfLiteNnapiDelegateCreate(&nnapi_opts);
+        if (g_delegate) {
+            g_backend_type = "NNAPI";
+            LOGD("Using NNAPI delegate");
+        } else {
+            LOGE("Both QNN HTP and NNAPI delegates unavailable.");
+            TfLiteInterpreterOptionsDelete(options);
+            TfLiteModelDelete(g_model);
+            g_model = nullptr;
+            env->ReleaseStringUTFChars(model_path, path);
+            return JNI_FALSE;
+        }
     }
-    LOGD("QNN delegate created, adding to options");
-    TfLiteInterpreterOptionsAddDelegate(options, g_qnn_delegate);
+    TfLiteInterpreterOptionsAddDelegate(options, g_delegate);
     TfLiteInterpreterOptionsSetNumThreads(options, 1);
 
     // Create interpreter
@@ -146,9 +168,8 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     TfLiteInterpreterOptionsDelete(options);
 
     if (!g_interpreter) {
-        LOGE("Failed to create interpreter with QNN delegate.");
-        TfLiteQnnDelegateDelete(g_qnn_delegate);
-        g_qnn_delegate = nullptr;
+        LOGE("Failed to create interpreter with %s delegate.", g_backend_type.c_str());
+        deleteDelegate();
         TfLiteModelDelete(g_model);
         g_model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
@@ -160,8 +181,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         LOGE("Failed to allocate tensors");
         TfLiteInterpreterDelete(g_interpreter);
         g_interpreter = nullptr;
-        TfLiteQnnDelegateDelete(g_qnn_delegate);
-        g_qnn_delegate = nullptr;
+        deleteDelegate();
         TfLiteModelDelete(g_model);
         g_model = nullptr;
         env->ReleaseStringUTFChars(model_path, path);
@@ -198,19 +218,22 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
 //==============================================================================
 //  NMS
 //==============================================================================
-static std::vector<std::tuple<float, float, float, float, float, float>> nms(
-    std::vector<std::tuple<float, float, float, float, float, float>>& boxes,
-    float iouThreshold
-) {
+struct Detection {
+    float x1, y1, x2, y2, score, classId;
+};
+
+static std::vector<Detection> nms(std::vector<Detection>& boxes, float iouThreshold) {
     if (boxes.empty()) return {};
 
     std::sort(boxes.begin(), boxes.end(),
-        [](const auto& a, const auto& b) {
-            return std::get<4>(a) > std::get<4>(b);
+        [](const Detection& a, const Detection& b) {
+            return a.score > b.score;
         });
 
-    std::vector<bool> suppressed(boxes.size(), false);
-    std::vector<std::tuple<float, float, float, float, float, float>> result;
+    auto suppressed = std::make_unique<uint8_t[]>(boxes.size());
+    memset(suppressed.get(), 0, boxes.size());
+    std::vector<Detection> result;
+    result.reserve(boxes.size());
 
     for (size_t i = 0; i < boxes.size(); ++i) {
         if (suppressed[i]) continue;
@@ -219,28 +242,18 @@ static std::vector<std::tuple<float, float, float, float, float, float>> nms(
         for (size_t j = i + 1; j < boxes.size(); ++j) {
             if (suppressed[j]) continue;
 
-            float x1a = std::get<0>(boxes[i]), y1a = std::get<1>(boxes[i]);
-            float x2a = std::get<2>(boxes[i]), y2a = std::get<3>(boxes[i]);
-            float x1b = std::get<0>(boxes[j]), y1b = std::get<1>(boxes[j]);
-            float x2b = std::get<2>(boxes[j]), y2b = std::get<3>(boxes[j]);
+            float x1a = boxes[i].x1, y1a = boxes[i].y1;
+            float x2a = boxes[i].x2, y2a = boxes[i].y2;
+            float x1b = boxes[j].x1, y1b = boxes[j].y1;
+            float x2b = boxes[j].x2, y2b = boxes[j].y2;
 
-            float interX1 = std::max(x1a, x1b);
-            float interY1 = std::max(y1a, y1b);
-            float interX2 = std::min(x2a, x2b);
-            float interY2 = std::min(y2a, y2b);
-
-            float interW = std::max(0.0f, interX2 - interX1);
-            float interH = std::max(0.0f, interY2 - interY1);
+            float interW = std::max(0.0f, std::min(x2a, x2b) - std::max(x1a, x1b));
+            float interH = std::max(0.0f, std::min(y2a, y2b) - std::max(y1a, y1b));
             float interArea = interW * interH;
+            float unionArea = (x2a - x1a) * (y2a - y1a) + (x2b - x1b) * (y2b - y1b) - interArea;
 
-            float areaA = (x2a - x1a) * (y2a - y1a);
-            float areaB = (x2b - x1b) * (y2b - y1b);
-            float unionArea = areaA + areaB - interArea;
-
-            float iou = unionArea > 0 ? interArea / unionArea : 0.0f;
-
-            if (iou > iouThreshold) {
-                suppressed[j] = true;
+            if (unionArea > 0 && interArea / unionArea > iouThreshold) {
+                suppressed[j] = 1;
             }
         }
     }
@@ -285,6 +298,13 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     int H = g_input_height;
     int W = g_input_width;
 
+    // Precompute coordinate LUTs for center-crop + nearest-neighbor resize
+    int srcX_lut[256], srcY_lut[256];
+    for (int x = 0; x < W; ++x) srcX_lut[x] = offsetX + x * regionWidth / W;
+    for (int y = 0; y < H; ++y) srcY_lut[y] = offsetY + y * regionHeight / H;
+
+    static const float inv255 = 1.0f / 255.0f;
+
     // Fill input tensor based on type
     TfLiteType input_type = TfLiteTensorType(input_tensor);
     void* input_data = TfLiteTensorData(input_tensor);
@@ -302,19 +322,13 @@ Java_team_maodie_aimbot_JniCallBack_detect(
         int input_zero_point = qp_input.zero_point;
 
         for (int y = 0; y < H; ++y) {
+            int baseRow = srcY_lut[y] * rowStride;
             for (int x = 0; x < W; ++x) {
-                int srcX = offsetX + x * regionWidth / W;
-                int srcY = offsetY + y * regionHeight / H;
-                int srcIdx = srcY * rowStride + srcX * pixelStride;
-
-                float r = src[srcIdx + 0] / 255.0f;
-                float g = src[srcIdx + 1] / 255.0f;
-                float b = src[srcIdx + 2] / 255.0f;
-
+                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
                 int idx = (y * W + x) * 3;
-                data[idx + 0] = (int8_t)std::round(r / input_scale + input_zero_point);
-                data[idx + 1] = (int8_t)std::round(g / input_scale + input_zero_point);
-                data[idx + 2] = (int8_t)std::round(b / input_scale + input_zero_point);
+                data[idx + 0] = (int8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
+                data[idx + 1] = (int8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
+                data[idx + 2] = (int8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
             }
         }
     } else if (input_type == kTfLiteUInt8) {
@@ -323,19 +337,13 @@ Java_team_maodie_aimbot_JniCallBack_detect(
         int input_zero_point = qp_input.zero_point;
 
         for (int y = 0; y < H; ++y) {
+            int baseRow = srcY_lut[y] * rowStride;
             for (int x = 0; x < W; ++x) {
-                int srcX = offsetX + x * regionWidth / W;
-                int srcY = offsetY + y * regionHeight / H;
-                int srcIdx = srcY * rowStride + srcX * pixelStride;
-
-                float r = src[srcIdx + 0] / 255.0f;
-                float g = src[srcIdx + 1] / 255.0f;
-                float b = src[srcIdx + 2] / 255.0f;
-
+                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
                 int idx = (y * W + x) * 3;
-                data[idx + 0] = (uint8_t)std::round(r / input_scale + input_zero_point);
-                data[idx + 1] = (uint8_t)std::round(g / input_scale + input_zero_point);
-                data[idx + 2] = (uint8_t)std::round(b / input_scale + input_zero_point);
+                data[idx + 0] = (uint8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
+                data[idx + 1] = (uint8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
+                data[idx + 2] = (uint8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
             }
         }
     } else {
@@ -343,15 +351,13 @@ Java_team_maodie_aimbot_JniCallBack_detect(
         float* data = static_cast<float*>(input_data);
 
         for (int y = 0; y < H; ++y) {
+            int baseRow = srcY_lut[y] * rowStride;
             for (int x = 0; x < W; ++x) {
-                int srcX = offsetX + x * regionWidth / W;
-                int srcY = offsetY + y * regionHeight / H;
-                int srcIdx = srcY * rowStride + srcX * pixelStride;
-
+                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
                 int idx = (y * W + x) * 3;
-                data[idx + 0] = src[srcIdx + 0] / 255.0f;
-                data[idx + 1] = src[srcIdx + 1] / 255.0f;
-                data[idx + 2] = src[srcIdx + 2] / 255.0f;
+                data[idx + 0] = src[srcIdx + 0] * inv255;
+                data[idx + 1] = src[srcIdx + 1] * inv255;
+                data[idx + 2] = src[srcIdx + 2] * inv255;
             }
         }
     }
@@ -375,7 +381,11 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     }
 
     // Output shape: [1, 5, num_outputs] - YOLOv8n format
-    std::vector<std::tuple<float, float, float, float, float, float>> detections;
+    std::vector<Detection> detections;
+    detections.reserve(g_num_outputs);
+
+    float invW = 1.0f / screenWidth;
+    float invH = 1.0f / screenHeight;
 
     TfLiteType output_type = TfLiteTensorType(output_tensor);
     void* output_data = const_cast<void*>(TfLiteTensorData(output_tensor));
@@ -397,26 +407,15 @@ Java_team_maodie_aimbot_JniCallBack_detect(
             if (bw <= 0 || bh <= 0) continue;
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
 
-            // xywh to xyxy
-            float x1 = cx - bw * 0.5f;
-            float y1 = cy - bh * 0.5f;
-            float x2 = cx + bw * 0.5f;
-            float y2 = cy + bh * 0.5f;
-
-            // Convert to screen coordinates
-            float screenX1 = offsetX + x1 * regionWidth;
-            float screenY1 = offsetY + y1 * regionHeight;
-            float screenX2 = offsetX + x2 * regionWidth;
-            float screenY2 = offsetY + y2 * regionHeight;
-
-            detections.emplace_back(
-                screenX1 / screenWidth,
-                screenY1 / screenHeight,
-                screenX2 / screenWidth,
-                screenY2 / screenHeight,
+            float hw = bw * 0.5f, hh = bh * 0.5f;
+            detections.push_back({
+                (offsetX + (cx - hw) * regionWidth) * invW,
+                (offsetY + (cy - hh) * regionHeight) * invH,
+                (offsetX + (cx + hw) * regionWidth) * invW,
+                (offsetY + (cy + hh) * regionHeight) * invH,
                 score,
                 0.0f
-            );
+            });
         }
     } else {
         // Float32 output
@@ -433,26 +432,15 @@ Java_team_maodie_aimbot_JniCallBack_detect(
             if (bw <= 0 || bh <= 0) continue;
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
 
-            // xywh to xyxy
-            float x1 = cx - bw * 0.5f;
-            float y1 = cy - bh * 0.5f;
-            float x2 = cx + bw * 0.5f;
-            float y2 = cy + bh * 0.5f;
-
-            // Convert to screen coordinates
-            float screenX1 = offsetX + x1 * regionWidth;
-            float screenY1 = offsetY + y1 * regionHeight;
-            float screenX2 = offsetX + x2 * regionWidth;
-            float screenY2 = offsetY + y2 * regionHeight;
-
-            detections.emplace_back(
-                screenX1 / screenWidth,
-                screenY1 / screenHeight,
-                screenX2 / screenWidth,
-                screenY2 / screenHeight,
+            float hw = bw * 0.5f, hh = bh * 0.5f;
+            detections.push_back({
+                (offsetX + (cx - hw) * regionWidth) * invW,
+                (offsetY + (cy - hh) * regionHeight) * invH,
+                (offsetX + (cx + hw) * regionWidth) * invW,
+                (offsetY + (cy + hh) * regionHeight) * invH,
                 score,
                 0.0f
-            );
+            });
         }
     }
 
@@ -467,19 +455,16 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     }
 
     jfloatArray res = env->NewFloatArray(finalDetections.size() * 6);
-    std::vector<float> result_flat;
-    result_flat.reserve(finalDetections.size() * 6);
-
+    float* dst = env->GetFloatArrayElements(res, nullptr);
     for (size_t i = 0; i < finalDetections.size(); ++i) {
-        result_flat.push_back(std::get<5>(finalDetections[i]));  // classId
-        result_flat.push_back(std::get<4>(finalDetections[i]));  // score
-        result_flat.push_back(std::get<0>(finalDetections[i]));  // x1
-        result_flat.push_back(std::get<1>(finalDetections[i]));  // y1
-        result_flat.push_back(std::get<2>(finalDetections[i]));  // x2
-        result_flat.push_back(std::get<3>(finalDetections[i]));  // y2
+        dst[i * 6 + 0] = finalDetections[i].classId;
+        dst[i * 6 + 1] = finalDetections[i].score;
+        dst[i * 6 + 2] = finalDetections[i].x1;
+        dst[i * 6 + 3] = finalDetections[i].y1;
+        dst[i * 6 + 4] = finalDetections[i].x2;
+        dst[i * 6 + 5] = finalDetections[i].y2;
     }
-
-    env->SetFloatArrayRegion(res, 0, result_flat.size(), result_flat.data());
+    env->ReleaseFloatArrayElements(res, dst, 0);
 
     return res;
 }
@@ -495,6 +480,15 @@ Java_team_maodie_aimbot_JniCallBack_setConfidence(JNIEnv* /*env*/, jobject /*thi
 }
 
 //==============================================================================
+//  Get backend type
+//==============================================================================
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_team_maodie_aimbot_JniCallBack_getBackend(JNIEnv* env, jobject /*thiz*/) {
+    return env->NewStringUTF(g_backend_type.c_str());
+}
+
+//==============================================================================
 //  Release
 //==============================================================================
 extern "C"
@@ -504,10 +498,7 @@ Java_team_maodie_aimbot_JniCallBack_release(JNIEnv* /*env*/, jobject /*thiz*/) {
         TfLiteInterpreterDelete(g_interpreter);
         g_interpreter = nullptr;
     }
-    if (g_qnn_delegate) {
-        TfLiteQnnDelegateDelete(g_qnn_delegate);
-        g_qnn_delegate = nullptr;
-    }
+    deleteDelegate();
     if (g_model) {
         TfLiteModelDelete(g_model);
         g_model = nullptr;

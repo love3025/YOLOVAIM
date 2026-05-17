@@ -121,6 +121,19 @@ class FloatService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "STOP") {
+            // 同步清理所有视图，避免残影
+            inferRunning.set(false)
+            executor.shutdown()
+            cleanupViews()
+            shizukuClient?.stopGeteventListener()
+            shizukuClient?.destroyRemote()
+            shizukuClient?.disconnect()
+            mediaProjection?.stop()
+            try { stopForeground(true) } catch (_: Exception) {}
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val code = ProjectionHolder.resultCode; val data = ProjectionHolder.resultData
         if (data != null) {
             try {
@@ -129,12 +142,26 @@ class FloatService : Service() {
             } catch (e: Exception) { Log.e(TAG, "projection创建失败: ${e.message}") }
         }
         setupBall(); setupOverlay(); initTouchInjector()
+        ProjectionHolder.updateState(1, JniCallBack.getBackend())
         return START_NOT_STICKY
+    }
+
+    private fun broadcastState(state: Int, modelName: String? = null) {
+        ProjectionHolder.updateState(state, modelName ?: ProjectionHolder.currentModelName)
+    }
+
+    private fun cleanupViews() {
+        try { if (ballAdded) { wm.removeView(ballView); ballAdded = false } } catch (_: Exception) {}
+        try { if (overlayAdded) { wm.removeView(overlayView); overlayAdded = false } } catch (_: Exception) {}
+        try { if (guiAdded) { wm.removeView(guiPanel); guiAdded = false; guiVisible = false } } catch (_: Exception) {}
+        try { if (triggerOverlayAdded) { wm.removeView(triggerOverlay); triggerOverlayAdded = false } } catch (_: Exception) {}
+        try { if (touchDisplayAdded) { wm.removeView(touchDisplayView); touchDisplayAdded = false } } catch (_: Exception) {}
     }
 
     private fun setupBall() {
         val size = dp(35)
         ballView = FloatBallView(this)
+        ProjectionHolder.floatBallView = ballView
         ballParams = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE).apply { gravity = Gravity.TOP or Gravity.START; x = 50; y = 200 }
         ballView.onMoveCallback = { dx, dy -> ballParams?.let { it.x += dx; it.y += dy; wm.updateViewLayout(ballView, it) } }
         ballView.onClickCallback = { toggleGui() }; wm.addView(ballView, ballParams); ballAdded = true
@@ -142,6 +169,7 @@ class FloatService : Service() {
 
     private fun setupOverlay() {
         overlayView = OverlayCanvasView(this)
+        ProjectionHolder.overlayCanvasView = overlayView
         overlayParams = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
         wm.addView(overlayView, overlayParams); overlayAdded = true
     }
@@ -186,6 +214,7 @@ class FloatService : Service() {
     private fun setupTriggerOverlay() {
         if (triggerOverlayAdded) return
         triggerOverlay = TriggerOverlayView(this)
+        ProjectionHolder.triggerOverlayView = triggerOverlay
         val size = dp(triggerTouchRange.coerceAtLeast(30))
         val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
         p.gravity = Gravity.TOP or Gravity.START
@@ -221,6 +250,7 @@ class FloatService : Service() {
         val defaultDot = dp(20)
         val size = defaultDot * 2
         touchDisplayView = TouchDisplayView(this).apply { dotRadius = defaultDot.toFloat(); showDot = false }
+        ProjectionHolder.touchDisplayView = touchDisplayView
         val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
         p.gravity = Gravity.CENTER
         p.x = (screenWidth - size) / 2; p.y = (screenHeight - size) / 2
@@ -246,6 +276,7 @@ class FloatService : Service() {
         if (guiAdded) { try { wm.removeView(guiPanel) } catch (_: Exception) {} }
         guiAdded = false
         guiPanel = GuiPanelView(this)
+        ProjectionHolder.guiPanelView = guiPanel
         guiPanel.aimbotEnabled = aimbotOn.get()
         guiPanel.speed = currentSpeed
         guiPanel.range = overlayView.rangeRadius.coerceIn(50, 800)
@@ -299,7 +330,7 @@ class FloatService : Service() {
                 if (lp != null) { lp.width = p * 2; lp.height = p * 2; wm.updateViewLayout(touchDisplayView, lp) }
             }
         }
-        guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) inferRunning.set(false) }
+        guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) { inferRunning.set(false); broadcastState(1) } }
         guiPanel.onTestCircle = {
             mainHandler.post {
                 Thread {
@@ -343,6 +374,7 @@ class FloatService : Service() {
 
     private fun startInferLoop() {
         if (inferRunning.getAndSet(true)) { Log.d(TAG, "infer loop already running"); return }
+        broadcastState(2) // INFERENCING
         centerX = screenWidth / 2f; centerY = screenHeight / 2f
         Log.d(TAG, "infer loop started, center=($centerX,$centerY)")
         executor.execute {
@@ -454,11 +486,11 @@ class FloatService : Service() {
     override fun onDestroy() {
         inferRunning.set(false); executor.shutdown()
         shizukuClient?.stopGeteventListener()
+        shizukuClient?.destroyRemote()
         shizukuClient?.disconnect()
         mediaProjection?.stop()
-        if (ballAdded) wm.removeView(ballView); if (overlayAdded) wm.removeView(overlayView); if (guiAdded) wm.removeView(guiPanel)
-        if (triggerOverlayAdded) { try { wm.removeView(triggerOverlay) } catch (_: Exception) {} }
-        if (touchDisplayAdded) { try { wm.removeView(touchDisplayView) } catch (_: Exception) {} }
+        cleanupViews()
+        try { stopForeground(true) } catch (_: Exception) {}
         super.onDestroy()
     }
 

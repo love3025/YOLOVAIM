@@ -294,6 +294,7 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     }
 
     public void destroy() {
+        Log.d(TAG, "destroy called");
         available = false;
         closeUinput();
         inputManager = null;

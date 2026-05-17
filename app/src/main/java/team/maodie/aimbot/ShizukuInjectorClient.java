@@ -204,6 +204,18 @@ public class ShizukuInjectorClient {
         }
     }
 
+    public void destroyRemote() {
+        if (remoteService != null) {
+            try {
+                java.lang.reflect.Method m = remoteService.getClass().getMethod("destroy");
+                m.invoke(remoteService);
+                Log.d(TAG, "destroyRemote called");
+            } catch (Exception e) {
+                Log.e(TAG, "destroyRemote: " + e.getMessage());
+            }
+        }
+    }
+
     public int[] queryDeviceAbs(String devicePath, int axis) {
         // Query device ABS info via getevent
         try {
