@@ -1,0 +1,7 @@
+# Release Signing Configuration
+# File: app/release.jks
+
+keystore: app/release.jks
+alias: aimbot
+storepass: aimbot123456
+keypass: aimbot123456
