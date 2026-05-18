@@ -33,8 +33,6 @@ class FloatService : Service() {
 
     private var mediaProjection: MediaProjection? = null
     private var imageReader: ImageReader? = null
-    private var captureVirtualDisplay: android.hardware.display.VirtualDisplay? = null
-    private var captureW = 0; private var captureH = 0  // natural display size for ImageReader + coords
     private val screenWidth get() = resources.displayMetrics.widthPixels
     private val screenHeight get() = resources.displayMetrics.heightPixels
     private val screenDensity get() = resources.displayMetrics.densityDpi
@@ -56,13 +54,10 @@ class FloatService : Service() {
     // PID auto-aim state
     private var aimOffsetX = 0; private var aimOffsetY = 0
     private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
-    private var prevErrorX = 0f; private var prevErrorY = 0f
-    private var integralX = 0f; private var integralY = 0f
     private var aimPointerDown = false
     private var aimCenterX = 0f; private var aimCenterY = 0f
     private var aimStartX = 0f; private var aimStartY = 0f  // initial DOWN position
     private var maxDragDist = 400f  // max drag distance from start before lift+re-down
-    private var lockedTarget: android.graphics.RectF? = null  // locked target for hysteresis
 
     // Touch display overlay
     private var touchDisplayEnabled = false
@@ -191,8 +186,8 @@ class FloatService : Service() {
                 client.connect(object : ShizukuInjectorClient.InjectorCallback {
                     override fun onConnected() {
                         shizukuClient = client
-                        client.setOrientationConfig(captureW > captureH)
-                        client.setResolution(captureW, captureH, devW, devH)
+                        client.setOrientationConfig(screenWidth > screenHeight)
+                        client.setResolution(screenWidth, screenHeight, devW, devH)
                         Log.d(TAG, "ShizukuInjectorClient connected, resolution=$devW,$devH, calling init...")
 
                         try {
@@ -253,13 +248,12 @@ class FloatService : Service() {
 
     private fun setupTouchDisplayView() {
         if (touchDisplayAdded) return
-        val size = dp(guiPanel.aimTouchSize) * 2
+        val size = dp(60)
         touchDisplayView = TouchDisplayView(this)
         ProjectionHolder.touchDisplayView = touchDisplayView
         val p = makeParams(size, size, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
         p.gravity = Gravity.TOP or Gravity.START
         p.x = screenWidth / 2 - size / 2; p.y = screenHeight / 2 - size / 2
-        touchDisplayView!!.dotRadius = dp(guiPanel.aimTouchSize).toFloat()
         wm.addView(touchDisplayView, p); touchDisplayAdded = true
         touchDisplayView!!.alpha = 0f
     }
@@ -280,9 +274,6 @@ class FloatService : Service() {
             guiPanel.visibility = View.VISIBLE; guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
             guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start(); guiVisible = true; return
         }
-        // Save state from old panel before destroying
-        val savedTab = if (guiAdded) guiPanel.activeTab else 0
-        val savedTouchSize = if (guiAdded) guiPanel.aimTouchSize else 20
         if (guiAdded) { try { wm.removeView(guiPanel) } catch (_: Exception) {} }
         guiAdded = false
         guiPanel = GuiPanelView(this)
@@ -302,18 +293,11 @@ class FloatService : Service() {
         guiPanel.aimOffsetY = aimOffsetY
         guiPanel.ki = ki; guiPanel.kd = kd
         guiPanel.aimTouchDisplay = touchDisplayEnabled
-        guiPanel.aimTouchSize = savedTouchSize
+        guiPanel.aimTouchSize = dp(20)
         guiPanel.modelRunning = modelRunning
         guiPanel.showCaptureRange = overlayView.showCaptureRange
         guiPanel.showDetectionBox = overlayView.showDetectionBox
         guiPanel.showCenterDot = overlayView.showCenterDot
-        guiPanel.activeTab = savedTab
-        guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
-        guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
-        guiPanel.onModelSelected = { idx ->
-            val e = ProjectionHolder.modelList.getOrNull(idx)
-            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
-        }
         guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
         guiParams = makeParams((280 * resources.displayMetrics.density).toInt(), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
@@ -327,6 +311,12 @@ class FloatService : Service() {
         guiPanel.onSpeedChanged = { kp = it; currentSpeed = it }
         guiPanel.onRangeChanged = { px -> overlayView.rangeRadius = px; overlayView.postInvalidate() }
         guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it) }
+        guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
+        guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
+        guiPanel.onModelSelected = { idx ->
+            val e = ProjectionHolder.modelList.getOrNull(idx)
+            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
+        }
         guiPanel.onTriggerEnabled = { triggerEnabled = it }
         guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it }
         guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it }
@@ -403,20 +393,18 @@ class FloatService : Service() {
     }
 
     private fun setupImageReader() {
-        captureW = screenWidth; captureH = screenHeight
-        Log.d(TAG, "setupImageReader: w=${captureW} h=${captureH}")
-
-        imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() { Log.d("AimbotInfer", "MediaProjection 停止"); inferRunning.set(false); imageReader?.close() }
         }, Handler(Looper.getMainLooper()))
-        captureVirtualDisplay = mediaProjection?.createVirtualDisplay("AimbotCapture", captureW, captureH, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null)
+        mediaProjection?.createVirtualDisplay("AimbotCapture", screenWidth, screenHeight, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null)
+        Log.d("AimbotInfer", "imageReader 创建成功")
     }
 
     private fun startInferLoop() {
         if (inferRunning.getAndSet(true)) { Log.d(TAG, "infer loop already running"); return }
         broadcastState(2) // INFERENCING
-        centerX = captureW / 2f; centerY = captureH / 2f
+        centerX = screenWidth / 2f; centerY = screenHeight / 2f
         Log.d(TAG, "infer loop started, center=($centerX,$centerY)")
         executor.execute {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
@@ -431,14 +419,14 @@ class FloatService : Service() {
                     hasDetects = false
                     val plane = image.planes[0]; val buffer = plane.buffer
                     val regionW = cachedRangePx * 2; val regionH = cachedRangePx * 2
-                    val offsetX = (captureW - regionW) / 2; val offsetY = (captureH - regionH) / 2
+                    val offsetX = (screenWidth - regionW) / 2; val offsetY = (screenHeight - regionH) / 2
 
-                    val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
+                    val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, screenWidth, screenHeight, plane.rowStride, plane.pixelStride)
 
                     if (result != null) {
                         val count = result.size / 6; var rectCount = 0; var i = 0
                         while (i < count && rectCount < rectBuffer.size) {
-                            rectBuffer[rectCount].set(result[i*6+2]*captureW, result[i*6+3]*captureH, result[i*6+4]*captureW, result[i*6+5]*captureH)
+                            rectBuffer[rectCount].set(result[i*6+2]*screenWidth, result[i*6+3]*screenHeight, result[i*6+4]*screenWidth, result[i*6+5]*screenHeight)
                             rectCount++; i++
                         }
                         hasDetects = rectCount > 0
@@ -446,44 +434,14 @@ class FloatService : Service() {
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
                         if (aimbotOn.get() && rectCount > 0) {
-                            // Target lock: match same target across frames by min center distance
-                            var bestX = 0f; var bestY = 0f
-                            val lock = lockedTarget
-                            val lockCx: Float; val lockCy: Float
-                            if (lock != null) {
-                                lockCx = lock.centerX(); lockCy = lock.centerY()
-                            } else {
-                                lockCx = 0f; lockCy = 0f
-                            }
-                            if (lock != null) {
-                                var minDist = Float.MAX_VALUE; var mx = 0f; var my = 0f
-                                for (idx in 0 until rectCount) {
-                                    val r = rectBuffer[idx]
-                                    val bcx = (r.left+r.right)*0.5f
-                                    val bcy = (r.top+r.bottom)*0.5f
-                                    val d = (bcx-lockCx)*(bcx-lockCx) + (bcy-lockCy)*(bcy-lockCy)
-                                    if (d < minDist) { minDist = d; mx = bcx; my = bcy }
-                                }
-                                if (minDist < 22500f) {
-                                    bestX = mx; bestY = my
-                                    lock.set(bestX, bestY, bestX, bestY)
-                                } else {
-                                    // Lock lost, fall through to re-select
-                                    lockedTarget = null
-                                }
-                            }
-                            if (lockedTarget == null) {
-                                // Pick closest to crosshair center
-                                var bestDistSq = Float.MAX_VALUE; var cx = centerX; var cy = centerY
-                                for (idx in 0 until rectCount) {
-                                    val r = rectBuffer[idx]
-                                    val bcx = (r.left+r.right)*0.5f
-                                    val bcy = (r.top+r.bottom)*0.5f
-                                    val d = (bcx-centerX)*(bcx-centerX) + (bcy-centerY)*(bcy-centerY)
-                                    if (d < bestDistSq) { bestDistSq = d; cx = bcx; cy = bcy }
-                                }
-                                bestX = cx; bestY = cy
-                                lockedTarget = android.graphics.RectF(bestX, bestY, bestX, bestY)
+                            // Find best target (closest to current aim position)
+                            var bestDistSq = Float.MAX_VALUE; var bestX = centerX; var bestY = centerY
+                            for (idx in 0 until rectCount) {
+                                val r = rectBuffer[idx]
+                                val bcx = (r.left+r.right)*0.5f
+                                val bcy = (r.top+r.bottom)*0.5f
+                                val dx = bcx-aimCenterX; val dy = bcy-aimCenterY; val d = dx*dx+dy*dy
+                                if (d < bestDistSq) { bestDistSq = d; bestX = bcx; bestY = bcy }
                             }
                             val targetX = bestX + aimOffsetX
                             val targetY = bestY + aimOffsetY
@@ -496,8 +454,6 @@ class FloatService : Service() {
                                     aimCenterY = lp.y + lp.height / 2f
                                     aimStartX = aimCenterX
                                     aimStartY = aimCenterY
-                                    prevErrorX = 0f; prevErrorY = 0f
-                                    integralX = 0f; integralY = 0f
                                     Log.d(TAG, "aim DOWN at ($aimCenterX, $aimCenterY) target=($targetX, $targetY)")
                                     shizukuClient?.swipe(aimCenterX.toInt(), aimCenterY.toInt(), aimCenterX.toInt(), aimCenterY.toInt(), 0)
                                     aimPointerDown = true
@@ -511,20 +467,10 @@ class FloatService : Service() {
                                     Log.d(TAG, "aim converged error=($errorX, $errorY)")
                                     shizukuClient?.lift()
                                     aimPointerDown = false
-                                    lockedTarget = null
                                 } else {
-                                    // PID with anti-windup: reset integral on error zero-crossing
-                                    if (errorX * prevErrorX <= 0) integralX = 0f
-                                    if (errorY * prevErrorY <= 0) integralY = 0f
-                                    integralX += errorX; integralY += errorY
-                                    val integralLimit = 100f
-                                    integralX = integralX.coerceIn(-integralLimit, integralLimit)
-                                    integralY = integralY.coerceIn(-integralLimit, integralLimit)
-                                    val derivativeX = errorX - prevErrorX
-                                    val derivativeY = errorY - prevErrorY
-                                    var moveX = errorX * kp + integralX * ki + derivativeX * kd
-                                    var moveY = errorY * kp + integralY * ki + derivativeY * kd
-                                    prevErrorX = errorX; prevErrorY = errorY
+                                    // 连续移动：触摸往目标方向移
+                                    var moveX = errorX * kp
+                                    var moveY = errorY * kp
                                     val maxPerFrame = 600f
                                     val moveDist = Math.sqrt((moveX*moveX + moveY*moveY).toDouble()).toFloat()
                                     if (moveDist > maxPerFrame) {
@@ -541,7 +487,6 @@ class FloatService : Service() {
                                     if (dragDist > maxDragDist) {
                                         shizukuClient?.lift()
                                         aimPointerDown = false
-                                        lockedTarget = null
                                         Log.d(TAG, "aim edge lift at ($aimCenterX, $aimCenterY) drag=$dragDist")
                                     } else {
                                         shizukuClient?.moveTo(aimCenterX.toInt(), aimCenterY.toInt())
@@ -552,7 +497,6 @@ class FloatService : Service() {
                     } else if (aimPointerDown) {
                         shizukuClient?.lift()
                         aimPointerDown = false
-                        lockedTarget = null
                     }
 
                     // detection-based trigger: center in any detection box
@@ -596,62 +540,26 @@ class FloatService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        Log.d(TAG, "orientation changed: display=${screenWidth}x${screenHeight} capture=${captureW}x${captureH}")
-        // Touch resolution always uses natural orientation (captureW/captureH)
-        shizukuClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
-        centerX = captureW / 2f; centerY = captureH / 2f
+        Log.d(TAG, "orientation changed: w=${screenWidth} h=${screenHeight}")
+        shizukuClient?.setResolution(screenWidth, screenHeight, deviceAbsMaxX, deviceAbsMaxY)
+        centerX = screenWidth / 2f; centerY = screenHeight / 2f
 
-        // Update overlay positions (UI uses current display metrics)
-        val ov = triggerOverlay
-        if (triggerOverlayAdded && ov != null) {
+        if (triggerOverlayAdded) {
+            val ov = triggerOverlay ?: return
             val size = dp(triggerTouchRange.coerceAtLeast(30))
-            (ov.layoutParams as? WindowManager.LayoutParams)?.let { p ->
-                p.width = size; p.height = size
-                p.x = screenWidth / 2 - size / 2; p.y = screenHeight / 2 - size / 2
-                triggerAreaX = p.x; triggerAreaY = p.y
-                wm.updateViewLayout(ov, p)
-            }
+            val p = ov.layoutParams as? WindowManager.LayoutParams ?: return
+            p.width = size; p.height = size
+            p.x = screenWidth / 2 - size / 2; p.y = screenHeight / 2 - size / 2
+            triggerAreaX = p.x; triggerAreaY = p.y
+            wm.updateViewLayout(ov, p)
         }
         if (overlayAdded) {
-            (overlayView.layoutParams as? WindowManager.LayoutParams)?.let { p ->
-                p.width = screenWidth; p.height = screenHeight
-                wm.updateViewLayout(overlayView, p)
-            }
+            val p = overlayView.layoutParams as? WindowManager.LayoutParams ?: return
+            p.width = screenWidth; p.height = screenHeight
+            wm.updateViewLayout(overlayView, p)
         }
         if (guiAdded && guiVisible) {
             wm.removeView(guiPanel); guiAdded = false; showGui()
-        }
-
-        // Resize capture without recreating VirtualDisplay (avoids SecurityException)
-        restartCapture()
-    }
-
-    private fun restartCapture() {
-        val curW = screenWidth; val curH = screenHeight
-        if (captureW == curW && captureH == curH) return  // no change
-
-        val wasRunning = inferRunning.getAndSet(false)
-        Log.d(TAG, "restartCapture: wasRunning=$wasRunning newSize=${curW}x${curH}")
-        executor.execute {
-            try { Thread.sleep(200) } catch (_: Exception) {}
-            // Close old reader
-            val oldReader = imageReader
-            imageReader = null
-            try { oldReader?.close() } catch (_: Exception) {}
-            // Create new reader at new size
-            imageReader = ImageReader.newInstance(curW, curH, PixelFormat.RGBA_8888, 2)
-            // Resize VirtualDisplay and attach new surface
-            try {
-                captureVirtualDisplay?.resize(curW, curH, screenDensity)
-                captureVirtualDisplay?.setSurface(imageReader!!.surface)
-                Log.d(TAG, "restartCapture: resized to ${curW}x${curH}")
-            } catch (e: Exception) {
-                Log.w(TAG, "VirtualDisplay resize failed: ${e.message}")
-            }
-            captureW = curW; captureH = curH
-            shizukuClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
-            centerX = captureW / 2f; centerY = captureH / 2f
-            if (wasRunning) startInferLoop()
         }
     }
 

@@ -693,9 +693,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun syncStateFromHolder() {
         val stateOrdinal = ProjectionHolder.currentState
-        if (stateOrdinal > 0 && ::statusText.isInitialized) {
+        if (::statusText.isInitialized) {
             val state = AimbotState.entries[stateOrdinal]
             val modelName = ProjectionHolder.currentModelName
+            aimbotState = state
             statusText.text = when (state) {
                 AimbotState.STANDBY -> "待机中"
                 AimbotState.RUNNING -> "运行中"
