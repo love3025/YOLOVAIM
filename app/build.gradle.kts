@@ -11,12 +11,12 @@ android {
         applicationId = "team.maodie.aimbot"
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            abiFilters += listOf("arm64-v8a")  // 仅编译 arm64，匹配预编译 ONNX lib
+            abiFilters += listOf("arm64-v8a")
         }
         externalNativeBuild {
             cmake {
@@ -70,7 +70,9 @@ android {
 
 dependencies {
     implementation(libs.onnxruntime.android)
-    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite) {
+        exclude(group = "org.tensorflow", module = "tensorflow-lite-support-api")
+    }
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
