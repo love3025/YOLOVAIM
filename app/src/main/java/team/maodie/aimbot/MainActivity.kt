@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     private var modelList: List<ModelInfo> = emptyList()
     private var selectedModelIndex = 0
+    private var modelInfoCardView: LinearLayout? = null
     private var aimbotState = AimbotState.STANDBY
 
     private lateinit var statusText: TextView
@@ -394,7 +395,7 @@ class MainActivity : AppCompatActivity() {
             val dropdownLayout = layoutInflater.inflate(R.layout.dropdown_layout, null) as TextInputLayout
             val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
 
-            autoComplete.setText(displayNames[0], false)
+            autoComplete.setText(displayNames[selectedModelIndex], false)
 
             val adapter = ArrayAdapter(
                 this@MainActivity,
@@ -407,14 +408,18 @@ class MainActivity : AppCompatActivity() {
                 selectedModelIndex = position
                 val model = modelList[position]
                 loadModel(model.filename)
+                modelInfoCardView?.let { removeView(it) }
+                modelInfoCardView = buildModelInfoCard(model)
+                addView(modelInfoCardView!!)
             }
 
             addView(dropdownLayout)
             addView(createSpacer(16))
 
             if (modelList.isNotEmpty()) {
-                val model = modelList[0]
-                addView(buildModelInfoCard(model))
+                val model = modelList[selectedModelIndex]
+                modelInfoCardView = buildModelInfoCard(model)
+                addView(modelInfoCardView!!)
             }
         }
     }

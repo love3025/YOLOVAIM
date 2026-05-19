@@ -56,6 +56,7 @@ class FloatService : Service() {
     // PID auto-aim state
     private var aimOffsetX = 0; private var aimOffsetY = 0
     private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
+    private var aimHoldEnabled = false
     private var prevErrorX = 0f; private var prevErrorY = 0f
     private var integralX = 0f; private var integralY = 0f
     private var aimPointerDown = false
@@ -64,61 +65,101 @@ class FloatService : Service() {
     private var maxDragDist = 400f  // max drag distance from start before lift+re-down
     private var lockedTarget: android.graphics.RectF? = null  // locked target for hysteresis
 
+    // Hold-to-fire (按住激发) state — uses trigger slot, separate from aim slot
+
     // Touch display overlay
     private var touchDisplayEnabled = false
     private var touchDisplayView: TouchDisplayView? = null
     private var touchDisplayAdded = false
+
+    // Area settings overlay
+    private var areaSettingsView: AreaSettingsView? = null
+    private var areaSettingsAdded = false
+    private val savedAreas = mutableListOf<AreaConfig>()
 
     // Device resolution for uinput (queried from real touchpanel)
     private var deviceAbsMaxX = 21199
     private var deviceAbsMaxY = 29999
 
     private fun queryDeviceResolution(): Pair<Int, Int> {
+        Log.d(TAG, "queryDeviceResolution: starting getevent -p")
         try {
             val process = Runtime.getRuntime().exec("getevent -p")
             val reader = process.inputStream.bufferedReader()
             var line: String?
+            var currentDevice = ""
+            var currentName = ""
+            var hasPosX = false
+            var hasPosY = false
+            var currentAbsX = 0
+            var currentAbsY = 0
+
             while (reader.readLine().also { line = it } != null) {
                 val l = line!!
-                if (l.contains("touchpanel") && !l.contains("Aimbot")) {
-                    // Found real touchpanel, get ABS_X (0x35) and ABS_Y (0x36) ranges
-                    while (reader.readLine().also { line = it } != null) {
-                        val cur = line!!
-                        if (!cur.contains("ABS")) break
-                        if (cur.contains("0035")) {
-                            val maxMatch = Regex("max\\s*(\\d+)").find(cur)
-                            if (maxMatch != null) {
-                                deviceAbsMaxX = maxMatch.groupValues[1].toInt()
-                                Log.d(TAG, "Found ABS_X max=$deviceAbsMaxX from: $cur")
-                            }
+                when {
+                    // Track which device section we're in
+                    l.startsWith("add device") -> {
+                        // Process previous device
+                        if (currentDevice.isNotEmpty() && hasPosX && hasPosY
+                            && "Aimbot" !in currentName && "Pen" !in currentName && "pen" !in currentName) {
+                            deviceAbsMaxX = currentAbsX
+                            deviceAbsMaxY = currentAbsY
+                            reader.close()
+                            Log.d(TAG, "Detected device ABS: X max=$deviceAbsMaxX, Y max=$deviceAbsMaxY from $currentDevice ($currentName)")
+                            return Pair(deviceAbsMaxX, deviceAbsMaxY)
                         }
-                        if (cur.contains("0036")) {
-                            val maxMatch = Regex("max\\s*(\\d+)").find(cur)
-                            if (maxMatch != null) {
-                                deviceAbsMaxY = maxMatch.groupValues[1].toInt()
-                                Log.d(TAG, "Found ABS_Y max=$deviceAbsMaxY from: $cur")
-                            }
+                        // Reset for new device
+                        val p = l.indexOf("/dev/input/event")
+                        currentDevice = if (p >= 0) l.substring(p).trim() else ""
+                        currentName = ""
+                        hasPosX = false; hasPosY = false
+                        currentAbsX = 0; currentAbsY = 0
+                    }
+                    l.trimStart().startsWith("name:") -> {
+                        currentName = l.substringAfter('"', "").substringBefore('"')
+                    }
+                    l.contains("0035") && l.contains("max") -> {
+                        val maxMatch = Regex("max\\s*(\\d+)").find(l)
+                        if (maxMatch != null) {
+                            currentAbsX = maxMatch.groupValues[1].toInt()
+                            hasPosX = true
                         }
                     }
-                    reader.close()
-                    Log.d(TAG, "Detected device ABS: X max=$deviceAbsMaxX, Y max=$deviceAbsMaxY")
-                    return Pair(deviceAbsMaxX, deviceAbsMaxY)
+                    l.contains("0036") && l.contains("max") -> {
+                        val maxMatch = Regex("max\\s*(\\d+)").find(l)
+                        if (maxMatch != null) {
+                            currentAbsY = maxMatch.groupValues[1].toInt()
+                            hasPosY = true
+                        }
+                    }
                 }
+            }
+
+            // Check last device
+            if (currentDevice.isNotEmpty() && hasPosX && hasPosY
+                && "Aimbot" !in currentName && "Pen" !in currentName && "pen" !in currentName) {
+                deviceAbsMaxX = currentAbsX
+                deviceAbsMaxY = currentAbsY
+                reader.close()
+                Log.d(TAG, "Detected device ABS: X max=$deviceAbsMaxX, Y max=$deviceAbsMaxY from $currentDevice ($currentName)")
+                return Pair(deviceAbsMaxX, deviceAbsMaxY)
             }
             reader.close()
         } catch (e: Exception) {
             Log.e(TAG, "queryDeviceResolution error: ${e.message}")
         }
+        Log.w(TAG, "queryDeviceResolution: fallback to (21199, 29999)")
         return Pair(21199, 29999) // fallback
     }
 
-    private var triggerEnabled = false; private var triggerReactionSpeed = 100
+    private var triggerEnabled = false; private var triggerReactionSpeed = 100; private var triggerCooldown = 200
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
     private var triggerTouchDuration = 10; private var triggerTouchRange = 100
     private var triggerShowArea = false
     private var triggerOverlay: TriggerOverlayView? = null
     private var triggerOverlayAdded = false
     private var triggerAreaX = 0; private var triggerAreaY = 0; private var lastTriggerMs = 0L
+    private var triggerFired = false  // 扳机是否已射过第一发（第二发起用冷却时间）
     private var hasDetects = false
 
     override fun onCreate() {
@@ -162,6 +203,7 @@ class FloatService : Service() {
         try { if (guiAdded) { wm.removeView(guiPanel); guiAdded = false; guiVisible = false } } catch (_: Exception) {}
         try { if (triggerOverlayAdded) { wm.removeView(triggerOverlay); triggerOverlayAdded = false } } catch (_: Exception) {}
         try { if (touchDisplayAdded) { wm.removeView(touchDisplayView); touchDisplayAdded = false } } catch (_: Exception) {}
+        try { if (areaSettingsAdded) { wm.removeView(areaSettingsView); areaSettingsAdded = false } } catch (_: Exception) {}
     }
 
     private fun setupBall() {
@@ -182,18 +224,21 @@ class FloatService : Service() {
 
     private fun initTouchInjector() {
         executor.execute {
-            // Query real device resolution first
-            val (devW, devH) = queryDeviceResolution()
-
             // Try Shizuku client first (runs in root helper process with proper uinput access)
             try {
                 val client = ShizukuInjectorClient(this@FloatService)
                 client.connect(object : ShizukuInjectorClient.InjectorCallback {
                     override fun onConnected() {
                         shizukuClient = client
+                        // Query device resolution FROM Shizuku process (has /dev/input access)
+                        val detected = client.queryDeviceResolution()
+                        val devW = detected?.getOrNull(0) ?: deviceAbsMaxX
+                        val devH = detected?.getOrNull(1) ?: deviceAbsMaxY
+                        deviceAbsMaxX = devW; deviceAbsMaxY = devH
+
                         client.setOrientationConfig(captureW > captureH)
                         client.setResolution(captureW, captureH, devW, devH)
-                        Log.d(TAG, "ShizukuInjectorClient connected, resolution=$devW,$devH, calling init...")
+                        Log.d(TAG, "ShizukuInjectorClient connected, resolution=${devW}x${devH}, calling init...")
 
                         try {
                             val initOk = client.initRemote()
@@ -267,9 +312,18 @@ class FloatService : Service() {
     private fun loadModel(filename: String) {
         val modelFile = java.io.File(applicationContext.filesDir, filename)
         try {
+            // 清理 QNN 缓存，避免旧模型编译缓存干扰新模型
+            val qnnCache = java.io.File(applicationContext.cacheDir, "qnn")
+            if (qnnCache.exists()) qnnCache.deleteRecursively()
+            qnnCache.mkdirs()
             if (!modelFile.exists()) { assets.open(filename).use { i -> java.io.FileOutputStream(modelFile).use { o -> i.copyTo(o) } } }
-            if (JniCallBack.init(modelFile.absolutePath)) Log.d(TAG, "模型切换成功: $filename")
-            else Log.e(TAG, "模型切换失败: $filename")
+            if (JniCallBack.init(modelFile.absolutePath)) {
+                Log.d(TAG, "模型切换成功: $filename")
+                ProjectionHolder.currentModelName = JniCallBack.getBackend()
+                broadcastState(ProjectionHolder.currentState)
+            } else {
+                Log.e(TAG, "模型切换失败: $filename")
+            }
         } catch (e: Exception) { Log.e(TAG, "模型切换异常: ${e.message}") }
     }
 
@@ -293,11 +347,13 @@ class FloatService : Service() {
         guiPanel.confidence = currentConfidence
         guiPanel.triggerEnabled = triggerEnabled
         guiPanel.triggerReactionSpeed = triggerReactionSpeed
+        guiPanel.triggerCooldown = triggerCooldown
         guiPanel.triggerUpFluctuation = triggerUpFluct
         guiPanel.triggerDownFluctuation = triggerDownFluct
         guiPanel.triggerTouchDuration = triggerTouchDuration
         guiPanel.triggerTouchRange = triggerTouchRange
         guiPanel.triggerShowArea = triggerShowArea
+        guiPanel.aimHoldEnabled = aimHoldEnabled
         guiPanel.aimOffsetX = aimOffsetX
         guiPanel.aimOffsetY = aimOffsetY
         guiPanel.ki = ki; guiPanel.kd = kd
@@ -329,6 +385,7 @@ class FloatService : Service() {
         guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it) }
         guiPanel.onTriggerEnabled = { triggerEnabled = it }
         guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it }
+        guiPanel.onTriggerCooldown = { triggerCooldown = it }
         guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it }
         guiPanel.onTriggerDownFluctuation = { triggerDownFluct = it }
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it }
@@ -338,6 +395,7 @@ class FloatService : Service() {
         guiPanel.onAimOffsetYChanged = { aimOffsetY = it }
         guiPanel.onKiChanged = { ki = it; guiPanel.ki = it }
         guiPanel.onKdChanged = { kd = it; guiPanel.kd = it }
+        guiPanel.onAimHoldEnabled = { aimHoldEnabled = it }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
             if (touchDisplayAdded) {
@@ -388,6 +446,7 @@ class FloatService : Service() {
                 }.start()
             }
         }
+        guiPanel.onAreaSettingsToggle = { enabled -> if (enabled) showAreaSettings() else hideAreaSettings() }
 
         overlayView.rangeRadius = guiPanel.range; JniCallBack.setConfidence(guiPanel.confidence)
         setupTriggerOverlay()
@@ -400,6 +459,52 @@ class FloatService : Service() {
     private fun hideGui() {
         if (guiAdded) guiPanel.animate().alpha(0f).scaleX(0.85f).scaleY(0.85f).setDuration(150).withEndAction { guiPanel.visibility = View.GONE }.start()
         guiVisible = false
+    }
+
+    private fun setupAreaSettingsView() {
+        areaSettingsView = AreaSettingsView(this)
+        ProjectionHolder.areaSettingsView = areaSettingsView
+        val params = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+        areaSettingsView?.apply {
+            onConfirm = { areas ->
+                savedAreas.clear()
+                savedAreas.addAll(areas)
+                updateTriggerZone()
+                removeAreaSettingsView()
+                if (!guiVisible) showGui()
+            }
+            onCancel = {
+                removeAreaSettingsView()
+                if (!guiVisible) showGui()
+            }
+        }
+        wm.addView(areaSettingsView!!, params)
+        areaSettingsAdded = true
+        areaSettingsView!!.visibility = View.GONE
+    }
+
+    private fun removeAreaSettingsView() {
+        try { if (areaSettingsAdded) { wm.removeView(areaSettingsView); areaSettingsAdded = false; ProjectionHolder.areaSettingsView = null } } catch (_: Exception) {}
+    }
+
+    private fun showAreaSettings() {
+        if (areaSettingsAdded) removeAreaSettingsView()
+        setupAreaSettingsView()
+        if (savedAreas.isNotEmpty()) areaSettingsView?.setAreas(savedAreas.toList())
+        hideGui()
+        areaSettingsView?.open()
+    }
+
+    private fun hideAreaSettings() {
+        removeAreaSettingsView()
+        if (!guiVisible) showGui()
+    }
+
+    // 推送触发区域到远程服务，用于物理手指检测
+    private fun updateTriggerZone() {
+        val zone = savedAreas.getOrNull(1) ?: return
+        shizukuClient?.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
+        Log.d(TAG, "updateTriggerZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
     private fun setupImageReader() {
@@ -445,7 +550,10 @@ class FloatService : Service() {
                         lastDetections = rectBuffer.take(rectCount)
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
-                        if (aimbotOn.get() && rectCount > 0) {
+                        // 按住激发: 物理手指按在触发区时才能自瞄
+                        val holdToAimActive = if (aimHoldEnabled) shizukuClient?.isFingerInTriggerZone() ?: false else true
+
+                        if (aimbotOn.get() && rectCount > 0 && holdToAimActive) {
                             // Target lock: match same target across frames by min center distance
                             var bestX = 0f; var bestY = 0f
                             val lock = lockedTarget
@@ -488,12 +596,24 @@ class FloatService : Service() {
                             val targetX = bestX + aimOffsetX
                             val targetY = bestY + aimOffsetY
 
+                            val errorX = targetX - centerX
+                            val errorY = targetY - centerY
+
                             // === 连续移动 P-controller auto-aim ===
                             if (!aimPointerDown) {
-                                val lp = touchDisplayView?.layoutParams as? WindowManager.LayoutParams
-                                if (lp != null) {
-                                    aimCenterX = lp.x + lp.width / 2f
-                                    aimCenterY = lp.y + lp.height / 2f
+                                // 目标已经在准心附近(<10px)就不按下，避免按下立刻收敛抬起
+                                if (Math.abs(errorX) < 10f && Math.abs(errorY) < 10f) {
+                                    // 无需操作
+                                } else {
+                                    // 使用瞄准区(savedAreas[2])随机位置作为触摸起点，未配置则用屏幕中心
+                                    val aimArea = savedAreas.getOrNull(2)
+                                    if (aimArea != null) {
+                                        aimCenterX = aimArea.x + (Math.random() * aimArea.width).toFloat()
+                                        aimCenterY = aimArea.y + (Math.random() * aimArea.height).toFloat()
+                                    } else {
+                                        aimCenterX = centerX
+                                        aimCenterY = centerY
+                                    }
                                     aimStartX = aimCenterX
                                     aimStartY = aimCenterY
                                     prevErrorX = 0f; prevErrorY = 0f
@@ -503,9 +623,6 @@ class FloatService : Service() {
                                     aimPointerDown = true
                                 }
                             } else {
-                                val errorX = targetX - centerX
-                                val errorY = targetY - centerY
-
                                 // 收敛就松手
                                 if (Math.abs(errorX) < 10f && Math.abs(errorY) < 10f) {
                                     Log.d(TAG, "aim converged error=($errorX, $errorY)")
@@ -565,26 +682,54 @@ class FloatService : Service() {
                         }
                         if (onTarget) {
                             val now = System.currentTimeMillis()
-                            val cd = triggerReactionSpeed.toInt().coerceIn(10, 500)
-                            if (now - lastTriggerMs >= cd) {
-                                lastTriggerMs = now
-                                val size = dp(triggerTouchRange.coerceAtLeast(30))
-                                val px = size / 2
-                                val centerX = triggerAreaX + size / 2
-                                val centerY = triggerAreaY + size / 2
-                                val rndX = centerX + ((Math.random() - 0.5) * 2 * px).toInt()
-                                val rndY = centerY + ((Math.random() - 0.5) * 2 * px).toInt()
-                                Log.d(TAG, "trigger fire! area=($triggerAreaX,$triggerAreaY) size=$size range=$px tap=($rndX,$rndY)")
-                                shizukuClient?.tap(rndX, rndY)
+                            if (!triggerFired) {
+                                // 第一发：准心进入目标时开始计时，反应速度后开枪
+                                if (lastTriggerMs == 0L) lastTriggerMs = now
+                                if (now - lastTriggerMs >= triggerReactionSpeed.coerceIn(10, 500)) {
+                                    triggerFired = true
+                                    lastTriggerMs = now
+                                    fireTriggerTap()
+                                }
+                            } else {
+                                // 第二发起：使用冷却时间
+                                val cd = triggerCooldown.coerceIn(10, 1000)
+                                if (now - lastTriggerMs >= cd) {
+                                    lastTriggerMs = now
+                                    fireTriggerTap()
+                                }
                             }
+                        } else {
+                            // 准心离开目标，重置扳机状态
+                            triggerFired = false
+                            lastTriggerMs = 0L
                         }
                     }
+
 
                     if (result == null) { hasDetects = false; lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
                 finally { image.close() }
             }
             inferRunning.set(false)
+        }
+    }
+
+    private fun fireTriggerTap() {
+        val fireArea = savedAreas.getOrNull(0)
+        if (fireArea != null) {
+            val rndX = fireArea.x + (Math.random() * fireArea.width).toInt()
+            val rndY = fireArea.y + (Math.random() * fireArea.height).toInt()
+            Log.d(TAG, "trigger fire! area=(${fireArea.x},${fireArea.y} ${fireArea.width}x${fireArea.height}) tap=($rndX,$rndY)")
+            shizukuClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
+        } else {
+            val size = dp(triggerTouchRange.coerceAtLeast(30))
+            val px = size / 2
+            val cx = triggerAreaX + size / 2
+            val cy = triggerAreaY + size / 2
+            val rndX = cx + ((Math.random() - 0.5) * 2 * px).toInt()
+            val rndY = cy + ((Math.random() - 0.5) * 2 * px).toInt()
+            Log.d(TAG, "trigger fire (legacy)! tap=($rndX,$rndY)")
+            shizukuClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
         }
     }
 
@@ -597,6 +742,8 @@ class FloatService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         Log.d(TAG, "orientation changed: display=${screenWidth}x${screenHeight} capture=${captureW}x${captureH}")
+        // Use current display dimensions for orientation (captureW/h not yet updated)
+        shizukuClient?.setOrientationConfig(screenWidth > screenHeight)
         // Touch resolution always uses natural orientation (captureW/captureH)
         shizukuClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
         centerX = captureW / 2f; centerY = captureH / 2f
@@ -649,6 +796,7 @@ class FloatService : Service() {
                 Log.w(TAG, "VirtualDisplay resize failed: ${e.message}")
             }
             captureW = curW; captureH = curH
+            shizukuClient?.setOrientationConfig(captureW > captureH)
             shizukuClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
             centerX = captureW / 2f; centerY = captureH / 2f
             if (wasRunning) startInferLoop()

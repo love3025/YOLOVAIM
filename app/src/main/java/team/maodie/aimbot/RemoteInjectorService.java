@@ -32,6 +32,9 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private int lastTapId = 6;
     private int drawingPointerId = -1;
     private boolean pointerDown = false;
+    private static final int TRIGGER_PTR_ID = 20;
+    private boolean triggerPointerDown = false;
+    private long triggerDownTime = 0;
     private IBinder.DeathRecipient clientDeathRecipient;
 
     public static RemoteInjectorService instance;
@@ -45,6 +48,48 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
 
     public void setOrientationConfig(boolean landscapeStart) {
         setLandscapeStart(landscapeStart ? 1 : 0);
+    }
+
+    @Override
+    public int[] queryDeviceResolution() {
+        Log.d(TAG, "queryDeviceResolution: starting");
+        try {
+            java.lang.Process p = Runtime.getRuntime().exec("getevent -p");
+            java.io.BufferedReader reader = new java.io.BufferedReader(
+                new java.io.InputStreamReader(p.getInputStream()));
+            String line;
+            String currentPath = "";
+            boolean has035 = false, has036 = false;
+            int absX = 0, absY = 0;
+
+            while ((line = reader.readLine()) != null) {
+                // Don't log every line, just the result
+                if (line.startsWith("add device")) {
+                    if (!currentPath.isEmpty() && has035 && has036) {
+                        reader.close();
+                        Log.d(TAG, "queryDeviceResolution: detected " + currentPath + " X=" + absX + " Y=" + absY);
+                        return new int[]{absX, absY};
+                    }
+                    int idx = line.indexOf("/dev/input/event");
+                    currentPath = idx >= 0 ? line.substring(idx).trim() : "";
+                    has035 = false; has036 = false;
+                    absX = 0; absY = 0;
+                }
+                if (line.contains("0035") && line.contains("max")) {
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("max\\s*(\\d+)").matcher(line);
+                    if (m.find()) { absX = Integer.parseInt(m.group(1)); has035 = true; }
+                }
+                if (line.contains("0036") && line.contains("max")) {
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("max\\s*(\\d+)").matcher(line);
+                    if (m.find()) { absY = Integer.parseInt(m.group(1)); has036 = true; }
+                }
+            }
+            reader.close();
+        } catch (Exception e) {
+            Log.e(TAG, "queryDeviceResolution error: " + e.getMessage());
+        }
+        Log.w(TAG, "queryDeviceResolution: fallback to (21199, 29999)");
+        return new int[]{21199, 29999};
     }
 
     public void startGeteventListener() { startGeteventListenerNative(); }
@@ -278,6 +323,72 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         swipe(centerX, centerY, centerX + (int)dx, centerY + (int)dy, duration);
     }
 
+    @Override
+    public void triggerDown(int x, int y) throws android.os.RemoteException {
+        if (!available) return;
+        if (uinputFd >= 0) {
+            uinputTriggerDown(x, y);
+        } else if (injectMethod != null && inputManager != null) {
+            if (triggerPointerDown) return;  // already down, ignore
+            try {
+                long now = SystemClock.uptimeMillis();
+                triggerDownTime = now;
+                MotionEvent down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, 1,
+                    new MotionEvent.PointerProperties[]{ptr(TRIGGER_PTR_ID)},
+                    new MotionEvent.PointerCoords[]{coord(x, y)},
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                injectMethod.invoke(inputManager, down, INJECT_MODE_ASYNC);
+                down.recycle();
+                triggerPointerDown = true;
+                Log.d(TAG, "triggerDown at (" + x + "," + y + ")");
+            } catch (Exception e) {
+                Log.e(TAG, "triggerDown error: " + e.getMessage());
+            }
+        }
+    }
+
+    @Override
+    public void triggerUp() throws android.os.RemoteException {
+        if (!available) return;
+        if (uinputFd >= 0) {
+            uinputTriggerUp();
+        } else if (injectMethod != null && inputManager != null && triggerPointerDown) {
+            try {
+                long now = SystemClock.uptimeMillis();
+                MotionEvent up = MotionEvent.obtain(triggerDownTime, now, MotionEvent.ACTION_UP, 1,
+                    new MotionEvent.PointerProperties[]{ptr(TRIGGER_PTR_ID)},
+                    new MotionEvent.PointerCoords[]{coord(0f, 0f)},
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+                injectMethod.invoke(inputManager, up, INJECT_MODE_ASYNC);
+                up.recycle();
+                triggerPointerDown = false;
+                Log.d(TAG, "triggerUp");
+            } catch (Exception e) {
+                Log.e(TAG, "triggerUp error: " + e.getMessage());
+            }
+        }
+    }
+
+    @Override
+    public void triggerTap(int x, int y, int durationMs) throws android.os.RemoteException {
+        if (!available) return;
+        Log.d(TAG, "triggerTap at (" + x + "," + y + ") dur=" + durationMs);
+        triggerDown(x, y);
+        try { Thread.sleep(durationMs); } catch (InterruptedException e) {}
+        triggerUp();
+    }
+
+    @Override
+    public void setTriggerZone(int left, int top, int right, int bottom) throws android.os.RemoteException {
+        nativeSetTriggerZone(left, top, right, bottom);
+        Log.d(TAG, "setTriggerZone: (" + left + "," + top + ")-(" + right + "," + bottom + ")");
+    }
+
+    @Override
+    public boolean isFingerInTriggerZone() throws android.os.RemoteException {
+        return nativeIsFingerInTriggerZone();
+    }
+
     public void linkToDeath(IBinder token) {
         if (token == null) return;
         try {
@@ -316,6 +427,10 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static native void uinputSendDown(int fd, int x, int y, int pointerId);
     private static native void uinputSendMove(int fd, int x, int y, int pointerId);
     private static native void uinputSendUp(int fd, int pointerId);
+    private static native void uinputTriggerDown(int x, int y);
+    private static native void uinputTriggerUp();
+    private static native void nativeSetTriggerZone(int left, int top, int right, int bottom);
+    private static native boolean nativeIsFingerInTriggerZone();
     private static native void setDeviceResolution(int devW, int devH);
     private static native void setScreenResolution(int screenW, int screenH);
     private static native void setLandscapeStart(int isLandscape);

@@ -50,6 +50,7 @@ object ProjectionHolder {
     var guiPanelView: View? = null
     var triggerOverlayView: View? = null
     var touchDisplayView: View? = null
+    var areaSettingsView: View? = null
 
     fun clearViews(wm: WindowManager) {
         fun remove(v: View?) {
@@ -60,5 +61,6 @@ object ProjectionHolder {
         remove(guiPanelView); guiPanelView = null
         remove(triggerOverlayView); triggerOverlayView = null
         remove(touchDisplayView); touchDisplayView = null
+        remove(areaSettingsView); areaSettingsView = null
     }
 }

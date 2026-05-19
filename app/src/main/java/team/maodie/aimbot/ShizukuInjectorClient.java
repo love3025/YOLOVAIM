@@ -147,6 +147,37 @@ public class ShizukuInjectorClient {
         }
     }
 
+    public void triggerDown(int x, int y) {
+        if (remoteService != null) {
+            try { remoteService.triggerDown(x, y); } catch (Exception e) { Log.e(TAG, "triggerDown: " + e.getMessage()); }
+        }
+    }
+
+    public void triggerUp() {
+        if (remoteService != null) {
+            try { remoteService.triggerUp(); } catch (Exception e) { Log.e(TAG, "triggerUp: " + e.getMessage()); }
+        }
+    }
+
+    public void triggerTap(int x, int y, int durationMs) {
+        if (remoteService != null) {
+            try { remoteService.triggerTap(x, y, durationMs); } catch (Exception e) { Log.e(TAG, "triggerTap: " + e.getMessage()); }
+        }
+    }
+
+    public void setTriggerZone(int left, int top, int right, int bottom) {
+        if (remoteService != null) {
+            try { remoteService.setTriggerZone(left, top, right, bottom); } catch (Exception e) { Log.e(TAG, "setTriggerZone: " + e.getMessage()); }
+        }
+    }
+
+    public boolean isFingerInTriggerZone() {
+        if (remoteService != null) {
+            try { return remoteService.isFingerInTriggerZone(); } catch (Exception e) { Log.e(TAG, "isFingerInTriggerZone: " + e.getMessage()); }
+        }
+        return false;
+    }
+
     public boolean initRemote() {
         if (remoteService != null) {
             try {
@@ -163,6 +194,19 @@ public class ShizukuInjectorClient {
         return false;
     }
 
+    public int[] queryDeviceResolution() {
+        if (remoteService != null) {
+            try {
+                int[] res = remoteService.queryDeviceResolution();
+                Log.d(TAG, "queryDeviceResolution: " + (res != null ? res[0] + "x" + res[1] : "null"));
+                return res;
+            } catch (Exception e) {
+                Log.e(TAG, "queryDeviceResolution: " + e.getMessage());
+            }
+        }
+        return null;
+    }
+
     public void setResolution(int screenW, int screenH, int devW, int devH) {
         if (remoteService != null) {
             try {
@@ -177,8 +221,7 @@ public class ShizukuInjectorClient {
     public void setOrientationConfig(boolean landscapeStart) {
         if (remoteService != null) {
             try {
-                java.lang.reflect.Method m = remoteService.getClass().getMethod("setOrientationConfig", boolean.class);
-                m.invoke(remoteService, landscapeStart);
+                remoteService.setOrientationConfig(landscapeStart);
                 Log.d(TAG, "setOrientationConfig: landscapeStart=" + landscapeStart);
             } catch (Exception e) {
                 Log.e(TAG, "setOrientationConfig: " + e.getMessage());

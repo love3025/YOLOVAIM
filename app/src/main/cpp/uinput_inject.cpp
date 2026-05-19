@@ -31,9 +31,11 @@ struct uinput_abs_setup_manual {
     } absinfo;
 };
 
-#define MAX_SLOTS        10
+#define MAX_SLOTS        15
 #define VIRTUAL_SLOT     9
+#define VIRTUAL_SLOT_TRIGGER 8
 #define VIRTUAL_TRACKING 1000
+#define TRIGGER_TRACKING 2000
 
 static char g_touch_device[256] = "/dev/input/event0";
 
@@ -67,6 +69,17 @@ static pthread_mutex_t uinput_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int virtual_active = 0;
 static int virtual_x = 0;
 static int virtual_y = 0;
+
+static volatile int trigger_active = 0;
+static int trigger_x = 0;
+static int trigger_y = 0;
+
+// Trigger zone for physical finger detection (screen coords)
+static int g_trigger_zone_l = 0;
+static int g_trigger_zone_t = 0;
+static int g_trigger_zone_r = 0;
+static int g_trigger_zone_b = 0;
+static volatile int g_finger_in_zone = 0;
 
 // Direct fd reader state
 static pthread_t reader_thread;
@@ -106,12 +119,13 @@ static void detect_touch_device() {
 
     char line[256];
     char current_path[256] = "/dev/input/event0";
-    int is_touchpanel = 0;
-    int has_mt = 0;
+    int has_pos_x = 0;
+    int has_pos_y = 0;
+    int is_virtual = 0;  // flag when current device has "Aimbot" in its name
 
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "add device") && strstr(line, "/dev/input/event")) {
-            if (is_touchpanel && has_mt) {
+            if (has_pos_x && has_pos_y) {
                 strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
                 g_touch_device[sizeof(g_touch_device) - 1] = '\0';
                 pclose(fp);
@@ -126,17 +140,23 @@ static void detect_touch_device() {
                 char* end = current_path + strlen(current_path) - 1;
                 while (end > current_path && (*end == ' ' || *end == '\n' || *end == '\r')) *end-- = '\0';
             }
-            is_touchpanel = 0;
-            has_mt = 0;
+            has_pos_x = 0;
+            has_pos_y = 0;
+            is_virtual = 0;
         }
-        if (strstr(line, "touchpanel") && !strstr(line, "Aimbot") && !strstr(line, "pen") && !strstr(line, "Pen")) {
-            is_touchpanel = 1;
+        // Track device name — skip our own virtual device
+        if (strstr(line, "name:") && strstr(line, "Aimbot")) {
+            is_virtual = 1;
         }
-        if (strstr(line, "002f")) {
-            has_mt = 1;
+        // Detect by ABS_MT_POSITION_X (0x0035) and ABS_MT_POSITION_Y (0x0036)
+        if (!is_virtual && strstr(line, "0035")) {
+            has_pos_x = 1;
+        }
+        if (!is_virtual && strstr(line, "0036")) {
+            has_pos_y = 1;
         }
     }
-    if (is_touchpanel && has_mt) {
+    if (has_pos_x && has_pos_y) {
         strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
         g_touch_device[sizeof(g_touch_device) - 1] = '\0';
     }
@@ -231,7 +251,7 @@ static void send_frame_locked() {
     int any_physical = 0;
 
     for (int i = 0; i < MAX_SLOTS; i++) {
-        if (i == VIRTUAL_SLOT) continue;
+        if (i == VIRTUAL_SLOT || i == VIRTUAL_SLOT_TRIGGER) continue;
 
         if (real_slots[i].active) {
             ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
@@ -260,13 +280,24 @@ static void send_frame_locked() {
         ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
 
-    int touch_down = any_physical || virtual_active;
+    ev(uinput_fd, EV_ABS, ABS_MT_SLOT, VIRTUAL_SLOT_TRIGGER);
+    if (trigger_active) {
+        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, TRIGGER_TRACKING);
+        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, trigger_x);
+        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, trigger_y);
+        ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
+        ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+    } else {
+        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+    }
+
+    int touch_down = any_physical || virtual_active || trigger_active;
     ev(uinput_fd, EV_KEY, BTN_TOUCH, touch_down ? 1 : 0);
     ev(uinput_fd, EV_KEY, BTN_TOOL_FINGER, touch_down ? 1 : 0);
 
     if (any_physical) {
         for (int i = 0; i < MAX_SLOTS; i++) {
-            if (i != VIRTUAL_SLOT && real_slots[i].active) {
+            if (i != VIRTUAL_SLOT && i != VIRTUAL_SLOT_TRIGGER && real_slots[i].active) {
                 ev(uinput_fd, EV_ABS, ABS_X, real_slots[i].x);
                 ev(uinput_fd, EV_ABS, ABS_Y, real_slots[i].y);
                 break;
@@ -275,9 +306,22 @@ static void send_frame_locked() {
     } else if (virtual_active) {
         ev(uinput_fd, EV_ABS, ABS_X, virtual_x);
         ev(uinput_fd, EV_ABS, ABS_Y, virtual_y);
+    } else if (trigger_active) {
+        ev(uinput_fd, EV_ABS, ABS_X, trigger_x);
+        ev(uinput_fd, EV_ABS, ABS_Y, trigger_y);
     }
 
     sync(uinput_fd);
+}
+
+static void inject_trigger_touch(int dev_x, int dev_y, int is_down) {
+    if (uinput_fd < 0) return;
+    pthread_mutex_lock(&uinput_mutex);
+    trigger_x = dev_x;
+    trigger_y = dev_y;
+    trigger_active = is_down;
+    send_frame_locked();
+    pthread_mutex_unlock(&uinput_mutex);
 }
 
 // =========================================================================
@@ -391,6 +435,31 @@ static void* direct_reader(void* arg) {
                 }
                 if (uinput_fd >= 0 && need_frame) {
                     send_frame_locked();
+                }
+
+                // Check physical finger in trigger zone (after real_slots are updated)
+                if (g_trigger_zone_l < g_trigger_zone_r && g_trigger_zone_t < g_trigger_zone_b) {
+                    g_finger_in_zone = 0;
+                    for (int i = 0; i < MAX_SLOTS; i++) {
+                        if (i == VIRTUAL_SLOT || i == VIRTUAL_SLOT_TRIGGER) continue;
+                        if (real_slots[i].active) {
+                            int dev_x = real_slots[i].x;
+                            int dev_y = real_slots[i].y;
+                            int sx, sy;
+                            if (g_landscape_start) {
+                                sx = dev_y * g_screen_w / g_dev_abs_max_y;
+                                sy = g_screen_h - (dev_x * g_screen_h / g_dev_abs_max_x);
+                            } else {
+                                sx = dev_x * g_screen_w / g_dev_abs_max_x;
+                                sy = dev_y * g_screen_h / g_dev_abs_max_y;
+                            }
+                            if (sx >= g_trigger_zone_l && sx <= g_trigger_zone_r &&
+                                sy >= g_trigger_zone_t && sy <= g_trigger_zone_b) {
+                                g_finger_in_zone = 1;
+                                break;
+                            }
+                        }
+                    }
                 }
                 pthread_mutex_unlock(&uinput_mutex);
 
@@ -507,11 +576,11 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
     ioctl(uinput_fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 
     set_abs_range(uinput_fd, 0x21, 0, 1000000);
-    set_abs_range(uinput_fd, 0x2f, 0, 9);
+    set_abs_range(uinput_fd, 0x2f, 0, 14);
     set_abs_range(uinput_fd, 0x30, 0, 255);
     set_abs_range(uinput_fd, 0x32, 0, 0);
-    set_abs_range(uinput_fd, 0x35, 0, 21199);
-    set_abs_range(uinput_fd, 0x36, 0, 29999);
+    set_abs_range(uinput_fd, 0x35, 0, g_dev_abs_max_x);
+    set_abs_range(uinput_fd, 0x36, 0, g_dev_abs_max_y);
     set_abs_range(uinput_fd, 0x37, 0, 0);
     set_abs_range(uinput_fd, 0x39, 0, 65535);
     set_abs_range(uinput_fd, 0x3a, 0, 0);
@@ -561,11 +630,14 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendDown(JNIEnv *env, jobjec
     if (uinput_fd < 0) return JNI_FALSE;
     int dev_x, dev_y;
     if (g_landscape_start) {
+        // Landscape: display rotated 90° relative to touch panel
+        // input system will rotate device X→screen Y, device Y→screen X
         dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
         dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     } else {
-        dev_x = (y * g_dev_abs_max_x) / g_screen_h;
-        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+        // Portrait: display and touch panel aligned, direct mapping
+        dev_x = (x * g_dev_abs_max_x) / g_screen_w;
+        dev_y = (y * g_dev_abs_max_y) / g_screen_h;
     }
     inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
@@ -579,8 +651,8 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendMove(JNIEnv *env, jobjec
         dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
         dev_y = (x * g_dev_abs_max_y) / g_screen_w;
     } else {
-        dev_x = (y * g_dev_abs_max_x) / g_screen_h;
-        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+        dev_x = (x * g_dev_abs_max_x) / g_screen_w;
+        dev_y = (y * g_dev_abs_max_y) / g_screen_h;
     }
     inject_virtual_touch(dev_x, dev_y, 1);
     return JNI_TRUE;
@@ -591,6 +663,41 @@ Java_team_maodie_aimbot_RemoteInjectorService_uinputSendUp(JNIEnv *env, jobject 
     if (uinput_fd < 0) return JNI_FALSE;
     inject_virtual_touch(0, 0, 0);
     return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_uinputTriggerDown(JNIEnv *env, jobject thiz, jint x, jint y) {
+    if (uinput_fd < 0) return;
+    int dev_x, dev_y;
+    if (g_landscape_start) {
+        dev_x = (g_screen_h - y) * g_dev_abs_max_x / g_screen_h;
+        dev_y = (x * g_dev_abs_max_y) / g_screen_w;
+    } else {
+        dev_x = (x * g_dev_abs_max_x) / g_screen_w;
+        dev_y = (y * g_dev_abs_max_y) / g_screen_h;
+    }
+    inject_trigger_touch(dev_x, dev_y, 1);
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_uinputTriggerUp(JNIEnv *env, jobject thiz) {
+    if (uinput_fd < 0) return;
+    inject_trigger_touch(0, 0, 0);
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeSetTriggerZone(JNIEnv *env, jclass clazz,
+    jint left, jint top, jint right, jint bottom) {
+    g_trigger_zone_l = left;
+    g_trigger_zone_t = top;
+    g_trigger_zone_r = right;
+    g_trigger_zone_b = bottom;
+    LOGD("nativeSetTriggerZone: (%d,%d)-(%d,%d)", left, top, right, bottom);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeIsFingerInTriggerZone(JNIEnv *env, jclass clazz) {
+    return g_finger_in_zone ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"
