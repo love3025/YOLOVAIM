@@ -2,6 +2,7 @@ package team.maodie.aimbot;
 
 interface IRemoteInjector {
     boolean init();
+    void setInputMethod(int method);
     void linkToDeath(in IBinder token);
     void destroy();
     void tap(int x, int y);

@@ -35,8 +35,15 @@ class FloatService : Service() {
     private var imageReader: ImageReader? = null
     private var captureVirtualDisplay: android.hardware.display.VirtualDisplay? = null
     private var captureW = 0; private var captureH = 0  // natural display size for ImageReader + coords
-    private val screenWidth get() = resources.displayMetrics.widthPixels
-    private val screenHeight get() = resources.displayMetrics.heightPixels
+    // 使用 Display.getRealSize() 获取完整屏幕尺寸（包括挖孔区域），
+    // 避免 displayMetrics 可能受安全区影响
+    private val screenSize: Point get() {
+        val p = Point()
+        wm.defaultDisplay.getRealSize(p)
+        return p
+    }
+    private val screenWidth get() = screenSize.x
+    private val screenHeight get() = screenSize.y
     private val screenDensity get() = resources.displayMetrics.densityDpi
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -77,9 +84,10 @@ class FloatService : Service() {
     private var areaSettingsAdded = false
     private val savedAreas = mutableListOf<AreaConfig>()
 
-    // Device resolution for uinput (known from touch panel ABS max)
-    private var deviceAbsMaxX = 21199
-    private var deviceAbsMaxY = 29999
+    // Device resolution for uinput — auto-detected by detect_touch_device() in native code.
+    // Hardcoded defaults are NOT used; pass placeholder 0 values.
+    private var deviceAbsMaxX = 0
+    private var deviceAbsMaxY = 0
 
     private var triggerEnabled = false; private var triggerReactionSpeed = 100; private var triggerCooldown = 200
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
@@ -147,7 +155,7 @@ class FloatService : Service() {
     private fun setupOverlay() {
         overlayView = OverlayCanvasView(this)
         ProjectionHolder.overlayCanvasView = overlayView
-        overlayParams = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+        overlayParams = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         wm.addView(overlayView, overlayParams); overlayAdded = true
     }
 
@@ -161,6 +169,7 @@ class FloatService : Service() {
                         shizukuClient = client
                         client.setOrientationConfig(captureW > captureH)
                         client.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+                        client.setInputMethod(ProjectionHolder.selectedTouchMethod)
                         Log.d(TAG, "ShizukuInjectorClient connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
 
                         try {
@@ -685,6 +694,7 @@ class FloatService : Service() {
         if (overlayAdded) {
             (overlayView.layoutParams as? WindowManager.LayoutParams)?.let { p ->
                 p.width = screenWidth; p.height = screenHeight
+                p.flags = p.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 wm.updateViewLayout(overlayView, p)
             }
         }
