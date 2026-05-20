@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     private var modelList: List<ModelInfo> = emptyList()
     private var selectedModelIndex = 0
+    private var selectedTouchIndex = 0
     private var modelInfoCardView: LinearLayout? = null
     private var aimbotState = AimbotState.STANDBY
 
@@ -101,6 +102,7 @@ class MainActivity : AppCompatActivity() {
                 ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description)
             }
             ProjectionHolder.selectedModelIndex = selectedModelIndex
+            ProjectionHolder.selectedTouchMethod = selectedTouchIndex
             startForegroundService(Intent(this, FloatService::class.java))
         }
     }
@@ -169,6 +171,10 @@ class MainActivity : AppCompatActivity() {
 
         // 模型卡片
         content.addView(buildModelCard())
+        content.addView(createSpacer(16))
+
+        // 触摸方案卡片
+        content.addView(buildTouchMethodCard())
 
         scrollView.addView(content)
         root.addView(scrollView)
@@ -361,6 +367,49 @@ class MainActivity : AppCompatActivity() {
                 })
                 addView(touchValue)
             })
+        }
+    }
+
+    private fun buildTouchMethodCard(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = GradientDrawable().apply {
+                setColor(MD3_SURFACE_CONTAINER)
+                cornerRadius = dp(12).toFloat()
+            }
+
+            addView(TextView(context).apply {
+                text = "触摸方案"
+                textSize = 16f
+                setTextColor(MD3_PRIMARY)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, dp(8))
+            })
+
+            val touchOptions = arrayOf("Uinput", "InputManager")
+            val dropdownLayout = layoutInflater.inflate(R.layout.dropdown_layout, null) as TextInputLayout
+            val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
+
+            autoComplete.setText(touchOptions[selectedTouchIndex], false)
+
+            val adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_dropdown_item_1line,
+                touchOptions
+            )
+            autoComplete.setAdapter(adapter)
+
+            autoComplete.setOnItemClickListener { _, _, position, _ ->
+                selectedTouchIndex = position
+                if (position == 1) {
+                    Toast.makeText(this@MainActivity, "InputManager 暂未实现", Toast.LENGTH_SHORT).show()
+                    autoComplete.setText(touchOptions[0], false)
+                    selectedTouchIndex = 0
+                }
+            }
+
+            addView(dropdownLayout)
         }
     }
 

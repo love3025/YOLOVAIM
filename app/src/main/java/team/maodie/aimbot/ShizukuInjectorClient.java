@@ -194,19 +194,6 @@ public class ShizukuInjectorClient {
         return false;
     }
 
-    public int[] queryDeviceResolution() {
-        if (remoteService != null) {
-            try {
-                int[] res = remoteService.queryDeviceResolution();
-                Log.d(TAG, "queryDeviceResolution: " + (res != null ? res[0] + "x" + res[1] : "null"));
-                return res;
-            } catch (Exception e) {
-                Log.e(TAG, "queryDeviceResolution: " + e.getMessage());
-            }
-        }
-        return null;
-    }
-
     public void setResolution(int screenW, int screenH, int devW, int devH) {
         if (remoteService != null) {
             try {

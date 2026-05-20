@@ -11,7 +11,6 @@ interface IRemoteInjector {
     void aimAt(int targetX, int targetY, int centerX, int centerY, float speed, int screenW, int screenH);
     void keepAlive();
     boolean isAvailable();
-    int[] queryDeviceResolution();
     void setResolution(int screenW, int screenH, int devW, int devH);
     void setOrientationConfig(boolean landscapeStart);
     void startGeteventListener();
