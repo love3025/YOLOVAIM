@@ -23,6 +23,9 @@ object ProjectionHolder {
     var modelList: List<ModelEntry> = emptyList()
     var selectedModelIndex: Int = 0
 
+    // 触摸方案（0=Uinput, 1=InputManager）
+    var selectedTouchMethod: Int = 0
+
     // 服务状态（0=待机, 1=运行, 2=推理中）
     var currentState: Int = 0
     var currentModelName: String = "QNN HTP"

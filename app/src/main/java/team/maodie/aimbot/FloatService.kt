@@ -77,80 +77,9 @@ class FloatService : Service() {
     private var areaSettingsAdded = false
     private val savedAreas = mutableListOf<AreaConfig>()
 
-    // Device resolution for uinput (queried from real touchpanel)
+    // Device resolution for uinput (known from touch panel ABS max)
     private var deviceAbsMaxX = 21199
     private var deviceAbsMaxY = 29999
-
-    private fun queryDeviceResolution(): Pair<Int, Int> {
-        Log.d(TAG, "queryDeviceResolution: starting getevent -p")
-        try {
-            val process = Runtime.getRuntime().exec("getevent -p")
-            val reader = process.inputStream.bufferedReader()
-            var line: String?
-            var currentDevice = ""
-            var currentName = ""
-            var hasPosX = false
-            var hasPosY = false
-            var currentAbsX = 0
-            var currentAbsY = 0
-
-            while (reader.readLine().also { line = it } != null) {
-                val l = line!!
-                when {
-                    // Track which device section we're in
-                    l.startsWith("add device") -> {
-                        // Process previous device
-                        if (currentDevice.isNotEmpty() && hasPosX && hasPosY
-                            && "Aimbot" !in currentName && "Pen" !in currentName && "pen" !in currentName) {
-                            deviceAbsMaxX = currentAbsX
-                            deviceAbsMaxY = currentAbsY
-                            reader.close()
-                            Log.d(TAG, "Detected device ABS: X max=$deviceAbsMaxX, Y max=$deviceAbsMaxY from $currentDevice ($currentName)")
-                            return Pair(deviceAbsMaxX, deviceAbsMaxY)
-                        }
-                        // Reset for new device
-                        val p = l.indexOf("/dev/input/event")
-                        currentDevice = if (p >= 0) l.substring(p).trim() else ""
-                        currentName = ""
-                        hasPosX = false; hasPosY = false
-                        currentAbsX = 0; currentAbsY = 0
-                    }
-                    l.trimStart().startsWith("name:") -> {
-                        currentName = l.substringAfter('"', "").substringBefore('"')
-                    }
-                    l.contains("0035") && l.contains("max") -> {
-                        val maxMatch = Regex("max\\s*(\\d+)").find(l)
-                        if (maxMatch != null) {
-                            currentAbsX = maxMatch.groupValues[1].toInt()
-                            hasPosX = true
-                        }
-                    }
-                    l.contains("0036") && l.contains("max") -> {
-                        val maxMatch = Regex("max\\s*(\\d+)").find(l)
-                        if (maxMatch != null) {
-                            currentAbsY = maxMatch.groupValues[1].toInt()
-                            hasPosY = true
-                        }
-                    }
-                }
-            }
-
-            // Check last device
-            if (currentDevice.isNotEmpty() && hasPosX && hasPosY
-                && "Aimbot" !in currentName && "Pen" !in currentName && "pen" !in currentName) {
-                deviceAbsMaxX = currentAbsX
-                deviceAbsMaxY = currentAbsY
-                reader.close()
-                Log.d(TAG, "Detected device ABS: X max=$deviceAbsMaxX, Y max=$deviceAbsMaxY from $currentDevice ($currentName)")
-                return Pair(deviceAbsMaxX, deviceAbsMaxY)
-            }
-            reader.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "queryDeviceResolution error: ${e.message}")
-        }
-        Log.w(TAG, "queryDeviceResolution: fallback to (21199, 29999)")
-        return Pair(21199, 29999) // fallback
-    }
 
     private var triggerEnabled = false; private var triggerReactionSpeed = 100; private var triggerCooldown = 200
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
@@ -230,15 +159,9 @@ class FloatService : Service() {
                 client.connect(object : ShizukuInjectorClient.InjectorCallback {
                     override fun onConnected() {
                         shizukuClient = client
-                        // Query device resolution FROM Shizuku process (has /dev/input access)
-                        val detected = client.queryDeviceResolution()
-                        val devW = detected?.getOrNull(0) ?: deviceAbsMaxX
-                        val devH = detected?.getOrNull(1) ?: deviceAbsMaxY
-                        deviceAbsMaxX = devW; deviceAbsMaxY = devH
-
                         client.setOrientationConfig(captureW > captureH)
-                        client.setResolution(captureW, captureH, devW, devH)
-                        Log.d(TAG, "ShizukuInjectorClient connected, resolution=${devW}x${devH}, calling init...")
+                        client.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+                        Log.d(TAG, "ShizukuInjectorClient connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
 
                         try {
                             val initOk = client.initRemote()

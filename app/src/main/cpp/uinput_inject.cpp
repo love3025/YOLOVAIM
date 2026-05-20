@@ -37,6 +37,7 @@ struct uinput_abs_setup_manual {
 #define VIRTUAL_TRACKING 1000
 #define TRIGGER_TRACKING 2000
 
+static int g_touch_device_found = 0;
 static char g_touch_device[256] = "/dev/input/event0";
 
 typedef struct {
@@ -45,21 +46,6 @@ typedef struct {
     int x;
     int y;
 } slot_state_t;
-
-typedef struct {
-    int abs_x_min, abs_x_max;
-    int abs_y_min, abs_y_max;
-    int abs_mt_x_min, abs_mt_x_max;
-    int abs_mt_y_min, abs_mt_y_max;
-    int slot_min, slot_max;
-    int tracking_min, tracking_max;
-    int abs_0021_min, abs_0021_max;
-    int abs_0030_min, abs_0030_max;
-    int num_keys;
-    int keys[16];
-} physical_abs_params_t;
-
-static physical_abs_params_t g_physical_params = {0};
 
 static int uinput_fd = -1;
 static slot_state_t real_slots[MAX_SLOTS];
@@ -106,8 +92,6 @@ Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, j
     g_screen_h = screenH;
 }
 
-static void parse_physical_abs_params();
-
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setLandscapeStart(JNIEnv *env, jclass cls, jint isLandscape) {
     g_landscape_start = isLandscape;
@@ -129,7 +113,6 @@ static void detect_touch_device() {
                 strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
                 g_touch_device[sizeof(g_touch_device) - 1] = '\0';
                 pclose(fp);
-                parse_physical_abs_params();
                 LOGD("Detected touch device: %s", g_touch_device);
                 return;
             }
@@ -164,64 +147,8 @@ static void detect_touch_device() {
     LOGD("Touch device: %s", g_touch_device);
 }
 
-static void parse_physical_abs_params() {
-    memset(&g_physical_params, 0, sizeof(g_physical_params));
-    g_physical_params.slot_max = 9;
-    g_physical_params.tracking_max = 65535;
 
-    FILE* fp = popen("/system/bin/getevent -p 2>&1", "r");
-    if (!fp) { LOGE("parse_physical_abs_params: popen failed"); return; }
-
-    char line[512];
-    int in_our_device = 0;
-    int num_keys = 0;
-
-    while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, "add device", 9) == 0) {
-            char* p = strstr(line, "/dev/input/event");
-            if (p) in_our_device = (strncmp(p, g_touch_device, strlen(g_touch_device)) == 0);
-            else in_our_device = 0;
-            continue;
-        }
-        if (!in_our_device) continue;
-
-        unsigned int code_hex;
-        int min_val = 0, max_val = 0;
-        if (sscanf(line, "                %x  : value %*d, min %d, max %d", &code_hex, &min_val, &max_val) == 3) {
-            switch (code_hex) {
-                case 0x21: g_physical_params.abs_0021_min = min_val; g_physical_params.abs_0021_max = max_val; break;
-                case 0x2f: g_physical_params.slot_min = min_val; g_physical_params.slot_max = max_val ? max_val : 9; break;
-                case 0x30: g_physical_params.abs_0030_min = min_val; g_physical_params.abs_0030_max = max_val; break;
-                case 0x35: g_physical_params.abs_x_min = min_val; g_physical_params.abs_x_max = max_val; break;
-                case 0x36: g_physical_params.abs_y_min = min_val; g_physical_params.abs_y_max = max_val; break;
-                case 0x39: g_physical_params.tracking_min = min_val; g_physical_params.tracking_max = max_val ? max_val : 65535; break;
-            }
-        }
-        if (strncmp(line, "    KEY (0001):", 14) == 0) {
-            char* p = line + 14;
-            while (*p == ' ') p++;
-            while (num_keys < 16) {
-                while (*p == ' ') p++;
-                if (*p == '\0' || *p == '\n') break;
-                unsigned int k;
-                if (sscanf(p, "%x", &k) == 1) {
-                    int found = 0;
-                    for (int i = 0; i < num_keys; i++) { if (g_physical_params.keys[i] == (int)k) { found = 1; break; } }
-                    if (!found && k != 0) g_physical_params.keys[num_keys++] = (int)k;
-                    p += 4;
-                    while (*p == ' ') p++;
-                } else break;
-            }
-        }
-    }
-    pclose(fp);
-    g_physical_params.num_keys = num_keys;
-    LOGD("parse_physical_abs_params: device=%s keys=%d X=[%d,%d] Y=[%d,%d] SLOT=[%d,%d]",
-         g_touch_device, num_keys,
-         g_physical_params.abs_x_min, g_physical_params.abs_x_max,
-         g_physical_params.abs_y_min, g_physical_params.abs_y_max,
-         g_physical_params.slot_min, g_physical_params.slot_max);
-}
+/* parse_physical_abs_params removed — EVIOCGRAB reader handles device directly */
 
 static void set_abs_range(int fd, int axis, int min, int max) {
     struct uinput_abs_setup_manual abs_setup;
@@ -539,12 +466,8 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
         uinput_fd = -1;
     }
 
-    const char* paths[] = {"/dev/uinput", "/dev/input/uinput", "/dev/misc/uinput"};
-    for (int i = 0; i < 3; i++) {
-        uinput_fd = open(paths[i], O_RDWR | O_NONBLOCK);
-        if (uinput_fd >= 0) break;
-    }
-    if (uinput_fd < 0) { LOGE("Cannot open uinput"); return -1; }
+    uinput_fd = open("/dev/uinput", O_RDWR | O_NONBLOCK);
+    if (uinput_fd < 0) { LOGE("Cannot open /dev/uinput"); return -1; }
 
     struct uinput_setup usetup;
     memset(&usetup, 0, sizeof(usetup));

@@ -58,6 +58,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
     var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false
     var modelRunning = false
+    private var navScrollView: ScrollView? = null
+    private var savedNavScrollY = 0
 
     private val clPrimary = Color.parseColor("#1976D2")
     private val clOnPrimary = Color.WHITE; private val clSurface = Color.WHITE
@@ -102,13 +104,17 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
                 addView(View(context).apply { layoutParams = LinearLayout.LayoutParams(dp(20), dp(3)); setBackgroundColor(clOnSurfaceVariant) })
             })
             addView(spacer(dp(6)))
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
-                tabs.forEachIndexed { idx, tab ->
-                    addView(navItem(tab.label, idx))
-                    if (idx < tabs.size - 1) addView(spacer(dp(4)))
-                }
-            })
+            addView(ScrollView(context).apply {
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
+                overScrollMode = View.OVER_SCROLL_NEVER
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL; layoutParams = LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                    tabs.forEachIndexed { idx, tab ->
+                        addView(navItem(tab.label, idx))
+                        if (idx < tabs.size - 1) addView(spacer(dp(4)))
+                    }
+                })
+            }.also { navScrollView = it })
             addView(MaterialTextView(context).apply {
                 text = if (modelRunning) "■" else "▶"; textSize = 18f; gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(36))
@@ -126,7 +132,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         val active = idx == activeTab
         return MaterialTextView(context).apply {
             text = label; textSize = 12f; gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f); setPadding(0, dp(4), 0, dp(4))
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { minimumHeight = dp(56) }; setPadding(0, dp(6), 0, dp(6))
             val r = dp(8).toFloat()
             if (active) { setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD; background = android.graphics.drawable.GradientDrawable().apply { setColor(clPrimaryLight); cornerRadius = r } }
             else { setTextColor(clOnSurfaceVariant); typeface = Typeface.DEFAULT; background = null }
@@ -136,7 +142,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     private fun switchTab(target: Int) {
         if (target == activeTab || switching) return; switching = true; activeTab = target
-        buildUI(); switching = false
+        savedNavScrollY = navScrollView?.scrollY ?: 0
+        buildUI()
+        navScrollView?.post { navScrollView?.scrollTo(0, savedNavScrollY) }
+        switching = false
     }
 
     private fun buildContent() {

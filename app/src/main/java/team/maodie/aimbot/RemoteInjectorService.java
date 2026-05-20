@@ -50,48 +50,6 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         setLandscapeStart(landscapeStart ? 1 : 0);
     }
 
-    @Override
-    public int[] queryDeviceResolution() {
-        Log.d(TAG, "queryDeviceResolution: starting");
-        try {
-            java.lang.Process p = Runtime.getRuntime().exec("getevent -p");
-            java.io.BufferedReader reader = new java.io.BufferedReader(
-                new java.io.InputStreamReader(p.getInputStream()));
-            String line;
-            String currentPath = "";
-            boolean has035 = false, has036 = false;
-            int absX = 0, absY = 0;
-
-            while ((line = reader.readLine()) != null) {
-                // Don't log every line, just the result
-                if (line.startsWith("add device")) {
-                    if (!currentPath.isEmpty() && has035 && has036) {
-                        reader.close();
-                        Log.d(TAG, "queryDeviceResolution: detected " + currentPath + " X=" + absX + " Y=" + absY);
-                        return new int[]{absX, absY};
-                    }
-                    int idx = line.indexOf("/dev/input/event");
-                    currentPath = idx >= 0 ? line.substring(idx).trim() : "";
-                    has035 = false; has036 = false;
-                    absX = 0; absY = 0;
-                }
-                if (line.contains("0035") && line.contains("max")) {
-                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("max\\s*(\\d+)").matcher(line);
-                    if (m.find()) { absX = Integer.parseInt(m.group(1)); has035 = true; }
-                }
-                if (line.contains("0036") && line.contains("max")) {
-                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("max\\s*(\\d+)").matcher(line);
-                    if (m.find()) { absY = Integer.parseInt(m.group(1)); has036 = true; }
-                }
-            }
-            reader.close();
-        } catch (Exception e) {
-            Log.e(TAG, "queryDeviceResolution error: " + e.getMessage());
-        }
-        Log.w(TAG, "queryDeviceResolution: fallback to (21199, 29999)");
-        return new int[]{21199, 29999};
-    }
-
     public void startGeteventListener() { startGeteventListenerNative(); }
     public void stopGeteventListener() { stopGeteventListenerNative(); }
 
