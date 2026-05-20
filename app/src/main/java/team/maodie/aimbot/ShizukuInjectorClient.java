@@ -178,6 +178,17 @@ public class ShizukuInjectorClient {
         return false;
     }
 
+    public void setInputMethod(int method) {
+        if (remoteService != null) {
+            try {
+                remoteService.setInputMethod(method);
+                Log.d(TAG, "setInputMethod: " + method);
+            } catch (Exception e) {
+                Log.e(TAG, "setInputMethod: " + e.getMessage());
+            }
+        }
+    }
+
     public boolean initRemote() {
         if (remoteService != null) {
             try {

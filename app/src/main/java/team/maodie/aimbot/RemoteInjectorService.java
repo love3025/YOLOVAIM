@@ -28,6 +28,9 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static int screen_h = 3000;
 
     public volatile boolean available = false;
+    public static final int INPUT_METHOD_UINPUT = 0;
+    public static final int INPUT_METHOD_INPUT_MANAGER = 1;
+    private int inputMethod = INPUT_METHOD_UINPUT;
     long bgDownTime;
     private int lastTapId = 6;
     private int drawingPointerId = -1;
@@ -41,8 +44,9 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
 
     public void setResolution(int sw, int sh, int dw, int dh) {
         screen_w = sw; screen_h = sh;
-        dev_abs_max_x = dw; dev_abs_max_y = dh;
-        setDeviceResolution(dw, dh);
+        // Device ABS max values are auto-detected by detect_touch_device() in native code.
+        // Do NOT overwrite them with dw/dh (which may be stale hardcoded defaults).
+        // setDeviceResolution(dw, dh);  // removed — would override auto-detected values
         setScreenResolution(sw, sh);
     }
 
@@ -76,22 +80,30 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         if (uinputFd >= 0) { closeUinputNative(); uinputFd = -1; }
     }
 
+    @Override
+    public void setInputMethod(int method) {
+        inputMethod = method;
+        Log.d(TAG, "setInputMethod: " + (method == INPUT_METHOD_UINPUT ? "Uinput" : "InputManager"));
+    }
+
     @SuppressLint("PrivateApi")
     public boolean init() {
         if (available) return true;
-        Log.d(TAG, "init: starting, pid=" + Process.myPid());
+        Log.d(TAG, "init: starting, pid=" + Process.myPid() + " method=" + (inputMethod == INPUT_METHOD_UINPUT ? "Uinput" : "InputManager"));
 
-        try {
-            uinputFd = openUinputNative();
-            Log.d(TAG, "init: openUinputNative returned fd=" + uinputFd);
-            if (uinputFd >= 0) {
-                bgDownTime = SystemClock.uptimeMillis();
-                available = true;
-                Log.d(TAG, "init: RemoteInjectorService ready with uinput, pid=" + Process.myPid());
-                return true;
+        if (inputMethod == INPUT_METHOD_UINPUT) {
+            try {
+                uinputFd = openUinputNative();
+                Log.d(TAG, "init: openUinputNative returned fd=" + uinputFd);
+                if (uinputFd >= 0) {
+                    bgDownTime = SystemClock.uptimeMillis();
+                    available = true;
+                    Log.d(TAG, "init: RemoteInjectorService ready with uinput, pid=" + Process.myPid());
+                    return true;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "init: uinput exception: " + e.getMessage());
             }
-        } catch (Exception e) {
-            Log.e(TAG, "init: uinput exception: " + e.getMessage());
         }
 
         try {

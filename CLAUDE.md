@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Android FPS game AI aiming assistant using TFLite with NNAPI delegate for real-time object detection on Qualcomm Snapdragon (Hexagon DSP/NPU). The app captures the screen via MediaProjection, runs YOLOv8n inference, and draws detection overlays.
+Android FPS game AI aiming assistant. Captures screen via MediaProjection, runs YOLOv8n inference through Qualcomm QNN HTP delegate (Hexagon DSP/NPU acceleration), draws detection overlays on a full-screen transparent overlay, and supports auto-aim + trigger bot via virtual touch injection through a Shizuku UserService with uinput access.
 
 ## Build Commands
 
@@ -25,114 +25,57 @@ Android FPS game AI aiming assistant using TFLite with NNAPI delegate for real-t
 ## Architecture
 
 ```
-MainActivity.kt                    # Entry point - permissions, model loading, Shizuku auth
+MainActivity.kt                    # Entry point — permissions, model loading, Shizuku auth
     ↓
-FloatService.kt                    # Foreground service - owns the UI layer
-    ├── FloatBallView.kt           # Draggable toggle (blue MD3 FAB)
-    ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes)
-    ├── GuiPanelView.kt           # MD3 control panel (自瞄/扳机/防闪/模型 tabs)
-    ├── TouchInjector.kt          # Touch injection via Shizuku (+ IInputManager reflection)
-    ├── UinputInjector.kt         # Direct uinput from app process (fallback)
-    ├── ShizukuInjectorClient.kt  # AIDL client for RemoteInjectorService
-    └── JniCallBack.kt            # JNI bridge (native libaimbot.so)
-            └── aimbot.cpp         # TFLite inference with NNAPI delegate
-RemoteInjectorService.java         # Shizuku UserService with uinput access (separate process)
-    └── uinput_inject.cpp         # Native uinput touch injection with 90° rotation
+FloatService.kt                    # Foreground service — owns all UI and inference
+    ├── FloatBallView.kt           # Draggable toggle button (blue FAB)
+    ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes, crosshair, range)
+    ├── GuiPanelView.kt           # MD3 side-nav control panel (自瞄/扳机/防闪/模型/系统 tabs)
+    ├── TriggerOverlayView.kt      # Trigger zone visualizer (circle overlay)
+    ├── TouchDisplayView.kt        # Aim touch point visualizer
+    ├── AreaSettingsView.kt        # Area configuration UI (fire/trigger/aim zones)
+    ├── AreaConfig.kt              # Area data class
+    ├── ShizukuInjectorClient.java # AIDL client for RemoteInjectorService
+    └── JniCallBack.kt             # JNI bridge → libaimbot.so
+            └── aimbot.cpp          # TFLite + QNN HTP delegate inference
+RemoteInjectorService.java         # Shizuku UserService (separate process) with uinput access
+    └── uinput_inject.cpp           # Native uinput touch injection + physical finger reader
+TfliteClassifier.kt                # Alternative classifier (unused in current flow)
 ```
 
 ### Data Flow
 
 1. `MediaProjection` captures screen into `ImageReader`
-2. Inference thread reads `ImageReader.acquireLatestImage()` via JNI
-3. `JniCallBack.detect()` runs TFLite model via NNAPI, returns detection boxes
-4. `FloatService` converts normalized coords to pixels, posts to `OverlayCanvasView`
-5. Detection overlay only — touch injection is NOT auto-triggered, must be called explicitly
-
-### Touch Injection Flow
-
-```
-FloatService
-    ├── ShizukuInjectorClient ──AIDL──> RemoteInjectorService (separate process)
-    │                                      └── uinput_inject.cpp (uinput device)
-    ├── UinputInjector (direct uinput, app process fallback)
-    └── TouchInjector (Shizuku + IInputManager reflection fallback)
-```
+2. Inference thread calls `JniCallBack.detect()` via JNI
+3. `aimbot.cpp` runs TFLite model via QNN HTP delegate, returns `[classId, score, x1, y1, x2, y2, ...]`
+4. `FloatService` converts to screen pixels, posts to `OverlayCanvasView` for overlay
+5. Auto-aim: PID controller moves virtual finger via `ShizukuInjectorClient` → `RemoteInjectorService` → uinput
+6. Trigger bot: fires tap when crosshair is over detected target
+7. Hold-to-fire: requires physical finger in trigger zone before auto-aim activates
 
 ### Key Classes
 
-- **ProjectionHolder**: Static singleton holding MediaProjection result code/data + model list between Activity and Service
-- **FloatService**: Owns all overlay views, the inference executor, and TouchInjector
-- **GuiPanelView**: MD3 control panel with side navigation, Slider/Switch/ScrollView — rebuilt on tab switch
-- **TouchInjector**: Shizuku + IInputManager reflection for touch injection, provides `tap()`, `swipe()`, `aimAt()`
-- **UinputInjector**: Direct uinput access from app process (fallback if Shizuku unavailable)
-- **RemoteInjectorService**: Shizuku UserService running in separate process with uinput access
-- **uinput_inject.cpp**: Native uinput touch injection with 90° coordinate rotation for OPD2404
-- **JniCallBack**: JNI bridge to native `libaimbot.so`, also exposes `setConfidence(threshold)`
-- **models.json**: Dynamic model configuration
+- **ProjectionHolder**: Static singleton holding MediaProjection result + model list between Activity and Service
+- **FloatService**: Foreground service owning all overlay views, inference executor, and touch injection client. Contains PID auto-aim, target lock, trigger bot, hold-to-fire logic, and area settings.
+- **GuiPanelView**: MD3 side-nav control panel with tabs for 自瞄(PID)/扳机(trigger)/防闪(blank-tab)/模型(model)/系统(system)
+- **ShizukuInjectorClient**: AIDL client connecting to `RemoteInjectorService` via Shizuku
+- **RemoteInjectorService**: Shizuku UserService with uinput device creation and physical finger detection
+- **uinput_inject.cpp**: Native uinput touch injection with 90° coordinate rotation + EVIOCGRAB physical touch reader
+- **JniCallBack**: JNI bridge to `libaimbot.so`, exposes `init()`, `detect()`, `setConfidence()`, `getBackend()`
+- **aimbot.cpp**: TFLite with QNN HTP delegate (Hexagon DSP/NPU) — fallback to NNAPI if QNN unavailable
 
-## Model Files
+## Native Backend (cpp/aimbot.cpp)
 
-Models are stored in `app/src/main/assets/` and loaded dynamically via `models.json`:
+### Primary: QNN HTP Delegate
 
-| File | Description |
-|------|-------------|
-| `models.json` | Model configuration (TFLite files below) |
-| `yolov8n_float_192.tflite` | Float32 model (onnx2tf conversion) |
-| `yolov8n_int8_192_calibrated.tflite` | INT8 model (ultralytics export with valorant.yaml calibration) |
-| `yolov8n_int8_256_calibrated.tflite` | INT8 256x256 model (same calibration) |
+- Uses `TfLiteQnnDelegateCreate` with `kHtpBackend`
+- Preloads `libcdsprpc.so` / `libadsprpc.so` for FastRPC
+- `cache_dir=/data/data/team.maodie.aimbot/cache/qnn` for compiled model cache
 
-**Note**: Model files are excluded from git (too large). Download from release or convert from .pt files.
+### Fallback: NNAPI Delegate
 
-## Model Conversion
-
-### INT8 Quantization (Recommended)
-
-Use ultralytics to export with INT8 quantization and calibration:
-
-```python
-from ultralytics import YOLO
-
-model = YOLO('best_192.pt')
-model.export(
-    format='tflite',
-    int8=True,
-    data='valorant.yaml'  # Use your dataset yaml for calibration
-)
-```
-
-Output: `best_192_saved_model/best_192_full_integer_quant.tflite`
-
-Rename to `yolov8n_int8_192_calibrated.tflite` and place in `app/src/main/assets/`.
-
-### Float32 (For testing)
-
-If INT8 has issues, use onnx2tf for Float32 conversion:
-
-```python
-import onnx2tf
-onnx2tf.convert(
-    input_onnx_file_path='best_192.onnx',
-    output_folder_path='output_dir',
-    non_verbose=True
-)
-```
-
-## Native Code (cpp/aimbot.cpp)
-
-### TFLite with NNAPI Delegate
-
-- Uses TFLite C API (`libtensorflowlite_jni.so`)
-- NNAPI delegate provides Hexagon DSP/NPU acceleration on Qualcomm devices
-- `disallow_nnapi_cpu=1` forces hardware acceleration (no CPU fallback)
-- Supports INT8 and Float32 models automatically
-
-### INT8 Preprocessing
-
-Models are calibrated with normalized [0,1] input:
-```cpp
-float r = src[pixelIdx] / 255.0f;  // Normalize to [0,1]
-data[idx] = (int8_t)std::round(r / input_scale + input_zero_point);
-```
+- `TfLiteNnapiDelegateCreate` with `disallow_nnapi_cpu=1`
+- Used when QNN HTP is unavailable
 
 ### Output Format
 
@@ -143,103 +86,119 @@ YOLOv8n output shape: `[1, 5, num_outputs]`
 - Channel 3: bh (box height, normalized [0,1])
 - Channel 4: objectness score
 
-Detection threshold: configurable via `JniCallBack.setConfidence(threshold)`, default 0.25
+Detection returns `float[count * 6]` = `[classId, score, x1, y1, x2, y2, ...]`
 
-## Touch Injection API
+## Touch Injection
 
-Touch injection is handled by `TouchInjector.kt` via Shizuku + IInputManager reflection.
-The ShizukuBinderWrapper proxies Binder calls to Shizuku's process (shell UID, which has `INJECT_EVENTS` permission).
-
-### Coordinate Mapping
-
-**Device**: OnePlus Pad Pro (OPD2404) - landscape screen, portrait touch panel
-- Screen resolution: 3000x2120 (landscape)
-- Touch device ABS range: X=[0,21199], Y=[0,29999] (portrait)
-- **90° rotation required**: screen Y → device X, screen X → device Y
+### Flow
 
 ```
-dev_x = y * device_abs_max_x / screen_height  // screen Y → device X
-dev_y = x * device_abs_max_y / screen_width   // screen X → device Y
+FloatService
+    └── ShizukuInjectorClient (AIDL)
+            └── RemoteInjectorService (Shizuku UserService, separate process)
+                    └── uinput_inject.cpp (uinput device + EVIOCGRAB reader)
 ```
 
-This is implemented in `uinput_inject.cpp` for all touch functions (sendDown, sendMove, sendTap).
+### Coordinate Mapping (OnePlus Pad Pro OPD2404)
 
-### Setup
+- Screen: 3000x2120 (landscape)
+- Touch panel ABS: X=[0,21199], Y=[0,29999] (portrait, 90° rotated)
+- Landscape mapping:
+  ```
+  dev_x = (screen_h - y) * dev_abs_max_x / screen_h
+  dev_y = x * dev_abs_max_y / screen_w
+  ```
+- Portrait mapping: direct proportional
 
-```kotlin
-val injector = TouchInjector()
-injector.init()  // requires Shizuku running + permission granted
-```
-
-### Methods
+### RemoteInjectorService Methods
 
 | Method | Description |
 |--------|-------------|
 | `tap(x, y)` | Tap at screen coordinates (DOWN + UP, 8ms interval) |
-| `swipe(x1, y1, x2, y2, durationMs)` | Touch DOWN at (x1,y1), MOVE to (x2,y2), UP after duration |
-| `aimAt(targetX, targetY, centerX, centerY, speed, screenW, screenH)` | Calculated swipe from right-side virtual joystick toward target |
+| `swipe(x1, y1, x2, y2, durationMs)` | DOWN → MOVE → UP sequence |
+| `moveTo(x, y)` | Continuous move (pointer must be down) |
+| `lift()` | Lift pointer |
+| `triggerDown/Up/Tap` | Separate trigger slot (TRACKING_ID=2000) |
+| `setTriggerZone` | Set physical finger detection zone |
+| `isFingerInTriggerZone` | Check if physical finger is in zone |
 
-### Triggering (from FloatService inference loop)
+### Hold-to-Fire
 
+Physical finger must be in trigger zone (savedAreas[1]) before auto-aim activates:
 ```kotlin
-// tap to shoot:
-touchInjector?.tap(fireButtonX, fireButtonY)
-
-// smooth aim correction:
-touchInjector?.aimAt(
-    targetX = bestX, targetY = bestY,
-    centerX = centerX, centerY = centerY,
-    speed = currentSpeed,
-    screenW = screenWidth, screenH = screenHeight
-)
+val holdToAimActive = if (aimHoldEnabled) shizukuClient?.isFingerInTriggerZone() ?: false else true
+if (aimbotOn.get() && rectCount > 0 && holdToAimActive) { ... }
 ```
 
-### Requirements
+### Area Settings
 
-- Shizuku app installed and running (via wireless debugging)
-- App authorized in Shizuku
-- `rikka.shizuku.ShizukuProvider` declared in AndroidManifest (with `exported="true"`)
+Three configurable zones (via AreaSettingsView):
+- `savedAreas[0]`: Fire area — random tap position within on trigger
+- `savedAreas[1]`: Trigger zone — physical finger must be here for hold-to-fire
+- `savedAreas[2]`: Aim area — random touch start position for auto-aim
 
-### Detection avoidance
+## Model Files
 
-- Events use `SOURCE_TOUCHSCREEN` (identical to real touch at framework level)
-- Primary injection via uinput virtual device (created in Shizuku helper process)
-- MediaProjection (screen capture) and TYPE_APPLICATION_OVERLAY are more detectable signals
+Stored in `app/src/main/assets/`, loaded via `models.json`:
+
+| File | Description |
+|------|-------------|
+| `models.json` | Model configuration |
+| `yolov8n_float_192.tflite` | Float32 192x192 |
+| `yolov8n_int8_256_calibrated.tflite` | INT8 256x256 (ultralytics export) |
+| `yolov8n_int8_192_calibrated.tflite` | INT8 192x192 (ultralytics export) |
+
+## Model Conversion
+
+```python
+from ultralytics import YOLO
+model = YOLO('best_192.pt')
+model.export(format='tflite', int8=True, data='valorant.yaml')
+```
+
+Output: `best_192_saved_model/best_192_full_integer_quant.tflite`
+
+Rename to `yolov8n_int8_192_calibrated.tflite` and place in `app/src/main/assets/`.
+
+## PID Auto-Aim
+
+Proportional-integral-derivative controller in `FloatService`:
+- **Kp** = proportional gain (default 0.30)
+- **Ki** = integral gain (default 0.02), anti-windup via integral limiting
+- **Kd** = derivative gain (default 0.08)
+- Anti-windup: integral resets on error zero-crossing, clamped to ±100
+- Max per-frame movement: 600px
+- Convergence threshold: <10px error → lift pointer
+- Max drag distance: 20% of screen diagonal → lift + re-down
+
+Target lock: hysteresis by center distance <150px (22500 sq) to avoid flickering.
 
 ## Known Issues
 
-### 1. OnePlus Pad Pro - libcdsprpc.so Not Found
+### QNN HTP Init Failure
 
-**症状**:
-```
-dlopen failed: library "libcdsprpc.so" not found
-QnnDsp <E> Transport layer setup failed: 14001
-```
+If QNN delegate fails to create, falls back to NNAPI. If both fail, model loading returns false.
 
-**原因**: `libcdsprpc.so` is in `/vendor/lib64/` (vendor system library), inaccessible to third-party apps.
+### OnePlus Pad Pro — libcdsprpc.so Not Found
 
-**解决**: Use TFLite with NNAPI delegate instead of direct QNN API. NNAPI handles DSP communication internally.
+dlopen fails because `libcdsprpc.so` is in `/vendor/lib64/`. QNN HTP delegate handles this internally — if `buildQnnDelegate()` returns null, falls back to NNAPI.
 
-### 2. Inference Very Slow on Some Devices
+### Slow Inference
 
-**症状**: Inference takes 50ms+ instead of 10-15ms
-
-**原因**: NNAPI fell back to CPU execution (no DSP/NPU available)
-
-**解决**: Check if your device supports NNAPI acceleration. Some devices may need different TFLite builds.
+NNAPI fell back to CPU. Check device NNAPI support: `adb shell dumpsys neuralnetworks`
 
 ## Dependencies
 
-- `org.tensorflow:tensorflow-lite` - TFLite runtime
-- `dev.rikka.shizuku:api` / `dev.rikka.shizuku:provider` - Shizuku (shell privilege via ADB)
-- `com.google.android.material` - MD3 components (MaterialCardView, Slider, Switch, etc.)
-- AndroidX libraries - standard Android components
+- `org.tensorflow:tensorflow-lite` — TFLite runtime
+- `dev.rikka.shizuku:api` / `dev.rikka.shizuku:provider` — Shizuku
+- `com.google.android.material` — MD3 components
+- AndroidX libraries
 
 ## Important Notes
 
 - minSdk=31 (Android 12), targetSdk=35
-- Model files are copied from assets to internal storage on first launch
-- Inference runs on single-threaded `Executors.newSingleThreadExecutor` at `THREAD_PRIORITY_URGENT_DISPLAY`
-- Touch injection is NOT auto-triggered — FloatService inference loop only detects + overlays
-- INT8 quantization must use calibration dataset (valorant.yaml) for proper objectness output
-- Confidence threshold is configurable via `JniCallBack.setConfidence(0.10~0.90)`, default 0.25
+- Model files copied from assets to internal storage on first launch
+- Inference at `THREAD_PRIORITY_URGENT_DISPLAY` on single thread executor
+- Touch injection NOT auto-triggered — FloatService inference loop only detects + overlays
+- Confidence threshold: `JniCallBack.setConfidence(0.10~0.90)`, default 0.25
+- State broadcast: `ProjectionHolder.updateState(state, modelName)` (0=standby, 1=running, 2=inferencing)

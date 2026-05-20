@@ -106,14 +106,17 @@ static void detect_touch_device() {
     int has_pos_x = 0;
     int has_pos_y = 0;
     int is_virtual = 0;  // flag when current device has "Aimbot" in its name
+    int found_max_x = 0, found_max_y = 0;
 
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "add device") && strstr(line, "/dev/input/event")) {
             if (has_pos_x && has_pos_y) {
                 strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
                 g_touch_device[sizeof(g_touch_device) - 1] = '\0';
+                if (found_max_x > 0) g_dev_abs_max_x = found_max_x;
+                if (found_max_y > 0) g_dev_abs_max_y = found_max_y;
                 pclose(fp);
-                LOGD("Detected touch device: %s", g_touch_device);
+                LOGD("Detected touch device: %s abs=%dx%d", g_touch_device, g_dev_abs_max_x, g_dev_abs_max_y);
                 return;
             }
             char* p = strstr(line, "/dev/input/event");
@@ -126,25 +129,35 @@ static void detect_touch_device() {
             has_pos_x = 0;
             has_pos_y = 0;
             is_virtual = 0;
+            found_max_x = 0;
+            found_max_y = 0;
         }
         // Track device name — skip our own virtual device
         if (strstr(line, "name:") && strstr(line, "Aimbot")) {
             is_virtual = 1;
         }
         // Detect by ABS_MT_POSITION_X (0x0035) and ABS_MT_POSITION_Y (0x0036)
+        // Format example: "0035  : value 0, min 0, max 143999, fuzz 0, flat 0, resolution 0"
         if (!is_virtual && strstr(line, "0035")) {
             has_pos_x = 1;
+            int val;
+            // line format: "0035  : value 0, min 0, max 143999, fuzz 0, flat 0, resolution 0"
+            if (sscanf(line, "%*x%*[^m]min %*d, max %d", &val) == 1 && val > 0) found_max_x = val;
         }
         if (!is_virtual && strstr(line, "0036")) {
             has_pos_y = 1;
+            int val;
+            if (sscanf(line, "%*x%*[^m]min %*d, max %d", &val) == 1 && val > 0) found_max_y = val;
         }
     }
     if (has_pos_x && has_pos_y) {
         strncpy(g_touch_device, current_path, sizeof(g_touch_device) - 1);
         g_touch_device[sizeof(g_touch_device) - 1] = '\0';
+        if (found_max_x > 0) g_dev_abs_max_x = found_max_x;
+        if (found_max_y > 0) g_dev_abs_max_y = found_max_y;
     }
     pclose(fp);
-    LOGD("Touch device: %s", g_touch_device);
+    LOGD("Touch device: %s abs=%dx%d", g_touch_device, g_dev_abs_max_x, g_dev_abs_max_y);
 }
 
 
@@ -280,6 +293,7 @@ static void* direct_reader(void* arg) {
     int slot_y[MAX_SLOTS] = {0};
     int slot_has_tid[MAX_SLOTS] = {0};
     int slot_moved[MAX_SLOTS] = {0};
+    int event_count = 0;
 
     struct input_event ev;
     while (reader_running) {
@@ -291,16 +305,21 @@ static void* direct_reader(void* arg) {
         }
         if (n != sizeof(ev)) continue;
 
+        event_count++;
+
         switch (ev.type) {
         case EV_ABS:
             switch (ev.code) {
             case ABS_MT_SLOT:
                 cur_slot = ev.value;
+                LOGD("phys: slot=%d", cur_slot);
                 break;
             case ABS_MT_TRACKING_ID:
                 if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
                     slot_tid[cur_slot] = ev.value;
                     slot_has_tid[cur_slot] = 1;
+                    LOGD("phys: slot=%d tid=%s", cur_slot,
+                         ev.value == -1 ? "UP" : "DOWN");
                 }
                 break;
             case ABS_MT_POSITION_X:
@@ -311,18 +330,35 @@ static void* direct_reader(void* arg) {
                 break;
             case ABS_MT_POSITION_Y:
                 if (cur_slot >= 0 && cur_slot < MAX_SLOTS) {
-                    if (!slot_moved[cur_slot]) {
-                        LOGD("direct_reader: slot=%d Y=%d", cur_slot, ev.value);
-                    }
                     slot_y[cur_slot] = ev.value;
                     slot_moved[cur_slot] = 1;
                 }
                 break;
             case ABS_MT_PRESSURE:
-                // just skip
+                LOGD("phys: slot=%d pressure=%d", cur_slot, ev.value);
                 break;
             case ABS_MT_TOOL_TYPE:
+                LOGD("phys: slot=%d tool_type=%d", cur_slot, ev.value);
                 break;
+            case ABS_MT_TOUCH_MAJOR:
+                LOGD("phys: slot=%d touch_major=%d", cur_slot, ev.value);
+                break;
+            case ABS_MT_WIDTH_MAJOR:
+                LOGD("phys: slot=%d width_major=%d", cur_slot, ev.value);
+                break;
+            default:
+                LOGD("phys: slot=%d code=0x%02x value=%d", cur_slot, ev.code, ev.value);
+                break;
+            }
+            break;
+
+        case EV_KEY:
+            if (ev.code == BTN_TOUCH) {
+                LOGD("phys: BTN_TOUCH=%d", ev.value);
+            } else if (ev.code == BTN_TOOL_FINGER) {
+                LOGD("phys: BTN_TOOL_FINGER=%d", ev.value);
+            } else {
+                LOGD("phys: KEY code=%d value=%d", ev.code, ev.value);
             }
             break;
 
@@ -360,6 +396,22 @@ static void* direct_reader(void* arg) {
                         }
                     }
                 }
+
+                // Log all active physical slots on SYN_REPORT
+                char summary[256];
+                int pos = 0;
+                pos += snprintf(summary + pos, sizeof(summary) - pos, "phys: report #%d slots:", event_count);
+                for (int i = 0; i < MAX_SLOTS; i++) {
+                    if (i == VIRTUAL_SLOT || i == VIRTUAL_SLOT_TRIGGER) continue;
+                    if (real_slots[i].active) {
+                        pos += snprintf(summary + pos, sizeof(summary) - pos, " [%d](%d,%d)",
+                                        i, real_slots[i].x, real_slots[i].y);
+                    } else if (uinput_slot_active[i]) {
+                        pos += snprintf(summary + pos, sizeof(summary) - pos, " [%d]LIFT", i);
+                    }
+                }
+                if (pos > 22) LOGD("%s", summary);
+
                 if (uinput_fd >= 0 && need_frame) {
                     send_frame_locked();
                 }
@@ -465,6 +517,10 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
         close(uinput_fd);
         uinput_fd = -1;
     }
+
+    // Detect physical touch device first so uinput gets the correct ABS ranges
+    detect_touch_device();
+    LOGD("Using touch device ABS: %dx%d", g_dev_abs_max_x, g_dev_abs_max_y);
 
     uinput_fd = open("/dev/uinput", O_RDWR | O_NONBLOCK);
     if (uinput_fd < 0) { LOGE("Cannot open /dev/uinput"); return -1; }
