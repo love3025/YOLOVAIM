@@ -109,6 +109,7 @@ class FloatService : Service() {
 
     private fun loadConfigToService() {
         val cfg = ConfigManager.getConfig()
+        kp = cfg.speed
         currentSpeed = cfg.speed
         currentConfidence = cfg.confidence
         triggerEnabled = cfg.triggerEnabled
@@ -204,6 +205,7 @@ class FloatService : Service() {
                         client.setOrientationConfig(captureW > captureH)
                         client.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
                         client.setInputMethod(ProjectionHolder.selectedTouchMethod)
+                        updateTriggerZone()
                         Log.d(TAG, "ShizukuInjectorClient connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
 
                         try {
@@ -373,10 +375,9 @@ class FloatService : Service() {
         guiPanel.showCenterDot = cfg.showCenterDot
         guiPanel.activeTab = savedTab
         guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
-        guiPanel.modelIndex = cfg.modelIndex
         guiPanel.onModelSelected = { idx ->
             val e = ProjectionHolder.modelList.getOrNull(idx)
-            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename); ConfigManager.updateConfig { modelIndex = idx } }
+            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
         }
         guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
@@ -461,7 +462,7 @@ class FloatService : Service() {
                 }.start()
             }
         }
-        guiPanel.onAreaSettingsToggle = { enabled -> if (enabled) showAreaSettings() else hideAreaSettings(); ConfigManager.updateConfig { areaSettingsEnabled = enabled } }
+        guiPanel.onAreaSettingsToggle = { showAreaSettings() }
 
         overlayView.rangeRadius = guiPanel.range; JniCallBack.setConfidence(guiPanel.confidence)
         setupTriggerOverlay()

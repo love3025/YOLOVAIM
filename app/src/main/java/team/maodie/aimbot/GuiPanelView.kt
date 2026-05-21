@@ -10,6 +10,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.slider.Slider
@@ -44,8 +45,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onShowCaptureRangeChanged: ((Boolean) -> Unit)? = null
     var onShowDetectionBoxChanged: ((Boolean) -> Unit)? = null
     var onShowCenterDotChanged: ((Boolean) -> Unit)? = null
-    var onAreaSettingsToggle: ((Boolean) -> Unit)? = null
-    var areaSettingsEnabled = false
+    var onAreaSettingsToggle: (() -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
@@ -256,7 +256,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(MaterialTextView(context).apply { text = "区域设置"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
-            addView(MaterialSwitch(context).apply { isChecked = areaSettingsEnabled; setOnCheckedChangeListener { _, c -> areaSettingsEnabled = c; onAreaSettingsToggle?.invoke(c) } })
+            addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onAreaSettingsToggle?.invoke(); isChecked = false } } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "配置开火/触发/瞄准区域"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
     }
