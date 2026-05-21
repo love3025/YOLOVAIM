@@ -160,4 +160,30 @@ object ConfigManager {
         config.block()
         save()
     }
+
+    fun exportToUri(context: Context, uri: android.net.Uri) {
+        try {
+            val file = File(context.filesDir, CONFIG_FILE)
+            if (!file.exists()) return
+            val json = file.readText()
+            context.contentResolver.openOutputStream(uri)?.use { os ->
+                os.write(json.toByteArray())
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun importFromUri(context: Context, uri: android.net.Uri) {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val json = input.bufferedReader().readText()
+                val file = File(context.filesDir, CONFIG_FILE)
+                file.writeText(json)
+                load()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 }

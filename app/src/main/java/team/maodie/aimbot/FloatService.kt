@@ -34,6 +34,8 @@ class FloatService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var imageReader: ImageReader? = null
     private var captureVirtualDisplay: android.hardware.display.VirtualDisplay? = null
+    private var mediaRecorder: android.media.MediaRecorder? = null
+    private var recordEnabled = false
     private var captureW = 0; private var captureH = 0  // natural display size for ImageReader + coords
     // 使用 Display.getRealSize() 获取完整屏幕尺寸（包括挖孔区域），
     // 避免 displayMetrics 可能受安全区影响
@@ -223,6 +225,47 @@ class FloatService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "ShizukuInjectorClient init failed: ${e.message}")
             }
+        }
+    }
+
+    private fun toggleRecording(enabled: Boolean) {
+        if (enabled) {
+            if (mediaRecorder != null) return
+            try {
+                val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+                val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DCIM)
+                val outputFile = java.io.File(dcimDir, "aimbot_$timestamp.mp4")
+                val mr = android.media.MediaRecorder()
+                mr.setVideoSource(android.media.MediaRecorder.VideoSource.SURFACE)
+                mr.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
+                mr.setOutputFile(outputFile.absolutePath)
+                mr.setVideoEncodingBitRate(20_000_000)
+                mr.setVideoFrameRate(60)
+                mr.setVideoSize(captureW, captureH)
+                mr.setVideoEncoder(android.media.MediaRecorder.VideoEncoder.H264)
+                mr.prepare()
+                val vd = mediaProjection?.createVirtualDisplay(
+                    "AimbotRecord", captureW, captureH, screenDensity,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    mr.surface, null, null
+                )
+                mr.start()
+                mediaRecorder = mr
+                recordEnabled = true
+                Log.d(TAG, "Recording started: ${outputFile.absolutePath}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Recording failed", e)
+                try { mediaRecorder?.release() } catch (_: Exception) {}
+                mediaRecorder = null
+            }
+        } else {
+            try {
+                mediaRecorder?.stop()
+                mediaRecorder?.release()
+            } catch (e: Exception) { Log.e(TAG, "Stop failed", e) }
+            mediaRecorder = null
+            recordEnabled = false
+            Log.d(TAG, "Recording stopped")
         }
     }
 
