@@ -84,6 +84,11 @@ class FloatService : Service() {
     private var areaSettingsAdded = false
     private val savedAreas = mutableListOf<AreaConfig>()
 
+    // Area index constants — magic number prevention
+    private val AREA_INDEX_FIRE = 0
+    private val AREA_INDEX_TRIGGER = 1
+    private val AREA_INDEX_AIM = 2
+
     // Device resolution for uinput — auto-detected by detect_touch_device() in native code.
     // Hardcoded defaults are NOT used; pass placeholder 0 values.
     private var deviceAbsMaxX = 0
@@ -97,7 +102,7 @@ class FloatService : Service() {
     private var triggerOverlayAdded = false
     private var triggerAreaX = 0; private var triggerAreaY = 0; private var lastTriggerMs = 0L
     private var triggerFired = false  // 扳机是否已射过第一发（第二发起用冷却时间）
-    private var hasDetects = false
+    private val hasDetects = AtomicBoolean(false)
 
     override fun onCreate() {
         super.onCreate(); wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -365,11 +370,12 @@ class FloatService : Service() {
                 Thread {
                     val cx = screenWidth / 2; val cy = screenHeight / 2
                     val radius = 200; val steps = 72
+                    val aspect = screenWidth.toFloat() / screenHeight.toFloat()
                     shizukuClient?.swipe(cx, cy, cx, cy, 0)
                     Thread.sleep(50)
                     for (i in 1 until steps) {
                         val angle = (i * 360.0 / steps) * Math.PI / 180.0
-                        val x = (cx + radius * Math.cos(angle)).toInt()
+                        val x = (cx + radius * aspect * Math.cos(angle)).toInt()
                         val y = (cy + radius * Math.sin(angle)).toInt()
                         shizukuClient?.moveTo(x, y)
                         Thread.sleep(20)
@@ -434,7 +440,7 @@ class FloatService : Service() {
 
     // 推送触发区域到远程服务，用于物理手指检测
     private fun updateTriggerZone() {
-        val zone = savedAreas.getOrNull(1) ?: return
+        val zone = savedAreas.getOrNull(AREA_INDEX_TRIGGER) ?: return
         shizukuClient?.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateTriggerZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
@@ -459,13 +465,13 @@ class FloatService : Service() {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             while (inferRunning.get()) {
-                if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled shizuku=${shizukuClient?.isConnected()} detects=$hasDetects") }
+                if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled shizuku=${shizukuClient?.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
                 val image = imageReader?.acquireLatestImage()
                 if (image == null) { Thread.yield(); continue }
                 try {
-                    hasDetects = false
+                    hasDetects.set(false)
                     val plane = image.planes[0]; val buffer = plane.buffer
                     val regionW = cachedRangePx * 2; val regionH = cachedRangePx * 2
                     val offsetX = (captureW - regionW) / 2; val offsetY = (captureH - regionH) / 2
@@ -478,7 +484,7 @@ class FloatService : Service() {
                             rectBuffer[rectCount].set(result[i*6+2]*captureW, result[i*6+3]*captureH, result[i*6+4]*captureW, result[i*6+5]*captureH)
                             rectCount++; i++
                         }
-                        hasDetects = rectCount > 0
+                        hasDetects.set(rectCount > 0)
                         lastDetections = rectBuffer.take(rectCount)
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
@@ -538,7 +544,7 @@ class FloatService : Service() {
                                     // 无需操作
                                 } else {
                                     // 使用瞄准区(savedAreas[2])随机位置作为触摸起点，未配置则用屏幕中心
-                                    val aimArea = savedAreas.getOrNull(2)
+                                    val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
                                     if (aimArea != null) {
                                         aimCenterX = aimArea.x + (Math.random() * aimArea.width).toFloat()
                                         aimCenterY = aimArea.y + (Math.random() * aimArea.height).toFloat()
@@ -606,7 +612,7 @@ class FloatService : Service() {
 
                     // detection-based trigger: center in any detection box
                     val triggerAvailable = shizukuClient?.isConnected() == true
-                    if (triggerEnabled && hasDetects && triggerAvailable) {
+                    if (triggerEnabled && hasDetects.get() && triggerAvailable) {
                         val cx = centerX.toInt(); val cy = centerY.toInt()
                         var onTarget = false
                         for (r in lastDetections) {
@@ -638,7 +644,7 @@ class FloatService : Service() {
                     }
 
 
-                    if (result == null) { hasDetects = false; lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
+                    if (result == null) { hasDetects.set(false); lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
                 finally { image.close() }
             }
@@ -647,7 +653,7 @@ class FloatService : Service() {
     }
 
     private fun fireTriggerTap() {
-        val fireArea = savedAreas.getOrNull(0)
+        val fireArea = savedAreas.getOrNull(AREA_INDEX_FIRE)
         if (fireArea != null) {
             val rndX = fireArea.x + (Math.random() * fireArea.width).toInt()
             val rndY = fireArea.y + (Math.random() * fireArea.height).toInt()
@@ -747,21 +753,6 @@ class FloatService : Service() {
         super.onDestroy()
     }
 
-    private fun drawTestCircle() {
-        val cx = screenWidth / 2; val cy = screenHeight / 2
-        val radius = 200; val steps = 72
-        shizukuClient?.swipe(cx, cy, cx, cy, 0)
-        Thread.sleep(50)
-        for (i in 1 until steps) {
-            val angle = (i * 360.0 / steps) * Math.PI / 180.0
-            val aspect = screenWidth.toFloat() / screenHeight.toFloat()
-                        val x = (cx + radius * aspect * Math.cos(angle)).toInt()
-            val y = (cy + radius * Math.sin(angle)).toInt()
-            shizukuClient?.moveTo(x, y)
-            Thread.sleep(20)
-        }
-        shizukuClient?.lift()
-    }
-
+    
     override fun onBind(intent: Intent?) = null
 }

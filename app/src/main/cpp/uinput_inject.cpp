@@ -82,12 +82,20 @@ extern "C" {
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setDeviceResolution(JNIEnv *env, jclass cls, jint devW, jint devH) {
+    if (devW <= 0 || devH <= 0) {
+        LOGE("Invalid device resolution: %dx%d", devW, devH);
+        return;
+    }
     g_dev_abs_max_x = devW;
     g_dev_abs_max_y = devH;
 }
 
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_setScreenResolution(JNIEnv *env, jclass cls, jint screenW, jint screenH) {
+    if (screenW <= 0 || screenH <= 0) {
+        LOGE("Invalid screen resolution: %dx%d", screenW, screenH);
+        return;
+    }
     g_screen_w = screenW;
     g_screen_h = screenH;
 }

@@ -299,7 +299,9 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     int W = g_input_width;
 
     // Precompute coordinate LUTs for center-crop + nearest-neighbor resize
-    int srcX_lut[256], srcY_lut[256];
+    // Use dynamic allocation since input dims are set at runtime
+    std::vector<int> srcX_lut(W);
+    std::vector<int> srcY_lut(H);
     for (int x = 0; x < W; ++x) srcX_lut[x] = offsetX + x * regionWidth / W;
     for (int y = 0; y < H; ++y) srcY_lut[y] = offsetY + y * regionHeight / H;
 
@@ -455,7 +457,16 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     }
 
     jfloatArray res = env->NewFloatArray(finalDetections.size() * 6);
+    if (!res) {
+        LOGE("Failed to allocate jfloatArray");
+        return nullptr;
+    }
     float* dst = env->GetFloatArrayElements(res, nullptr);
+    if (!dst) {
+        LOGE("Failed to get float array elements");
+        env->DeleteLocalRef(res);
+        return nullptr;
+    }
     for (size_t i = 0; i < finalDetections.size(); ++i) {
         dst[i * 6 + 0] = finalDetections[i].classId;
         dst[i * 6 + 1] = finalDetections[i].score;
