@@ -64,13 +64,7 @@ class FloatService : Service() {
     private var aimOffsetX = 0; private var aimOffsetY = 0
     private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
     private var aimHoldEnabled = false
-    private var prevErrorX = 0f; private var prevErrorY = 0f
-    private var integralX = 0f; private var integralY = 0f
-    private var aimPointerDown = false
-    private var aimCenterX = 0f; private var aimCenterY = 0f
-    private var aimStartX = 0f; private var aimStartY = 0f  // initial DOWN position
-    private var maxDragDist = 400f  // max drag distance from start before lift+re-down
-    private var lockedTarget: android.graphics.RectF? = null  // locked target for hysteresis
+    private val aimingState = AimingState()
 
     // Hold-to-fire (按住激发) state — uses trigger slot, separate from aim slot
 
@@ -314,7 +308,7 @@ class FloatService : Service() {
         guiPanel.onEnabledChanged = { on ->
             aimbotOn.set(on)
             overlayView.aimbotEnabled = on
-            if (on) { maxDragDist = (screenWidth.coerceAtMost(screenHeight) * 0.2f).coerceIn(100f, 600f) }
+            if (on) { aimingState.maxDragDist = (screenWidth.coerceAtMost(screenHeight) * 0.2f).coerceIn(100f, 600f) }
             Log.d("AimbotInfer", "开关切换: $on")
         }
         guiPanel.onSpeedChanged = { kp = it; currentSpeed = it }
@@ -492,122 +486,17 @@ class FloatService : Service() {
                         val holdToAimActive = if (aimHoldEnabled) shizukuClient?.isFingerInTriggerZone() ?: false else true
 
                         if (aimbotOn.get() && rectCount > 0 && holdToAimActive) {
-                            // Target lock: match same target across frames by min center distance
-                            var bestX = 0f; var bestY = 0f
-                            val lock = lockedTarget
-                            val lockCx: Float; val lockCy: Float
-                            if (lock != null) {
-                                lockCx = lock.centerX(); lockCy = lock.centerY()
-                            } else {
-                                lockCx = 0f; lockCy = 0f
-                            }
-                            if (lock != null) {
-                                var minDist = Float.MAX_VALUE; var mx = 0f; var my = 0f
-                                for (idx in 0 until rectCount) {
-                                    val r = rectBuffer[idx]
-                                    val bcx = (r.left+r.right)*0.5f
-                                    val bcy = (r.top+r.bottom)*0.5f
-                                    val d = (bcx-lockCx)*(bcx-lockCx) + (bcy-lockCy)*(bcy-lockCy)
-                                    if (d < minDist) { minDist = d; mx = bcx; my = bcy }
-                                }
-                                if (minDist < 22500f) {
-                                    bestX = mx; bestY = my
-                                    lock.set(bestX, bestY, bestX, bestY)
-                                } else {
-                                    // Lock lost, fall through to re-select
-                                    lockedTarget = null
-                                }
-                            }
-                            if (lockedTarget == null) {
-                                // Pick closest to crosshair center
-                                var bestDistSq = Float.MAX_VALUE; var cx = centerX; var cy = centerY
-                                for (idx in 0 until rectCount) {
-                                    val r = rectBuffer[idx]
-                                    val bcx = (r.left+r.right)*0.5f
-                                    val bcy = (r.top+r.bottom)*0.5f
-                                    val d = (bcx-centerX)*(bcx-centerX) + (bcy-centerY)*(bcy-centerY)
-                                    if (d < bestDistSq) { bestDistSq = d; cx = bcx; cy = bcy }
-                                }
-                                bestX = cx; bestY = cy
-                                lockedTarget = android.graphics.RectF(bestX, bestY, bestX, bestY)
-                            }
-                            val targetX = bestX + aimOffsetX
-                            val targetY = bestY + aimOffsetY
-
-                            val errorX = targetX - centerX
-                            val errorY = targetY - centerY
-
-                            // === 连续移动 P-controller auto-aim ===
-                            if (!aimPointerDown) {
-                                // 目标已经在准心附近(<10px)就不按下，避免按下立刻收敛抬起
-                                if (Math.abs(errorX) < 10f && Math.abs(errorY) < 10f) {
-                                    // 无需操作
-                                } else {
-                                    // 使用瞄准区(savedAreas[2])随机位置作为触摸起点，未配置则用屏幕中心
-                                    val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
-                                    if (aimArea != null) {
-                                        aimCenterX = aimArea.x + (Math.random() * aimArea.width).toFloat()
-                                        aimCenterY = aimArea.y + (Math.random() * aimArea.height).toFloat()
-                                    } else {
-                                        aimCenterX = centerX
-                                        aimCenterY = centerY
-                                    }
-                                    aimStartX = aimCenterX
-                                    aimStartY = aimCenterY
-                                    prevErrorX = 0f; prevErrorY = 0f
-                                    integralX = 0f; integralY = 0f
-                                    Log.d(TAG, "aim DOWN at ($aimCenterX, $aimCenterY) target=($targetX, $targetY)")
-                                    shizukuClient?.swipe(aimCenterX.toInt(), aimCenterY.toInt(), aimCenterX.toInt(), aimCenterY.toInt(), 0)
-                                    aimPointerDown = true
-                                }
-                            } else {
-                                // 收敛就松手
-                                if (Math.abs(errorX) < 10f && Math.abs(errorY) < 10f) {
-                                    Log.d(TAG, "aim converged error=($errorX, $errorY)")
-                                    shizukuClient?.lift()
-                                    aimPointerDown = false
-                                    lockedTarget = null
-                                } else {
-                                    // PID with anti-windup: reset integral on error zero-crossing
-                                    if (errorX * prevErrorX <= 0) integralX = 0f
-                                    if (errorY * prevErrorY <= 0) integralY = 0f
-                                    integralX += errorX; integralY += errorY
-                                    val integralLimit = 100f
-                                    integralX = integralX.coerceIn(-integralLimit, integralLimit)
-                                    integralY = integralY.coerceIn(-integralLimit, integralLimit)
-                                    val derivativeX = errorX - prevErrorX
-                                    val derivativeY = errorY - prevErrorY
-                                    var moveX = errorX * kp + integralX * ki + derivativeX * kd
-                                    var moveY = errorY * kp + integralY * ki + derivativeY * kd
-                                    prevErrorX = errorX; prevErrorY = errorY
-                                    val maxPerFrame = 600f
-                                    val moveDist = Math.sqrt((moveX*moveX + moveY*moveY).toDouble()).toFloat()
-                                    if (moveDist > maxPerFrame) {
-                                        moveX = moveX / moveDist * maxPerFrame
-                                        moveY = moveY / moveDist * maxPerFrame
-                                    }
-                                    aimCenterX += moveX
-                                    aimCenterY += moveY
-
-                                    // 超出拖动距离则抬手下一次（从触摸起点算，不是屏幕中心）
-                                    val dxFromStart = aimCenterX - aimStartX
-                                    val dyFromStart = aimCenterY - aimStartY
-                                    val dragDist = Math.sqrt((dxFromStart*dxFromStart + dyFromStart*dyFromStart).toDouble()).toFloat()
-                                    if (dragDist > maxDragDist) {
-                                        shizukuClient?.lift()
-                                        aimPointerDown = false
-                                        lockedTarget = null
-                                        Log.d(TAG, "aim edge lift at ($aimCenterX, $aimCenterY) drag=$dragDist")
-                                    } else {
-                                        shizukuClient?.moveTo(aimCenterX.toInt(), aimCenterY.toInt())
-                                    }
-                                }
+                            val target = selectTarget(rectBuffer, rectCount, centerX, centerY)
+                            if (target != null) {
+                                val targetX = target.centerX() + aimOffsetX
+                                val targetY = target.centerY() + aimOffsetY
+                                executeAiming(targetX, targetY, centerX, centerY)
                             }
                         }
-                    } else if (aimPointerDown) {
+                    } else if (aimingState.pointerDown) {
                         shizukuClient?.lift()
-                        aimPointerDown = false
-                        lockedTarget = null
+                        aimingState.pointerDown = false
+                        aimingState.lockedTarget = null
                     }
 
                     // detection-based trigger: center in any detection box
@@ -668,6 +557,100 @@ class FloatService : Service() {
             val rndY = cy + ((Math.random() - 0.5) * 2 * px).toInt()
             Log.d(TAG, "trigger fire (legacy)! tap=($rndX,$rndY)")
             shizukuClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
+        }
+    }
+
+    // SelectTarget: finds locked target with hysteresis, or picks closest to crosshair
+    private fun selectTarget(rects: Array<RectF>, rectCount: Int, cx: Float, cy: Float): RectF? {
+        val lock = aimingState.lockedTarget
+        if (lock != null) {
+            val lockCx = lock.centerX(); val lockCy = lock.centerY()
+            var minDist = Float.MAX_VALUE; var bx = 0f; var by = 0f
+            for (i in 0 until rectCount) {
+                val r = rects[i]
+                val bcx = (r.left + r.right) * 0.5f
+                val bcy = (r.top + r.bottom) * 0.5f
+                val d = (bcx - lockCx) * (bcx - lockCx) + (bcy - lockCy) * (bcy - lockCy)
+                if (d < minDist) { minDist = d; bx = bcx; by = bcy }
+            }
+            if (minDist < 22500f) {
+                lock.set(bx, by, bx, by)
+                return lock
+            }
+            aimingState.lockedTarget = null
+        }
+        // Pick closest to crosshair
+        var bestDistSq = Float.MAX_VALUE; var bestX = cx; var bestY = cy
+        for (i in 0 until rectCount) {
+            val r = rects[i]
+            val bcx = (r.left + r.right) * 0.5f
+            val bcy = (r.top + r.bottom) * 0.5f
+            val d = (bcx - cx) * (bcx - cx) + (bcy - cy) * (bcy - cy)
+            if (d < bestDistSq) { bestDistSq = d; bestX = bcx; bestY = bcy }
+        }
+        aimingState.lockedTarget = android.graphics.RectF(bestX, bestY, bestX, bestY)
+        return aimingState.lockedTarget
+    }
+
+    // ExecuteAiming: PID controller that drags virtual finger to target
+    private fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+        val errorX = targetX - cx
+        val errorY = targetY - cy
+        val convergeThresh = 10f
+        if (!aimingState.pointerDown) {
+            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
+            // Pick random start position from aim area, or center
+            val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
+            if (aimArea != null) {
+                aimingState.centerX = aimArea.x + (Math.random() * aimArea.width).toFloat()
+                aimingState.centerY = aimArea.y + (Math.random() * aimArea.height).toFloat()
+            } else {
+                aimingState.centerX = cx; aimingState.centerY = cy
+            }
+            aimingState.startX = aimingState.centerX; aimingState.startY = aimingState.centerY
+            aimingState.prevErrorX = 0f; aimingState.prevErrorY = 0f
+            aimingState.integralX = 0f; aimingState.integralY = 0f
+            shizukuClient?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
+            aimingState.pointerDown = true
+            Log.d(TAG, "aim DOWN at (${aimingState.centerX}, ${aimingState.centerY}) target=($targetX, $targetY)")
+        } else {
+            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
+                shizukuClient?.lift()
+                aimingState.pointerDown = false
+                aimingState.lockedTarget = null
+                Log.d(TAG, "aim converged error=($errorX, $errorY)")
+                return
+            }
+            // PID with anti-windup
+            if (errorX * aimingState.prevErrorX <= 0) aimingState.integralX = 0f
+            if (errorY * aimingState.prevErrorY <= 0) aimingState.integralY = 0f
+            aimingState.integralX += errorX; aimingState.integralY += errorY
+            val integralLimit = 100f
+            aimingState.integralX = aimingState.integralX.coerceIn(-integralLimit, integralLimit)
+            aimingState.integralY = aimingState.integralY.coerceIn(-integralLimit, integralLimit)
+            val derivX = errorX - aimingState.prevErrorX
+            val derivY = errorY - aimingState.prevErrorY
+            var moveX = errorX * kp + aimingState.integralX * ki + derivX * kd
+            var moveY = errorY * kp + aimingState.integralY * ki + derivY * kd
+            aimingState.prevErrorX = errorX; aimingState.prevErrorY = errorY
+            val maxPerFrame = 600f
+            val moveDist = Math.sqrt((moveX * moveX + moveY * moveY).toDouble()).toFloat()
+            if (moveDist > maxPerFrame) {
+                moveX = moveX / moveDist * maxPerFrame
+                moveY = moveY / moveDist * maxPerFrame
+            }
+            aimingState.centerX += moveX; aimingState.centerY += moveY
+            val dx = aimingState.centerX - aimingState.startX
+            val dy = aimingState.centerY - aimingState.startY
+            val dragDist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+            if (dragDist > aimingState.maxDragDist) {
+                shizukuClient?.lift()
+                aimingState.pointerDown = false
+                aimingState.lockedTarget = null
+                Log.d(TAG, "aim edge lift at (${aimingState.centerX}, ${aimingState.centerY}) drag=$dragDist")
+            } else {
+                shizukuClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
+            }
         }
     }
 
