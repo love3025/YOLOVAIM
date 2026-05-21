@@ -51,9 +51,46 @@ static void deleteDelegate() {
 }
 
 //==============================================================================
+//  CPU Architecture Detection
+//==============================================================================
+static bool isQualcommSnapdragon() {
+    // Check /proc/cpuinfo for Qualcomm/Snapdragon string
+    FILE* f = fopen("/proc/cpuinfo", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            if (strstr(line, "Qualcomm") || strstr(line, "qcom") || strstr(line, "Snapdragon")) {
+                fclose(f);
+                return true;
+            }
+        }
+        fclose(f);
+    }
+    // Also check ro.hardware via getprop (Qualcomm devices set this to "qcom")
+    FILE* p = popen("getprop ro.hardware", "r");
+    if (p) {
+        char line[128];
+        if (fgets(line, sizeof(line), p)) {
+            if (strstr(line, "qcom")) {
+                pclose(p);
+                return true;
+            }
+        }
+        pclose(p);
+    }
+    return false;
+}
+
+//==============================================================================
 //  Build QNN TFLite Delegate Options
 //==============================================================================
 static TfLiteDelegate* buildQnnDelegate() {
+    // Skip QNN on non-Qualcomm (MediaTek Dimensity, Samsung Exynos, etc.)
+    if (!isQualcommSnapdragon()) {
+        LOGW("Non-Qualcomm CPU detected, skipping QNN HTP");
+        return nullptr;
+    }
+
     // Preload vendor DSP RPC libraries required by QNN HTP backend.
     static bool preloaded = false;
     static char g_native_lib_dir[512] = {0};
@@ -373,7 +410,7 @@ Java_team_maodie_aimbot_JniCallBack_detect(
     }
 
     long long t2 = getTimeUs();
-    LOGD("Preprocess: %lld us, Inference: %lld us", t1 - t0, t2 - t1);
+    LOGD("Preprocess: %lld us, Inference: %lld us, Total: %lld us", t1 - t0, t2 - t1, t2 - t0);
 
     // Get output tensor
     const TfLiteTensor* output_tensor = TfLiteInterpreterGetOutputTensor(g_interpreter, 0);
