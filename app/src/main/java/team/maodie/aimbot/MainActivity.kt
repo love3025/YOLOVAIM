@@ -24,6 +24,7 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputLayout
+import com.google.android.material.card.MaterialCardView
 import rikka.shizuku.Shizuku
 import org.json.JSONObject
 import java.io.File
@@ -154,14 +155,35 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(16), dp(24), dp(16), dp(100))
         }
 
-        // Title
-        content.addView(TextView(this).apply {
+        // Title bar with more button at top-right
+        val titleBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(24), dp(16), dp(16))
+        }
+
+        titleBar.addView(TextView(this).apply {
             text = "Aimbot"
             textSize = 28f
             setTextColor(MD3_ON_SURFACE)
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, dp(16))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         })
+
+        // More button - MD3 IconButton at top-right
+        titleBar.addView(MaterialButton(this, null, com.google.android.material.R.attr.materialIconButtonStyle).apply {
+            icon = context.getDrawable(R.drawable.ic_more_vert)
+            iconSize = dp(24)
+            iconTint = android.content.res.ColorStateList.valueOf(MD3_ON_SURFACE_VARIANT)
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            stateListAnimator = null
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showMainMenu(it) }
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+        })
+
+        content.addView(titleBar)
 
         // 状态面板
         content.addView(buildStatusPanel())
@@ -680,6 +702,45 @@ class MainActivity : AppCompatActivity() {
         val shizukuStatus = shizukuValue.text.toString()
         permissionDialogShizukuGrant?.visibility = if (shizukuStatus == "Ready" || shizukuStatus == "Connecting") View.GONE else View.VISIBLE
         permissionDialogOverlayGrant?.visibility = if (overlayValue.text == "Granted") View.GONE else View.VISIBLE
+    }
+
+    private fun showMainMenu(anchor: View) {
+        val popupView = layoutInflater.inflate(R.layout.popup_menu, null)
+
+        val popup = PopupWindow(popupView,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            true)
+        popup.elevation = 8f
+
+        popupView.findViewById<LinearLayout>(R.id.menuExport).setOnClickListener {
+            popup.dismiss()
+            Toast.makeText(this, "导出配置", Toast.LENGTH_SHORT).show()
+        }
+        popupView.findViewById<LinearLayout>(R.id.menuImport).setOnClickListener {
+            popup.dismiss()
+            Toast.makeText(this, "导入配置", Toast.LENGTH_SHORT).show()
+        }
+        popupView.findViewById<LinearLayout>(R.id.menuChangelog).setOnClickListener {
+            popup.dismiss()
+            showChangelogDialog()
+        }
+
+        popupView.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val popupWidth = popupView.measuredWidth
+        popup.showAsDropDown(anchor, -popupWidth + anchor.width, 0)
+    }
+
+    private fun showChangelogDialog() {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_changelog, null)
+
+        MaterialAlertDialogBuilder(this)
+            .setView(dialogView)
+            .setPositiveButton("关闭", null)
+            .show()
     }
 
     fun setAimbotState(state: AimbotState, modelName: String = "QNN HTP") {
