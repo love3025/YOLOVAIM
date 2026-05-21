@@ -100,7 +100,34 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate(); wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        ConfigManager.init(this)
+        loadConfigToService()
         createNotificationChannel(); startForeground(1, buildNotification())
+    }
+
+    private fun loadConfigToService() {
+        val cfg = ConfigManager.getConfig()
+        currentSpeed = cfg.speed
+        currentConfidence = cfg.confidence
+        triggerEnabled = cfg.triggerEnabled
+        triggerReactionSpeed = cfg.triggerReactionSpeed
+        triggerCooldown = cfg.triggerCooldown
+        triggerUpFluct = cfg.triggerUpFluctuation
+        triggerDownFluct = cfg.triggerDownFluctuation
+        triggerTouchDuration = cfg.triggerTouchDuration
+        triggerTouchRange = cfg.triggerTouchRange
+        triggerShowArea = cfg.triggerShowArea
+        aimHoldEnabled = cfg.aimHoldEnabled
+        aimOffsetX = cfg.aimOffsetX
+        aimOffsetY = cfg.aimOffsetY
+        ki = cfg.ki; kd = cfg.kd
+        touchDisplayEnabled = cfg.aimTouchDisplay
+        cachedRangePx = cfg.range.coerceIn(50, 800)
+        aimbotOn.set(cfg.aimbotEnabled)
+        savedAreas.clear()
+        savedAreas.addAll(cfg.areas)
+        JniCallBack.setConfidence(cfg.confidence)
+        ProjectionHolder.selectedModelIndex = cfg.modelIndex
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -154,6 +181,12 @@ class FloatService : Service() {
     private fun setupOverlay() {
         overlayView = OverlayCanvasView(this)
         ProjectionHolder.overlayCanvasView = overlayView
+        val cfg = ConfigManager.getConfig()
+        overlayView.aimbotEnabled = cfg.aimbotEnabled
+        overlayView.showCaptureRange = cfg.showCaptureRange
+        overlayView.showDetectionBox = cfg.showDetectionBox
+        overlayView.showCenterDot = cfg.showCenterDot
+        overlayView.rangeRadius = cfg.range.coerceIn(50, 800)
         overlayParams = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
         wm.addView(overlayView, overlayParams); overlayAdded = true
     }
@@ -272,34 +305,35 @@ class FloatService : Service() {
         guiAdded = false
         guiPanel = GuiPanelView(this)
         ProjectionHolder.guiPanelView = guiPanel
+        val cfg = ConfigManager.getConfig()
         guiPanel.aimbotEnabled = aimbotOn.get()
-        guiPanel.speed = currentSpeed
+        guiPanel.speed = cfg.speed
         guiPanel.range = overlayView.rangeRadius.coerceIn(50, 800)
-        guiPanel.confidence = currentConfidence
-        guiPanel.triggerEnabled = triggerEnabled
-        guiPanel.triggerReactionSpeed = triggerReactionSpeed
-        guiPanel.triggerCooldown = triggerCooldown
-        guiPanel.triggerUpFluctuation = triggerUpFluct
-        guiPanel.triggerDownFluctuation = triggerDownFluct
-        guiPanel.triggerTouchDuration = triggerTouchDuration
-        guiPanel.triggerTouchRange = triggerTouchRange
-        guiPanel.triggerShowArea = triggerShowArea
-        guiPanel.aimHoldEnabled = aimHoldEnabled
-        guiPanel.aimOffsetX = aimOffsetX
-        guiPanel.aimOffsetY = aimOffsetY
-        guiPanel.ki = ki; guiPanel.kd = kd
-        guiPanel.aimTouchDisplay = touchDisplayEnabled
+        guiPanel.confidence = cfg.confidence
+        guiPanel.triggerEnabled = cfg.triggerEnabled
+        guiPanel.triggerReactionSpeed = cfg.triggerReactionSpeed
+        guiPanel.triggerCooldown = cfg.triggerCooldown
+        guiPanel.triggerUpFluctuation = cfg.triggerUpFluctuation
+        guiPanel.triggerDownFluctuation = cfg.triggerDownFluctuation
+        guiPanel.triggerTouchDuration = cfg.triggerTouchDuration
+        guiPanel.triggerTouchRange = cfg.triggerTouchRange
+        guiPanel.triggerShowArea = cfg.triggerShowArea
+        guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
+        guiPanel.aimOffsetX = cfg.aimOffsetX
+        guiPanel.aimOffsetY = cfg.aimOffsetY
+        guiPanel.ki = cfg.ki; guiPanel.kd = cfg.kd
+        guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
         guiPanel.aimTouchSize = savedTouchSize
         guiPanel.modelRunning = modelRunning
-        guiPanel.showCaptureRange = overlayView.showCaptureRange
-        guiPanel.showDetectionBox = overlayView.showDetectionBox
-        guiPanel.showCenterDot = overlayView.showCenterDot
+        guiPanel.showCaptureRange = cfg.showCaptureRange
+        guiPanel.showDetectionBox = cfg.showDetectionBox
+        guiPanel.showCenterDot = cfg.showCenterDot
         guiPanel.activeTab = savedTab
         guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
-        guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
+        guiPanel.modelIndex = cfg.modelIndex
         guiPanel.onModelSelected = { idx ->
             val e = ProjectionHolder.modelList.getOrNull(idx)
-            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
+            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename); ConfigManager.updateConfig { modelIndex = idx } }
         }
         guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
@@ -308,27 +342,29 @@ class FloatService : Service() {
         guiPanel.onEnabledChanged = { on ->
             aimbotOn.set(on)
             overlayView.aimbotEnabled = on
+            ConfigManager.updateConfig { aimbotEnabled = on }
             if (on) { aimingState.maxDragDist = (screenWidth.coerceAtMost(screenHeight) * 0.2f).coerceIn(100f, 600f) }
             Log.d("AimbotInfer", "开关切换: $on")
         }
-        guiPanel.onSpeedChanged = { kp = it; currentSpeed = it }
-        guiPanel.onRangeChanged = { px -> overlayView.rangeRadius = px; overlayView.postInvalidate() }
-        guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it) }
-        guiPanel.onTriggerEnabled = { triggerEnabled = it }
-        guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it }
-        guiPanel.onTriggerCooldown = { triggerCooldown = it }
-        guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it }
-        guiPanel.onTriggerDownFluctuation = { triggerDownFluct = it }
-        guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it }
-        guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize() }
-        guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility() }
-        guiPanel.onAimOffsetXChanged = { aimOffsetX = it }
-        guiPanel.onAimOffsetYChanged = { aimOffsetY = it }
-        guiPanel.onKiChanged = { ki = it; guiPanel.ki = it }
-        guiPanel.onKdChanged = { kd = it; guiPanel.kd = it }
-        guiPanel.onAimHoldEnabled = { aimHoldEnabled = it }
+        guiPanel.onSpeedChanged = { kp = it; currentSpeed = it; ConfigManager.updateConfig { speed = it } }
+        guiPanel.onRangeChanged = { px -> overlayView.rangeRadius = px; overlayView.postInvalidate(); ConfigManager.updateConfig { range = px } }
+        guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it); ConfigManager.updateConfig { confidence = it } }
+        guiPanel.onTriggerEnabled = { triggerEnabled = it; ConfigManager.updateConfig { triggerEnabled = it } }
+        guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it; ConfigManager.updateConfig { triggerReactionSpeed = it } }
+        guiPanel.onTriggerCooldown = { triggerCooldown = it; ConfigManager.updateConfig { triggerCooldown = it } }
+        guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it; ConfigManager.updateConfig { triggerUpFluctuation = it } }
+        guiPanel.onTriggerDownFluctuation = { triggerDownFluct = it; ConfigManager.updateConfig { triggerDownFluctuation = it } }
+        guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it; ConfigManager.updateConfig { triggerTouchDuration = it } }
+        guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize(); ConfigManager.updateConfig { triggerTouchRange = px } }
+        guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility(); ConfigManager.updateConfig { triggerShowArea = show } }
+        guiPanel.onAimOffsetXChanged = { aimOffsetX = it; ConfigManager.updateConfig { aimOffsetX = it } }
+        guiPanel.onAimOffsetYChanged = { aimOffsetY = it; ConfigManager.updateConfig { aimOffsetY = it } }
+        guiPanel.onKiChanged = { ki = it; guiPanel.ki = it; ConfigManager.updateConfig { ki = it } }
+        guiPanel.onKdChanged = { kd = it; guiPanel.kd = it; ConfigManager.updateConfig { kd = it } }
+        guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
+            ConfigManager.updateConfig { aimTouchDisplay = show }
             if (touchDisplayAdded) {
                 val lp = touchDisplayView?.layoutParams as? WindowManager.LayoutParams
                 if (lp != null) {
@@ -339,6 +375,7 @@ class FloatService : Service() {
             }
         }
         guiPanel.onAimTouchSize = { px ->
+            ConfigManager.updateConfig { aimTouchSize = px }
             val p = dp(px)
             touchDisplayView?.dotRadius = p.toFloat()
             if (touchDisplayAdded) {
@@ -349,14 +386,17 @@ class FloatService : Service() {
         guiPanel.onShowCaptureRangeChanged = { on ->
             overlayView.showCaptureRange = on
             overlayView.postInvalidate()
+            ConfigManager.updateConfig { showCaptureRange = on }
         }
         guiPanel.onShowDetectionBoxChanged = { on ->
             overlayView.showDetectionBox = on
             overlayView.postInvalidate()
+            ConfigManager.updateConfig { showDetectionBox = on }
         }
         guiPanel.onShowCenterDotChanged = { on ->
             overlayView.showCenterDot = on
             overlayView.postInvalidate()
+            ConfigManager.updateConfig { showCenterDot = on }
         }
         guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) { inferRunning.set(false); broadcastState(1) } }
         guiPanel.onTestCircle = {
@@ -378,7 +418,7 @@ class FloatService : Service() {
                 }.start()
             }
         }
-        guiPanel.onAreaSettingsToggle = { enabled -> if (enabled) showAreaSettings() else hideAreaSettings() }
+        guiPanel.onAreaSettingsToggle = { enabled -> if (enabled) showAreaSettings() else hideAreaSettings(); ConfigManager.updateConfig { areaSettingsEnabled = enabled } }
 
         overlayView.rangeRadius = guiPanel.range; JniCallBack.setConfidence(guiPanel.confidence)
         setupTriggerOverlay()
@@ -401,6 +441,7 @@ class FloatService : Service() {
             onConfirm = { areas ->
                 savedAreas.clear()
                 savedAreas.addAll(areas)
+                ConfigManager.updateConfig { this.areas = areas.toList() }
                 updateTriggerZone()
                 removeAreaSettingsView()
                 if (!guiVisible) showGui()
