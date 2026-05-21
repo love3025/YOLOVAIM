@@ -106,6 +106,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val exportLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri?.let { ConfigManager.exportToUri(this, it) }
+    }
+
+    private val importLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { ConfigManager.importFromUri(this, it) }
+    }
+
     companion object {
         private const val REQ_SHIZUKU = 10001
         const val ACTION_STATE_CHANGE = "team.maodie.aimbot.STATE_CHANGE"
@@ -715,11 +727,11 @@ class MainActivity : AppCompatActivity() {
 
         popupView.findViewById<LinearLayout>(R.id.menuExport).setOnClickListener {
             popup.dismiss()
-            Toast.makeText(this, "导出配置", Toast.LENGTH_SHORT).show()
+            exportLauncher.launch("aimbot_config.json")
         }
         popupView.findViewById<LinearLayout>(R.id.menuImport).setOnClickListener {
             popup.dismiss()
-            Toast.makeText(this, "导入配置", Toast.LENGTH_SHORT).show()
+            importLauncher.launch(arrayOf("application/json"))
         }
         popupView.findViewById<LinearLayout>(R.id.menuChangelog).setOnClickListener {
             popup.dismiss()
