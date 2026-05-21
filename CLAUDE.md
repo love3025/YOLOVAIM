@@ -22,6 +22,34 @@ Android FPS game AI aiming assistant. Captures screen via MediaProjection, runs 
 ./gradlew installDebug
 ```
 
+## Git Workflow
+
+```bash
+# 提交代码
+git add <files>
+git commit -m "描述"
+git push origin master
+
+# 创建 Release tag
+git tag -a v1.0.2 -m "Release v1.0.2"
+git push origin v1.0.2
+```
+
+### Release 流程
+
+1. 确保所有代码已 commit 且测试通过
+2. 修改 `app/build.gradle.kts` 的 `versionName` / `versionCode`
+3. 更新 `dialog_changelog.xml` 添加新版本条目
+4. `./gradlew assembleRelease` 构建 release APK
+5. `git tag` 打 tag 并 push
+6. GitHub Release 页面创建 Release，上传 APK，标题格式 `Aimbot Android v1.0.2`
+
+### 注意事项
+
+- 使用 `git tag -a v1.0.x -m "Release v1.0.x"` 创建 annotated tag，不要只用 lightweight tag
+- 确保 tag 指向正确的 commit，push 前用 `git log v1.0.x --oneline -1` 确认
+- Release APK 路径：`app/build/outputs/apk/release/app-release.apk`
+
 ## Architecture
 
 ```
