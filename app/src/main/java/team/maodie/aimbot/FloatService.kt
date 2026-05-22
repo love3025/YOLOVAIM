@@ -15,6 +15,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import androidx.core.app.NotificationCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.sin
 
 class FloatService : Service() {
 
@@ -63,7 +64,7 @@ class FloatService : Service() {
     private var modelRunning = false
 
     // PID auto-aim state
-    private var aimOffsetX = 0; private var aimOffsetY = 0
+    private var aimOffsetYRatio = 0f; private var aimSwayAmplitude = 0; private var aimPrediction = 0; private var triggerOffsetYRatio = 0f
     private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
     private var aimHoldEnabled = false
     private val aimingState = AimingState()
@@ -121,8 +122,10 @@ class FloatService : Service() {
         triggerTouchRange = cfg.triggerTouchRange
         triggerShowArea = cfg.triggerShowArea
         aimHoldEnabled = cfg.aimHoldEnabled
-        aimOffsetX = cfg.aimOffsetX
-        aimOffsetY = cfg.aimOffsetY
+        aimOffsetYRatio = cfg.aimOffsetYRatio
+        aimSwayAmplitude = cfg.aimSwayAmplitude
+        aimPrediction = cfg.aimPrediction
+        triggerOffsetYRatio = cfg.triggerOffsetYRatio
         ki = cfg.ki; kd = cfg.kd
         touchDisplayEnabled = cfg.aimTouchDisplay
         cachedRangePx = cfg.range.coerceIn(50, 800)
@@ -364,8 +367,10 @@ class FloatService : Service() {
         guiPanel.triggerTouchRange = cfg.triggerTouchRange
         guiPanel.triggerShowArea = cfg.triggerShowArea
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
-        guiPanel.aimOffsetX = cfg.aimOffsetX
-        guiPanel.aimOffsetY = cfg.aimOffsetY
+        guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
+        guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
+        guiPanel.aimPrediction = cfg.aimPrediction
+        guiPanel.triggerOffsetYRatio = cfg.triggerOffsetYRatio
         guiPanel.ki = cfg.ki; guiPanel.kd = cfg.kd
         guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
         guiPanel.aimTouchSize = savedTouchSize
@@ -375,6 +380,7 @@ class FloatService : Service() {
         guiPanel.showCenterDot = cfg.showCenterDot
         guiPanel.activeTab = savedTab
         guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
+        guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
         guiPanel.onModelSelected = { idx ->
             val e = ProjectionHolder.modelList.getOrNull(idx)
             if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
@@ -401,8 +407,10 @@ class FloatService : Service() {
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it; ConfigManager.updateConfig { triggerTouchDuration = it } }
         guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize(); ConfigManager.updateConfig { triggerTouchRange = px } }
         guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility(); ConfigManager.updateConfig { triggerShowArea = show } }
-        guiPanel.onAimOffsetXChanged = { aimOffsetX = it; ConfigManager.updateConfig { aimOffsetX = it } }
-        guiPanel.onAimOffsetYChanged = { aimOffsetY = it; ConfigManager.updateConfig { aimOffsetY = it } }
+        guiPanel.onAimOffsetYRatioChanged = { aimOffsetYRatio = it; ConfigManager.updateConfig { aimOffsetYRatio = it } }
+        guiPanel.onAimSwayAmplitudeChanged = { aimSwayAmplitude = it; ConfigManager.updateConfig { aimSwayAmplitude = it } }
+        guiPanel.onAimPredictionChanged = { aimPrediction = it; ConfigManager.updateConfig { aimPrediction = it } }
+        guiPanel.onTriggerOffsetYRatioChanged = { triggerOffsetYRatio = it; ConfigManager.updateConfig { triggerOffsetYRatio = it } }
         guiPanel.onKiChanged = { ki = it; guiPanel.ki = it; ConfigManager.updateConfig { ki = it } }
         guiPanel.onKdChanged = { kd = it; guiPanel.kd = it; ConfigManager.updateConfig { kd = it } }
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
@@ -573,9 +581,21 @@ class FloatService : Service() {
                         if (aimbotOn.get() && rectCount > 0 && holdToAimActive) {
                             val target = selectTarget(rectBuffer, rectCount, centerX, centerY)
                             if (target != null) {
-                                val targetX = target.centerX() + aimOffsetX
-                                val targetY = target.centerY() + aimOffsetY
-                                executeAiming(targetX, targetY, centerX, centerY)
+                                val tcx = target.centerX(); val tcy = target.centerY()
+                                var boxH = 0f; var minD = Float.MAX_VALUE
+                                for (j in 0 until rectCount) {
+                                    val r = rectBuffer[j]
+                                    val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
+                                    if (d < minD) { minD = d; boxH = r.height() }
+                                }
+                                aimingState.updateVelocity(tcx, tcy)
+                                var aimX = tcx
+                                var aimY = tcy - boxH * aimOffsetYRatio
+                                if (aimPrediction > 0) {
+                                    aimX += aimingState.smoothVelX * aimPrediction
+                                    aimY += aimingState.smoothVelY * aimPrediction
+                                }
+                                executeAiming(aimX, aimY, centerX, centerY)
                             }
                         }
                     } else if (aimingState.pointerDown) {
@@ -590,7 +610,8 @@ class FloatService : Service() {
                         val cx = centerX.toInt(); val cy = centerY.toInt()
                         var onTarget = false
                         for (r in lastDetections) {
-                            if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) { onTarget = true; break }
+                            val extendY = r.height() * (-triggerOffsetYRatio)
+                            if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom + extendY) { onTarget = true; break }
                         }
                         if (onTarget) {
                             val now = System.currentTimeMillis()
@@ -717,6 +738,22 @@ class FloatService : Service() {
             val derivY = errorY - aimingState.prevErrorY
             var moveX = errorX * kp + aimingState.integralX * ki + derivX * kd
             var moveY = errorY * kp + aimingState.integralY * ki + derivY * kd
+            if (aimSwayAmplitude > 0) {
+                if (aimingState.swayPulse > 0) {
+                    aimingState.swayPulse--
+                    val half = aimingState.swayDuration / 2
+                    val t = if (aimingState.swayPulse > half) (aimingState.swayDuration - aimingState.swayPulse) / half.toFloat() else aimingState.swayPulse / half.toFloat()
+                    moveY += aimingState.swayDir * aimSwayAmplitude * t
+                    if (aimingState.swayPulse == 0) aimingState.swayTimer = (30..90).random()
+                } else {
+                    aimingState.swayTimer--
+                    if (aimingState.swayTimer <= 0) {
+                        aimingState.swayDuration = (6..16).random()
+                        aimingState.swayPulse = aimingState.swayDuration
+                        aimingState.swayDir = if (Math.random() > 0.5f) 1f else -1f
+                    }
+                }
+            }
             aimingState.prevErrorX = errorX; aimingState.prevErrorY = errorY
             val maxPerFrame = 600f
             val moveDist = Math.sqrt((moveX * moveX + moveY * moveY).toDouble()).toFloat()

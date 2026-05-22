@@ -34,8 +34,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTestCircle: (() -> Unit)? = null
     var onToggleModel: ((Boolean) -> Unit)? = null
     var onClose: (() -> Unit)? = null
-    var onAimOffsetXChanged: ((Int) -> Unit)? = null
-    var onAimOffsetYChanged: ((Int) -> Unit)? = null
+    var onAimOffsetYRatioChanged: ((Float) -> Unit)? = null
+    var onAimSwayAmplitudeChanged: ((Int) -> Unit)? = null
+    var onAimPredictionChanged: ((Int) -> Unit)? = null
+    var onTriggerOffsetYRatioChanged: ((Float) -> Unit)? = null
     var onKiChanged: ((Float) -> Unit)? = null
     var onKdChanged: ((Float) -> Unit)? = null
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
@@ -49,14 +51,14 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
-    var aimOffsetX = 0; var aimOffsetY = 0
+    var aimOffsetYRatio = 0f; var aimSwayAmplitude = 0; var aimPrediction = 0
     var ki = 0.02f; var kd = 0.08f
     var aimTouchDisplay = false; var aimTouchSize = 20
     var aimHoldEnabled = false
     var showCaptureRange = false; var showDetectionBox = false; var showCenterDot = false
     var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
-    var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false
+    var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false; var triggerOffsetYRatio = 0f
     var modelRunning = false
     private var navScrollView: ScrollView? = null
     private var savedNavScrollY = 0
@@ -169,16 +171,18 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
         contentContainer.addView(spacer(dp(4)))
-        contentContainer.addView(buildSlider("Kp", speed, 0.01f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+        contentContainer.addView(buildSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.20f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.30f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(buildSliderInt("X偏移", aimOffsetX, -500, 500, "px") { aimOffsetX = it; onAimOffsetXChanged?.invoke(it) })
+        contentContainer.addView(buildSlider("Y偏移", aimOffsetYRatio, -1.5f, 0f, "%.0f%%") { aimOffsetYRatio = it; onAimOffsetYRatioChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("Y偏移", aimOffsetY, -500, 500, "px") { aimOffsetY = it; onAimOffsetYChanged?.invoke(it) })
+        contentContainer.addView(buildSliderInt("摆动幅度", aimSwayAmplitude, 0, 2, "px") { aimSwayAmplitude = it; onAimSwayAmplitudeChanged?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSliderInt("预测强度", aimPrediction, 0, 10, "") { aimPrediction = it; onAimPredictionChanged?.invoke(it) })
     }
 
     private fun buildTriggerbot() {
@@ -197,6 +201,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(buildSliderInt("向下波动", triggerDownFluctuation, 0, 15, "ms") { triggerDownFluctuation = it; onTriggerDownFluctuation?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSliderInt("触摸时间", triggerTouchDuration, 1, 50, "ms") { triggerTouchDuration = it; onTriggerTouchDuration?.invoke(it) })
+        contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(buildSlider("Y偏移", triggerOffsetYRatio, -2f, 0f, "%.0f%%") { triggerOffsetYRatio = it; onTriggerOffsetYRatioChanged?.invoke(it) })
     }
 
     private fun buildModelTab() {
@@ -262,7 +268,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     }
 
     private fun buildSlider(label: String, value: Float, min: Float, max: Float, fmt: String, onChange: (Float) -> Unit): LinearLayout {
-        fun display(v: Float) = if (fmt == "0px") "${v.toInt()}px" else "%.2f".format(v)
+        fun display(v: Float) = when (fmt) {
+            "0px" -> "${v.toInt()}px"
+            "%.0f%%" -> "%.0f%%".format(v * 100)
+            else -> fmt.format(v)
+        }
         val valueTv = MaterialTextView(context).apply { text = display(value); textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
         val slider = Slider(context).apply { valueFrom = min; valueTo = max; this.value = value; trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
             addOnChangeListener { _, v, fu -> if (fu) { onChange(v); valueTv.text = display(v) } } }
@@ -275,7 +285,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     private fun buildSliderInt(label: String, value: Int, min: Int, max: Int, suffix: String, onChange: (Int) -> Unit): LinearLayout {
         val valueTv = MaterialTextView(context).apply { text = "$value$suffix"; textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
-        val slider = Slider(context).apply { valueFrom = min.toFloat(); valueTo = max.toFloat(); this.value = value.toFloat(); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        val slider = Slider(context).apply { valueFrom = min.toFloat(); valueTo = max.toFloat(); if (max - min < 10) stepSize = 1f; this.value = value.toFloat(); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
             addOnChangeListener { _, v, fu -> if (fu) { val iv = v.toInt(); onChange(iv); valueTv.text = "$iv$suffix" } } }
         return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
