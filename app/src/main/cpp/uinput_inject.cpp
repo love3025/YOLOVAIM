@@ -32,10 +32,13 @@ struct uinput_abs_setup_manual {
 };
 
 #define MAX_SLOTS        15
-#define VIRTUAL_SLOT     9
-#define VIRTUAL_SLOT_TRIGGER 8
-#define VIRTUAL_TRACKING 1000
-#define TRIGGER_TRACKING 2000
+
+// Virtual fingers use dynamic slot allocation from 0
+static int g_virtual_slot = -1;  // -1 = unallocated, starts from 0 when allocated
+static int g_trigger_slot = -1;
+
+static const int VIRTUAL_TRACKING = 1000;
+static const int TRIGGER_TRACKING = 2000;
 
 static int g_touch_device_found = 0;
 static char g_touch_device[256] = "/dev/input/event0";
@@ -192,17 +195,25 @@ static inline void sync(int fd) {
 }
 
 // =========================================================================
-// Send complete frame: physical slots + virtual slot.
-// Called with uinput_mutex HELD.
+// Send complete frame: physical slots + virtual fingers.
+// All slots require explicit ABS_MT_SLOT before any slot data.
 // =========================================================================
 static void send_frame_locked() {
     int any_physical = 0;
 
+    // Step 1: Sync physical slots — release lifted fingers, report active ones
     for (int i = 0; i < MAX_SLOTS; i++) {
-        if (i == VIRTUAL_SLOT || i == VIRTUAL_SLOT_TRIGGER) continue;
+        ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
 
         if (real_slots[i].active) {
-            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
+            // Physical finger active at this slot — if virtual also uses this slot, release virtual
+            if (i == g_virtual_slot) {
+                // Virtual finger gets bumped by physical, release it
+                ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+                uinput_slot_active[g_virtual_slot] = 0;
+                g_virtual_slot = -1;
+                LOGD("send_frame: physical slot %d bumped virtual", i);
+            }
             ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, real_slots[i].tracking_id);
             ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, real_slots[i].x);
             ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, real_slots[i].y);
@@ -211,32 +222,69 @@ static void send_frame_locked() {
             uinput_slot_active[i] = 1;
             any_physical = 1;
         } else if (uinput_slot_active[i]) {
-            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
             ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
             uinput_slot_active[i] = 0;
         }
     }
 
-    ev(uinput_fd, EV_ABS, ABS_MT_SLOT, VIRTUAL_SLOT);
+    // Step 2: Dynamic slot allocation for virtual finger
     if (virtual_active) {
-        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, VIRTUAL_TRACKING);
-        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, virtual_x);
-        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, virtual_y);
-        ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
-        ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+        if (g_virtual_slot < 0) {
+            // Find first free slot
+            for (int i = 0; i < MAX_SLOTS; i++) {
+                if (i == g_trigger_slot) continue;
+                if (!real_slots[i].active && !uinput_slot_active[i]) {
+                    g_virtual_slot = i;
+                    break;
+                }
+            }
+        }
+        if (g_virtual_slot >= 0) {
+            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, g_virtual_slot);
+            ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, VIRTUAL_TRACKING);
+            ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, virtual_x);
+            ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, virtual_y);
+            ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
+            ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+            uinput_slot_active[g_virtual_slot] = 1;
+        }
     } else {
-        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+        // Release virtual slot
+        if (g_virtual_slot >= 0) {
+            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, g_virtual_slot);
+            ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+            uinput_slot_active[g_virtual_slot] = 0;
+            g_virtual_slot = -1;
+        }
     }
 
-    ev(uinput_fd, EV_ABS, ABS_MT_SLOT, VIRTUAL_SLOT_TRIGGER);
+    // Step 3: Dynamic slot allocation for trigger finger
     if (trigger_active) {
-        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, TRIGGER_TRACKING);
-        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, trigger_x);
-        ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, trigger_y);
-        ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
-        ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+        if (g_trigger_slot < 0) {
+            for (int i = 0; i < MAX_SLOTS; i++) {
+                if (i == g_virtual_slot) continue;
+                if (!real_slots[i].active && !uinput_slot_active[i]) {
+                    g_trigger_slot = i;
+                    break;
+                }
+            }
+        }
+        if (g_trigger_slot >= 0) {
+            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, g_trigger_slot);
+            ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, TRIGGER_TRACKING);
+            ev(uinput_fd, EV_ABS, ABS_MT_POSITION_X, trigger_x);
+            ev(uinput_fd, EV_ABS, ABS_MT_POSITION_Y, trigger_y);
+            ev(uinput_fd, EV_ABS, ABS_MT_TOOL_TYPE, 1);
+            ev(uinput_fd, EV_ABS, ABS_MT_PRESSURE, 50);
+            uinput_slot_active[g_trigger_slot] = 1;
+        }
     } else {
-        ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+        if (g_trigger_slot >= 0) {
+            ev(uinput_fd, EV_ABS, ABS_MT_SLOT, g_trigger_slot);
+            ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+            uinput_slot_active[g_trigger_slot] = 0;
+            g_trigger_slot = -1;
+        }
     }
 
     int touch_down = any_physical || virtual_active || trigger_active;
@@ -245,7 +293,7 @@ static void send_frame_locked() {
 
     if (any_physical) {
         for (int i = 0; i < MAX_SLOTS; i++) {
-            if (i != VIRTUAL_SLOT && i != VIRTUAL_SLOT_TRIGGER && real_slots[i].active) {
+            if (i != g_virtual_slot && i != g_trigger_slot && real_slots[i].active) {
                 ev(uinput_fd, EV_ABS, ABS_X, real_slots[i].x);
                 ev(uinput_fd, EV_ABS, ABS_Y, real_slots[i].y);
                 break;
@@ -410,7 +458,7 @@ static void* direct_reader(void* arg) {
                 int pos = 0;
                 pos += snprintf(summary + pos, sizeof(summary) - pos, "phys: report #%d slots:", event_count);
                 for (int i = 0; i < MAX_SLOTS; i++) {
-                    if (i == VIRTUAL_SLOT || i == VIRTUAL_SLOT_TRIGGER) continue;
+                    if (i == g_virtual_slot || i == g_trigger_slot) continue;
                     if (real_slots[i].active) {
                         pos += snprintf(summary + pos, sizeof(summary) - pos, " [%d](%d,%d)",
                                         i, real_slots[i].x, real_slots[i].y);
@@ -428,7 +476,7 @@ static void* direct_reader(void* arg) {
                 if (g_trigger_zone_l < g_trigger_zone_r && g_trigger_zone_t < g_trigger_zone_b) {
                     g_finger_in_zone = 0;
                     for (int i = 0; i < MAX_SLOTS; i++) {
-                        if (i == VIRTUAL_SLOT || i == VIRTUAL_SLOT_TRIGGER) continue;
+                        if (i == g_virtual_slot || i == g_trigger_slot) continue;
                         if (real_slots[i].active) {
                             int dev_x = real_slots[i].x;
                             int dev_y = real_slots[i].y;
@@ -579,6 +627,8 @@ Java_team_maodie_aimbot_RemoteInjectorService_openUinputNative(JNIEnv *env, jobj
     memset(real_slots, 0, sizeof(real_slots));
     memset(uinput_slot_active, 0, sizeof(uinput_slot_active));
     virtual_active = 0;
+    g_virtual_slot = -1;
+    g_trigger_slot = -1;
     LOGD("Uinput opened fd=%d", uinput_fd);
     return uinput_fd;
 }
@@ -604,6 +654,8 @@ Java_team_maodie_aimbot_RemoteInjectorService_closeUinputNative(JNIEnv *env, job
     }
 
     virtual_active = 0;
+    g_virtual_slot = -1;
+    g_trigger_slot = -1;
     memset(uinput_slot_active, 0, sizeof(uinput_slot_active));
     LOGD("closeUinputNative: done");
 }

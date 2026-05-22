@@ -22,6 +22,45 @@
         android:orientation="vertical"
         android:layout_marginTop="24dp">
 
+        <!-- v1.0.3 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.0.3"
+                android:textSize="16sp"
+                android:textColor="?attr/colorOnSurface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2026-05-23"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:layout_marginTop="2dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="• 自瞄 Y 偏移改为比例偏移（按目标高度），支持打身体\n• 自瞄新增随机摆动，模拟人手微调\n• 自瞄新增预测强度，提前追踪移动目标\n• 扳机新增 Y 范围扩大参数，向下扩展触发区域\n• 修复模型选择关闭面板后不保持的 bug\n• 删除 X 偏移参数"
+                android:textSize="14sp"
+                android:textColor="?attr/colorOnSurface"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="?attr/colorOutlineVariant"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
         <!-- v1.0.2 -->
         <LinearLayout
             android:layout_width="match_parent"

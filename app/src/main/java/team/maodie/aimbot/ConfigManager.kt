@@ -11,8 +11,10 @@ data class AppConfig(
     var speed: Float = 0.3f,
     var ki: Float = 0.02f,
     var kd: Float = 0.08f,
-    var aimOffsetX: Int = 0,
-    var aimOffsetY: Int = 0,
+    var aimOffsetYRatio: Float = 0f,
+    var aimSwayAmplitude: Int = 0,
+    var aimPrediction: Int = 0,
+    var triggerOffsetYRatio: Float = 0f,
     var aimHoldEnabled: Boolean = false,
     var aimTouchDisplay: Boolean = false,
     var aimTouchSize: Int = 20,
@@ -55,8 +57,10 @@ object ConfigManager {
                         speed = obj.optDouble("speed", 0.3).toFloat(),
                         ki = obj.optDouble("ki", 0.02).toFloat(),
                         kd = obj.optDouble("kd", 0.08).toFloat(),
-                        aimOffsetX = obj.optInt("aimOffsetX", 0),
-                        aimOffsetY = obj.optInt("aimOffsetY", 0),
+                        aimOffsetYRatio = obj.optDouble("aimOffsetYRatio", 0.0).toFloat(),
+                        aimSwayAmplitude = obj.optInt("aimSwayAmplitude", 0),
+                        aimPrediction = obj.optInt("aimPrediction", 0),
+                        triggerOffsetYRatio = obj.optDouble("triggerOffsetYRatio", 0.0).toFloat(),
                         aimHoldEnabled = obj.optBoolean("aimHoldEnabled", false),
                         aimTouchDisplay = obj.optBoolean("aimTouchDisplay", false),
                         aimTouchSize = obj.optInt("aimTouchSize", 20),
@@ -93,8 +97,10 @@ object ConfigManager {
                     put("speed", config.speed.toDouble())
                     put("ki", config.ki.toDouble())
                     put("kd", config.kd.toDouble())
-                    put("aimOffsetX", config.aimOffsetX)
-                    put("aimOffsetY", config.aimOffsetY)
+                    put("aimOffsetYRatio", config.aimOffsetYRatio.toDouble())
+                    put("aimSwayAmplitude", config.aimSwayAmplitude)
+                    put("aimPrediction", config.aimPrediction)
+                    put("triggerOffsetYRatio", config.triggerOffsetYRatio.toDouble())
                     put("aimHoldEnabled", config.aimHoldEnabled)
                     put("aimTouchDisplay", config.aimTouchDisplay)
                     put("aimTouchSize", config.aimTouchSize)
