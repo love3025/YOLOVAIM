@@ -8,7 +8,7 @@ import java.io.File
 
 data class AppConfig(
     var aimbotEnabled: Boolean = false,
-    var speed: Float = 0.3f,
+    var speed: Float = 0.15f,
     var ki: Float = 0.02f,
     var kd: Float = 0.08f,
     var aimOffsetYRatio: Float = 0f,
