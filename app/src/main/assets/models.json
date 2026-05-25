@@ -2,27 +2,27 @@
   "models": [
     {
       "filename": "yolov8n_float_192.tflite",
-      "displayName": "YOLOv8n 192 (Float32)",
+      "displayName": "无畏契约-橙 192 (Float32)",
       "precision": "FLOAT32",
       "inputSize": 192,
       "outputSize": 756,
-      "description": "onnx2tf转换"
+      "description": "yolov8n"
     },
     {
       "filename": "yolov8n_int8_256_calibrated.tflite",
-      "displayName": "YOLOv8n 256 (INT8)",
+      "displayName": "无畏契约-橙 256 (INT8)",
       "precision": "INT8",
       "inputSize": 256,
       "outputSize": 1344,
-      "description": "ultralytics+val校准"
+      "description": "yolov8n"
     },
     {
       "filename": "yolov8n_int8_192_calibrated.tflite",
-      "displayName": "YOLOv8n 192 (INT8)",
+      "displayName": "无畏契约-橙 192 (INT8)",
       "precision": "INT8",
       "inputSize": 192,
       "outputSize": 756,
-      "description": "ultralytics+val校准"
+      "description": "yolov8n"
     }
   ]
 }

@@ -274,7 +274,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             else -> fmt.format(v)
         }
         val valueTv = MaterialTextView(context).apply { text = display(value); textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
-        val slider = Slider(context).apply { valueFrom = min; valueTo = max; this.value = value; trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        val slider = Slider(context).apply { valueFrom = min; valueTo = max; this.value = value.coerceIn(min, max); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
             addOnChangeListener { _, v, fu -> if (fu) { onChange(v); valueTv.text = display(v) } } }
         return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -285,7 +285,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
 
     private fun buildSliderInt(label: String, value: Int, min: Int, max: Int, suffix: String, onChange: (Int) -> Unit): LinearLayout {
         val valueTv = MaterialTextView(context).apply { text = "$value$suffix"; textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
-        val slider = Slider(context).apply { valueFrom = min.toFloat(); valueTo = max.toFloat(); if (max - min < 10) stepSize = 1f; this.value = value.toFloat(); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+        val slider = Slider(context).apply { valueFrom = min.toFloat(); valueTo = max.toFloat(); if (max - min < 10) stepSize = 1f; this.value = value.toFloat().coerceIn(min.toFloat(), max.toFloat()); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
             addOnChangeListener { _, v, fu -> if (fu) { val iv = v.toInt(); onChange(iv); valueTv.text = "$iv$suffix" } } }
         return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL

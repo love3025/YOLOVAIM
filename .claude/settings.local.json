@@ -35,7 +35,11 @@
       "Bash(unzip -l \"G:/ai/Aimbot-ai/android-client/app/build/outputs/apk/debug/app-debug.apk\")",
       "Bash(sed -i 's/set_abs_range\\(uinput_fd, 0x35, 0, 21199\\);/set_abs_range\\(uinput_fd, 0x35, 0, g_dev_abs_max_x\\);/' app/src/main/cpp/uinput_inject.cpp)",
       "Bash(sed -i 's/set_abs_range\\(uinput_fd, 0x36, 0, 29999\\);/set_abs_range\\(uinput_fd, 0x36, 0, g_dev_abs_max_y\\);/' app/src/main/cpp/uinput_inject.cpp)",
-      "Bash(adb *)"
+      "Bash(adb *)",
+      "Bash(curl *)",
+      "Bash(winget install *)",
+      "Bash(npm --version)",
+      "Bash(pip install *)"
     ]
   }
 }
