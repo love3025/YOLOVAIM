@@ -322,9 +322,11 @@ class FloatService : Service() {
     }
 
     private fun loadModel(filename: String) {
+        val wasRunning = inferRunning.getAndSet(false)
+        try { executor.submit { }.get() } catch (_: Exception) {}
+        JniCallBack.release()
         val modelFile = java.io.File(applicationContext.filesDir, filename)
         try {
-            // 清理 QNN 缓存，避免旧模型编译缓存干扰新模型
             val qnnCache = java.io.File(applicationContext.cacheDir, "qnn")
             if (qnnCache.exists()) qnnCache.deleteRecursively()
             qnnCache.mkdirs()
@@ -333,10 +335,9 @@ class FloatService : Service() {
                 Log.d(TAG, "模型切换成功: $filename")
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()
                 broadcastState(ProjectionHolder.currentState)
-            } else {
-                Log.e(TAG, "模型切换失败: $filename")
-            }
+            } else { Log.e(TAG, "模型切换失败: $filename") }
         } catch (e: Exception) { Log.e(TAG, "模型切换异常: ${e.message}") }
+        if (wasRunning) startInferLoop()
     }
 
     private fun toggleGui() { if (guiVisible) hideGui() else showGui() }
