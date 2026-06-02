@@ -43,6 +43,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
     var onAimTouchSize: ((Int) -> Unit)? = null
     var onAimHoldEnabled: ((Boolean) -> Unit)? = null
+    var onAimModeChanged: ((Int) -> Unit)? = null
+    var onBezierDurationChanged: ((Int) -> Unit)? = null
+    var onBezierControlOffsetChanged: ((Float) -> Unit)? = null
+    var onBezierRandomSpreadChanged: ((Float) -> Unit)? = null
     var onCaptureRangeEnabled: ((Boolean) -> Unit)? = null
     var onShowCaptureRangeChanged: ((Boolean) -> Unit)? = null
     var onShowDetectionBoxChanged: ((Boolean) -> Unit)? = null
@@ -54,6 +58,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var aimOffsetYRatio = 0f; var aimSwayAmplitude = 0; var aimPrediction = 0
     var ki = 0.02f; var kd = 0.08f
     var aimTouchDisplay = false; var aimTouchSize = 20
+    var aimMode = 0; var bezierDuration = 30; var bezierControlOffset = 0.3f; var bezierRandomSpread = 0.1f
     var aimHoldEnabled = false
     var showCaptureRange = false; var showDetectionBox = false; var showCenterDot = false
     var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
@@ -169,13 +174,53 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
+        // Mode toggle
+        contentContainer.addView(MaterialTextView(context).apply { text = "算法模式"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
         contentContainer.addView(spacer(dp(4)))
-        contentContainer.addView(buildSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
-        contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.20f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
-        contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.30f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            val pidBtn = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "PID"; textSize = 11f; isAllCaps = false
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(4) }
+                if (aimMode == 0) { setBackgroundColor(clPrimary); setTextColor(clOnPrimary) } else { setTextColor(clOnSurface) }
+                setOnClickListener { aimMode = 0; onAimModeChanged?.invoke(0); buildContent() }
+            }
+            val bezBtn = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "贝塞尔"; textSize = 11f; isAllCaps = false
+                layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(4) }
+                if (aimMode == 1) { setBackgroundColor(clPrimary); setTextColor(clOnPrimary) } else { setTextColor(clOnSurface) }
+                setOnClickListener { aimMode = 1; onAimModeChanged?.invoke(1); buildContent() }
+            }
+            addView(pidBtn); addView(bezBtn)
+        })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        if (aimMode == 0) {
+            // PID controls
+            contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
+            contentContainer.addView(spacer(dp(4)))
+            contentContainer.addView(buildSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(2)))
+            contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.20f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(2)))
+            contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.30f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
+        } else {
+            // Bezier controls
+            contentContainer.addView(MaterialTextView(context).apply { text = "贝塞尔参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
+            contentContainer.addView(spacer(dp(4)))
+            val curveView = BezierCurveView(context).apply {
+                controlOffset = bezierControlOffset
+                randomSpread = bezierRandomSpread
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(80))
+            }
+            contentContainer.addView(curveView)
+            contentContainer.addView(spacer(dp(4)))
+            contentContainer.addView(buildSliderInt("持续时间", bezierDuration, 5, 100, "ms") { bezierDuration = it; onBezierDurationChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(2)))
+            contentContainer.addView(buildSlider("曲线弯曲", bezierControlOffset, 0.05f, 0.50f, "%.2f") { bezierControlOffset = it; curveView.controlOffset = it; onBezierControlOffsetChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(2)))
+            contentContainer.addView(buildSlider("随机幅度", bezierRandomSpread, 0f, 0.50f, "%.2f") { bezierRandomSpread = it; curveView.randomSpread = it; onBezierRandomSpreadChanged?.invoke(it) })
+        }
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildSlider("Y偏移", aimOffsetYRatio, -1.5f, 0f, "%.0f%%") { aimOffsetYRatio = it; onAimOffsetYRatioChanged?.invoke(it) })

@@ -69,6 +69,11 @@ class FloatService : Service() {
     private var aimHoldEnabled = false
     private val aimingState = AimingState()
 
+    // Bezier aim state
+    private var aimMode = 0 // 0=PID, 1=Bezier
+    private var bezierDuration = 30; private var bezierControlOffset = 0.3f; private var bezierRandomSpread = 0.1f
+    private val bezierMover = BezierMover()
+
     // Hold-to-fire (按住激发) state — uses trigger slot, separate from aim slot
 
     // Touch display overlay
@@ -127,6 +132,10 @@ class FloatService : Service() {
         aimPrediction = cfg.aimPrediction
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         ki = cfg.ki; kd = cfg.kd
+        aimMode = cfg.aimMode
+        bezierDuration = cfg.bezierDuration
+        bezierControlOffset = cfg.bezierControlOffset
+        bezierRandomSpread = cfg.bezierRandomSpread
         touchDisplayEnabled = cfg.aimTouchDisplay
         cachedRangePx = cfg.range.coerceIn(50, 800)
         aimbotOn.set(cfg.aimbotEnabled)
@@ -373,6 +382,10 @@ class FloatService : Service() {
         guiPanel.aimPrediction = cfg.aimPrediction
         guiPanel.triggerOffsetYRatio = cfg.triggerOffsetYRatio
         guiPanel.ki = cfg.ki; guiPanel.kd = cfg.kd
+        guiPanel.aimMode = cfg.aimMode
+        guiPanel.bezierDuration = cfg.bezierDuration
+        guiPanel.bezierControlOffset = cfg.bezierControlOffset
+        guiPanel.bezierRandomSpread = cfg.bezierRandomSpread
         guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
         guiPanel.aimTouchSize = savedTouchSize
         guiPanel.modelRunning = modelRunning
@@ -414,6 +427,10 @@ class FloatService : Service() {
         guiPanel.onTriggerOffsetYRatioChanged = { triggerOffsetYRatio = it; ConfigManager.updateConfig { triggerOffsetYRatio = it } }
         guiPanel.onKiChanged = { ki = it; guiPanel.ki = it; ConfigManager.updateConfig { ki = it } }
         guiPanel.onKdChanged = { kd = it; guiPanel.kd = it; ConfigManager.updateConfig { kd = it } }
+        guiPanel.onAimModeChanged = { aimMode = it; ConfigManager.updateConfig { aimMode = it } }
+        guiPanel.onBezierDurationChanged = { bezierDuration = it; ConfigManager.updateConfig { bezierDuration = it } }
+        guiPanel.onBezierControlOffsetChanged = { bezierControlOffset = it; ConfigManager.updateConfig { bezierControlOffset = it } }
+        guiPanel.onBezierRandomSpreadChanged = { bezierRandomSpread = it; ConfigManager.updateConfig { bezierRandomSpread = it } }
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
@@ -699,14 +716,70 @@ class FloatService : Service() {
         return aimingState.lockedTarget
     }
 
-    // ExecuteAiming: PID controller that drags virtual finger to target
+    // ExecuteAiming: PID or Bezier controller that drags virtual finger to target
     private fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+        if (aimMode == 1) {
+            executeAimingBezier(targetX, targetY, cx, cy)
+        } else {
+            executeAimingPid(targetX, targetY, cx, cy)
+        }
+    }
+
+    private fun executeAimingBezier(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+        val errorX = targetX - cx
+        val errorY = targetY - cy
+        val convergeThresh = 10f
+
+        if (!aimingState.pointerDown) {
+            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
+
+            val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
+            if (aimArea != null) {
+                aimingState.centerX = aimArea.x + (Math.random() * aimArea.width).toFloat()
+                aimingState.centerY = aimArea.y + (Math.random() * aimArea.height).toFloat()
+            } else {
+                aimingState.centerX = cx; aimingState.centerY = cy
+            }
+            aimingState.startX = aimingState.centerX; aimingState.startY = aimingState.centerY
+
+            shizukuClient?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
+            aimingState.pointerDown = true
+            val now = System.currentTimeMillis()
+            val dist = Math.sqrt((errorX * errorX + errorY * errorY).toDouble()).toFloat()
+            val duration = (bezierDuration * 5 + dist * 0.3f).toInt().coerceIn(200, 800)
+            bezierMover.start(now, now + duration)
+        } else {
+            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
+                shizukuClient?.lift()
+                aimingState.pointerDown = false
+                aimingState.lockedTarget = null
+                return
+            }
+
+            // Each frame: compute remaining error, apply smoothstep ratio as this frame's move
+            // Restart bezier immediately if it finished but error remains
+            if (!bezierMover.isActive()) {
+                val now = System.currentTimeMillis()
+                val dist = Math.sqrt((errorX * errorX + errorY * errorY).toDouble()).toFloat()
+                val duration = (bezierDuration * 5 + dist * 0.3f).toInt().coerceIn(200, 800)
+                bezierMover.start(now, now + duration)
+            }
+            val t = bezierMover.tickRatio(System.currentTimeMillis())
+            val moveX = errorX * t
+            val moveY = errorY * t
+            if (aimSwayAmplitude > 0) aimingState.centerY += computeSway()
+            aimingState.centerX += moveX; aimingState.centerY += moveY
+            if (applyDragSafety()) return
+            shizukuClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
+        }
+    }
+
+    private fun executeAimingPid(targetX: Float, targetY: Float, cx: Float, cy: Float) {
         val errorX = targetX - cx
         val errorY = targetY - cy
         val convergeThresh = 10f
         if (!aimingState.pointerDown) {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
-            // Pick random start position from aim area, or center
             val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
             if (aimArea != null) {
                 aimingState.centerX = aimArea.x + (Math.random() * aimArea.width).toFloat()
@@ -728,7 +801,6 @@ class FloatService : Service() {
                 Log.d(TAG, "aim converged error=($errorX, $errorY)")
                 return
             }
-            // PID with anti-windup
             if (errorX * aimingState.prevErrorX <= 0) aimingState.integralX = 0f
             if (errorY * aimingState.prevErrorY <= 0) aimingState.integralY = 0f
             aimingState.integralX += errorX; aimingState.integralY += errorY
@@ -739,22 +811,7 @@ class FloatService : Service() {
             val derivY = errorY - aimingState.prevErrorY
             var moveX = errorX * kp + aimingState.integralX * ki + derivX * kd
             var moveY = errorY * kp + aimingState.integralY * ki + derivY * kd
-            if (aimSwayAmplitude > 0) {
-                if (aimingState.swayPulse > 0) {
-                    aimingState.swayPulse--
-                    val half = aimingState.swayDuration / 2
-                    val t = if (aimingState.swayPulse > half) (aimingState.swayDuration - aimingState.swayPulse) / half.toFloat() else aimingState.swayPulse / half.toFloat()
-                    moveY += aimingState.swayDir * aimSwayAmplitude * t
-                    if (aimingState.swayPulse == 0) aimingState.swayTimer = (30..90).random()
-                } else {
-                    aimingState.swayTimer--
-                    if (aimingState.swayTimer <= 0) {
-                        aimingState.swayDuration = (6..16).random()
-                        aimingState.swayPulse = aimingState.swayDuration
-                        aimingState.swayDir = if (Math.random() > 0.5f) 1f else -1f
-                    }
-                }
-            }
+            if (aimSwayAmplitude > 0) moveY += computeSway()
             aimingState.prevErrorX = errorX; aimingState.prevErrorY = errorY
             val maxPerFrame = 600f
             val moveDist = Math.sqrt((moveX * moveX + moveY * moveY).toDouble()).toFloat()
@@ -763,18 +820,44 @@ class FloatService : Service() {
                 moveY = moveY / moveDist * maxPerFrame
             }
             aimingState.centerX += moveX; aimingState.centerY += moveY
-            val dx = aimingState.centerX - aimingState.startX
-            val dy = aimingState.centerY - aimingState.startY
-            val dragDist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
-            if (dragDist > aimingState.maxDragDist) {
-                shizukuClient?.lift()
-                aimingState.pointerDown = false
-                aimingState.lockedTarget = null
-                Log.d(TAG, "aim edge lift at (${aimingState.centerX}, ${aimingState.centerY}) drag=$dragDist")
-            } else {
-                shizukuClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
-            }
+            if (applyDragSafety()) return
+            shizukuClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
         }
+    }
+
+    private fun computeSway(): Float {
+        if (aimSwayAmplitude <= 0) return 0f
+        if (aimingState.swayPulse > 0) {
+            aimingState.swayPulse--
+            val half = aimingState.swayDuration / 2
+            val t = if (aimingState.swayPulse > half) (aimingState.swayDuration - aimingState.swayPulse) / half.toFloat() else aimingState.swayPulse / half.toFloat()
+            val sway = aimingState.swayDir * aimSwayAmplitude * t
+            if (aimingState.swayPulse == 0) aimingState.swayTimer = (30..90).random()
+            return sway
+        } else {
+            aimingState.swayTimer--
+            if (aimingState.swayTimer <= 0) {
+                aimingState.swayDuration = (6..16).random()
+                aimingState.swayPulse = aimingState.swayDuration
+                aimingState.swayDir = if (Math.random() > 0.5f) 1f else -1f
+            }
+            return 0f
+        }
+    }
+
+    private fun applyDragSafety(): Boolean {
+        val dx = aimingState.centerX - aimingState.startX
+        val dy = aimingState.centerY - aimingState.startY
+        val dragDist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+        if (dragDist > aimingState.maxDragDist) {
+            shizukuClient?.lift()
+            aimingState.pointerDown = false
+            aimingState.lockedTarget = null
+            bezierMover.cancel()
+            Log.d(TAG, "aim edge lift at (${aimingState.centerX}, ${aimingState.centerY}) drag=$dragDist")
+            return true
+        }
+        return false
     }
 
     private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT)

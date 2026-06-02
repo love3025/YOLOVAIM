@@ -33,7 +33,11 @@ data class AppConfig(
     var showDetectionBox: Boolean = false,
     var showCenterDot: Boolean = false,
     var areaSettingsEnabled: Boolean = false,
-    var areas: List<AreaConfig> = emptyList()
+    var areas: List<AreaConfig> = emptyList(),
+    var aimMode: Int = 0,
+    var bezierDuration: Int = 30,
+    var bezierControlOffset: Float = 0.3f,
+    var bezierRandomSpread: Float = 0.1f
 )
 
 object ConfigManager {
@@ -79,7 +83,11 @@ object ConfigManager {
                         showDetectionBox = obj.optBoolean("showDetectionBox", false),
                         showCenterDot = obj.optBoolean("showCenterDot", false),
                         areaSettingsEnabled = obj.optBoolean("areaSettingsEnabled", false),
-                        areas = parseAreas(obj.optJSONArray("areas"))
+                        areas = parseAreas(obj.optJSONArray("areas")),
+                        aimMode = obj.optInt("aimMode", 0),
+                        bezierDuration = obj.optInt("bezierDuration", 30),
+                        bezierControlOffset = obj.optDouble("bezierControlOffset", 0.3).toFloat(),
+                        bezierRandomSpread = obj.optDouble("bezierRandomSpread", 0.1).toFloat()
                     )
                 }
             }
@@ -120,6 +128,10 @@ object ConfigManager {
                     put("showCenterDot", config.showCenterDot)
                     put("areaSettingsEnabled", config.areaSettingsEnabled)
                     put("areas", serializeAreas(config.areas))
+                    put("aimMode", config.aimMode)
+                    put("bezierDuration", config.bezierDuration)
+                    put("bezierControlOffset", config.bezierControlOffset.toDouble())
+                    put("bezierRandomSpread", config.bezierRandomSpread.toDouble())
                 }
                 file.writeText(obj.toString(2))
             }
