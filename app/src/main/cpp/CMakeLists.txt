@@ -30,6 +30,13 @@ add_library(aimbot SHARED aimbot.cpp)
 add_library(uinput_inject SHARED uinput_inject.cpp)
 target_link_libraries(uinput_inject android log)
 
+# Root daemon (standalone binary for su execution, packaged as .so for Gradle)
+add_executable(root_daemon root_daemon.cpp)
+target_link_libraries(root_daemon android log)
+set_target_properties(root_daemon PROPERTIES
+    OUTPUT_NAME "libroot_daemon.so"
+)
+
 target_include_directories(aimbot PRIVATE
         ${QNN_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include/qnn)

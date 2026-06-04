@@ -26,6 +26,45 @@
         android:orientation="vertical"
         android:layout_marginTop="24dp">
 
+        <!-- v1.0.6 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.0.6"
+                android:textSize="16sp"
+                android:textColor="?attr/colorOnSurface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2026-06-05"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:layout_marginTop="2dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="• 新增 Root 模式支持，有 su 授权时无需 Shizuku\n• 自动检测 Root 权限，优先使用 Root，无 Root 时回退 Shizuku\n• 主界面状态栏显示当前权限模式（Root模式/Shizuku）"
+                android:textSize="14sp"
+                android:textColor="?attr/colorOnSurface"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="?attr/colorOutlineVariant"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
         <!-- v1.0.5 -->
         <LinearLayout
             android:layout_width="match_parent"

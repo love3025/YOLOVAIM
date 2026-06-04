@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlayValue: TextView
     private lateinit var touchValue: TextView
     private lateinit var fab: ExtendedFloatingActionButton
+    private var rootAvailable = false
 
     private var permissionDialog: androidx.appcompat.app.AlertDialog? = null
     private var permissionDialogShizukuStatus: TextView? = null
@@ -314,7 +315,7 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(MD3_ON_SURFACE_VARIANT)
                 })
                 addView(TextView(context).apply {
-                    text = "1.0.0"
+                    text = "1.0.6"
                     textSize = 14f
                     setTextColor(MD3_ON_SURFACE)
                     typeface = Typeface.DEFAULT_BOLD
@@ -324,7 +325,7 @@ class MainActivity : AppCompatActivity() {
             addView(createSpacer(4))
 
             val shizukuLabel = TextView(context).apply {
-                text = "Shizuku"
+                text = "Privilege"
                 textSize = 14f
                 setTextColor(MD3_ON_SURFACE_VARIANT)
             }
@@ -530,7 +531,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "请先授予悬浮窗权限", Toast.LENGTH_SHORT).show()
                 return
             }
-            if (!isShizukuGranted()) {
+            if (!isInjectorAvailable()) {
                 showPermissionHelpDialog()
                 return
             }
@@ -549,24 +550,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionsOnStart() {
-        if (!Settings.canDrawOverlays(this) || !isShizukuGranted()) {
+        if (!Settings.canDrawOverlays(this) || !isInjectorAvailable()) {
             showPermissionHelpDialog()
         }
     }
 
     override fun onStart() {
         super.onStart()
-        try {
-            Shizuku.addRequestPermissionResultListener(shizukuListener)
-        } catch (_: Exception) {}
+        rootAvailable = isRootAvailable()
+        if (!rootAvailable) {
+            try {
+                Shizuku.addRequestPermissionResultListener(shizukuListener)
+            } catch (_: Exception) {}
+            // 主动申请 Shizuku 权限
+            try {
+                if (Shizuku.pingBinder() && !isShizukuGranted()) {
+                    Shizuku.requestPermission(REQ_SHIZUKU)
+                }
+            } catch (_: Exception) {}
+        }
         updatePermissionStates()
-
-        // 主动申请 Shizuku 权限
-        try {
-            if (Shizuku.pingBinder() && !isShizukuGranted()) {
-                Shizuku.requestPermission(REQ_SHIZUKU)
-            }
-        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
@@ -576,9 +579,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        try {
-            Shizuku.removeRequestPermissionResultListener(shizukuListener)
-        } catch (_: Exception) {}
+        if (!rootAvailable) {
+            try {
+                Shizuku.removeRequestPermissionResultListener(shizukuListener)
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onResume() {
@@ -592,13 +597,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun updatePermissionStates() {
         val overlay = Settings.canDrawOverlays(this)
-        val shizukuPing = Shizuku.pingBinder()
-        val shizukuGranted = isShizukuGranted()
-
-        shizukuValue.text = when {
-            !shizukuPing -> "Connecting"
-            shizukuGranted -> "Ready"
-            else -> "Not Granted"
+        if (rootAvailable) {
+            shizukuValue.text = "Root"
+        } else {
+            val shizukuPing = Shizuku.pingBinder()
+            val shizukuGranted = isShizukuGranted()
+            shizukuValue.text = when {
+                !shizukuPing -> "Shizuku Connecting"
+                shizukuGranted -> "Shizuku Ready"
+                else -> "Shizuku Not Granted"
+            }
         }
         overlayValue.text = if (overlay) "Granted" else "Not Granted"
         touchValue.text = "Running"
@@ -610,6 +618,22 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun isRootAvailable(): Boolean {
+        return try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val reader = java.io.BufferedReader(java.io.InputStreamReader(process.inputStream))
+            val output = reader.readLine() ?: ""
+            process.waitFor()
+            output.contains("uid=0")
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun isInjectorAvailable(): Boolean {
+        return rootAvailable || isShizukuGranted()
     }
 
     private fun showPermissionHelpDialog() {
@@ -625,14 +649,14 @@ class MainActivity : AppCompatActivity() {
 
         val ctx = this
 
-        // Shizuku row
+        // 权限模式 row
         layout.addView(LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(12), 0, dp(12))
 
             addView(TextView(ctx).apply {
-                text = "Shizuku"
+                text = "Privilege"
                 textSize = 16f
                 setTextColor(MD3_ON_SURFACE)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -712,7 +736,7 @@ class MainActivity : AppCompatActivity() {
         permissionDialogOverlayStatus?.text = overlayValue.text
 
         val shizukuStatus = shizukuValue.text.toString()
-        permissionDialogShizukuGrant?.visibility = if (shizukuStatus == "Ready" || shizukuStatus == "Connecting") View.GONE else View.VISIBLE
+        permissionDialogShizukuGrant?.visibility = if (shizukuStatus == "Shizuku Ready" || shizukuStatus == "Shizuku Connecting" || shizukuStatus == "Root") View.GONE else View.VISIBLE
         permissionDialogOverlayGrant?.visibility = if (overlayValue.text == "Granted") View.GONE else View.VISIBLE
     }
 
