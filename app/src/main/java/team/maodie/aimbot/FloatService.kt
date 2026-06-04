@@ -59,7 +59,7 @@ class FloatService : Service() {
     private var centerX = 0f; private var centerY = 0f
     private var cachedRange = 0f; private var cachedRangePx = 0
 
-    private var shizukuClient: ShizukuInjectorClient? = null
+    private var touchClient: TouchInjectorInterface? = null
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
     private var modelRunning = false
 
@@ -151,9 +151,9 @@ class FloatService : Service() {
             inferRunning.set(false)
             executor.shutdown()
             cleanupViews()
-            shizukuClient?.stopGeteventListener()
-            shizukuClient?.destroyRemote()
-            shizukuClient?.disconnect()
+            touchClient?.stopGeteventListener()
+            touchClient?.destroyRemote()
+            touchClient?.disconnect()
             mediaProjection?.stop()
             try { stopForeground(true) } catch (_: Exception) {}
             stopSelf()
@@ -208,36 +208,62 @@ class FloatService : Service() {
 
     private fun initTouchInjector() {
         executor.execute {
-            // Try Shizuku client first (runs in root helper process with proper uinput access)
-            try {
-                val client = ShizukuInjectorClient(this@FloatService)
-                client.connect(object : ShizukuInjectorClient.InjectorCallback {
-                    override fun onConnected() {
-                        shizukuClient = client
-                        client.setOrientationConfig(captureW > captureH)
-                        client.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
-                        client.setInputMethod(ProjectionHolder.selectedTouchMethod)
-                        updateTriggerZone()
-                        Log.d(TAG, "ShizukuInjectorClient connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
+            val commonCallback = object : InjectorCallback {
+                override fun onConnected() {
+                    touchClient?.setOrientationConfig(captureW > captureH)
+                    touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+                    touchClient?.setInputMethod(ProjectionHolder.selectedTouchMethod)
+                    updateTriggerZone()
+                    Log.d(TAG, "TouchInjector connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
+                    try {
+                        val initOk = touchClient?.initRemote() ?: false
+                        Log.d(TAG, "RemoteInjector init: $initOk")
+                        touchClient?.startGeteventListener()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "initRemote error: ${e.message}")
+                    }
+                }
+                override fun onDisconnected() {
+                    touchClient = null
+                    Log.w(TAG, "TouchInjector disconnected")
+                }
+                override fun onError(msg: String) {
+                    Log.e(TAG, "TouchInjector error: $msg")
+                }
+            }
 
-                        try {
-                            val initOk = client.initRemote()
-                            Log.d(TAG, "RemoteInjector init: " + initOk)
-                            client.startGeteventListener()
-                        } catch (e: Exception) {
-                            Log.e(TAG, "initRemote error: " + e.message)
-                        }
+            // Try root first
+            try {
+                val rootClient = RootInjectorClient(this@FloatService)
+                rootClient.connect(object : InjectorCallback {
+                    override fun onConnected() {
+                        touchClient = rootClient
+                        commonCallback.onConnected()
                     }
-                    override fun onDisconnected() {
-                        shizukuClient = null
-                        Log.w(TAG, "ShizukuInjectorClient disconnected")
-                    }
+                    override fun onDisconnected() { commonCallback.onDisconnected() }
                     override fun onError(msg: String) {
-                        Log.e(TAG, "ShizukuInjectorClient error: $msg")
+                        Log.d(TAG, "Root not available ($msg), trying Shizuku...")
+                        // Fallback to Shizuku
+                        try {
+                            val shizukuClient = ShizukuInjectorClient(this@FloatService)
+                            shizukuClient.connect(object : InjectorCallback {
+                                override fun onConnected() {
+                                    touchClient = shizukuClient
+                                    commonCallback.onConnected()
+                                }
+                                override fun onDisconnected() { commonCallback.onDisconnected() }
+                                override fun onError(msg2: String) {
+                                    Log.e(TAG, "Shizuku also failed: $msg2")
+                                    commonCallback.onError("Both root and Shizuku failed")
+                                }
+                            })
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Shizuku init failed: ${e.message}")
+                        }
                     }
                 })
             } catch (e: Exception) {
-                Log.e(TAG, "ShizukuInjectorClient init failed: ${e.message}")
+                Log.e(TAG, "Root init failed: ${e.message}")
             }
         }
     }
@@ -475,16 +501,16 @@ class FloatService : Service() {
                     val cx = screenWidth / 2; val cy = screenHeight / 2
                     val radius = 200; val steps = 72
                     val aspect = screenWidth.toFloat() / screenHeight.toFloat()
-                    shizukuClient?.swipe(cx, cy, cx, cy, 0)
+                    touchClient?.swipe(cx, cy, cx, cy, 0)
                     Thread.sleep(50)
                     for (i in 1 until steps) {
                         val angle = (i * 360.0 / steps) * Math.PI / 180.0
                         val x = (cx + radius * aspect * Math.cos(angle)).toInt()
                         val y = (cy + radius * Math.sin(angle)).toInt()
-                        shizukuClient?.moveTo(x, y)
+                        touchClient?.moveTo(x, y)
                         Thread.sleep(20)
                     }
-                    shizukuClient?.lift()
+                    touchClient?.lift()
                 }.start()
             }
         }
@@ -546,7 +572,7 @@ class FloatService : Service() {
     // 推送触发区域到远程服务，用于物理手指检测
     private fun updateTriggerZone() {
         val zone = savedAreas.getOrNull(AREA_INDEX_TRIGGER) ?: return
-        shizukuClient?.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
+        touchClient?.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateTriggerZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
@@ -570,7 +596,7 @@ class FloatService : Service() {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             while (inferRunning.get()) {
-                if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled shizuku=${shizukuClient?.isConnected()} detects=${hasDetects.get()}") }
+                if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled shizuku=${touchClient?.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
                 val image = imageReader?.acquireLatestImage()
@@ -594,7 +620,7 @@ class FloatService : Service() {
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
                         // 按住激发: 物理手指按在触发区时才能自瞄
-                        val holdToAimActive = if (aimHoldEnabled) shizukuClient?.isFingerInTriggerZone() ?: false else true
+                        val holdToAimActive = if (aimHoldEnabled) touchClient?.isFingerInTriggerZone() ?: false else true
 
                         if (aimbotOn.get() && rectCount > 0 && holdToAimActive) {
                             val target = selectTarget(rectBuffer, rectCount, centerX, centerY)
@@ -617,13 +643,13 @@ class FloatService : Service() {
                             }
                         }
                     } else if (aimingState.pointerDown) {
-                        shizukuClient?.lift()
+                        touchClient?.lift()
                         aimingState.pointerDown = false
                         aimingState.lockedTarget = null
                     }
 
                     // detection-based trigger: center in any detection box
-                    val triggerAvailable = shizukuClient?.isConnected() == true
+                    val triggerAvailable = touchClient?.isConnected() == true
                     if (triggerEnabled && hasDetects.get() && triggerAvailable) {
                         val cx = centerX.toInt(); val cy = centerY.toInt()
                         var onTarget = false
@@ -671,7 +697,7 @@ class FloatService : Service() {
             val rndX = fireArea.x + (Math.random() * fireArea.width).toInt()
             val rndY = fireArea.y + (Math.random() * fireArea.height).toInt()
             Log.d(TAG, "trigger fire! area=(${fireArea.x},${fireArea.y} ${fireArea.width}x${fireArea.height}) tap=($rndX,$rndY)")
-            shizukuClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
+            touchClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
         } else {
             val size = dp(triggerTouchRange.coerceAtLeast(30))
             val px = size / 2
@@ -680,7 +706,7 @@ class FloatService : Service() {
             val rndX = cx + ((Math.random() - 0.5) * 2 * px).toInt()
             val rndY = cy + ((Math.random() - 0.5) * 2 * px).toInt()
             Log.d(TAG, "trigger fire (legacy)! tap=($rndX,$rndY)")
-            shizukuClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
+            touchClient?.triggerTap(rndX, rndY, triggerTouchDuration.coerceIn(1, 50))
         }
     }
 
@@ -742,7 +768,7 @@ class FloatService : Service() {
             }
             aimingState.startX = aimingState.centerX; aimingState.startY = aimingState.centerY
 
-            shizukuClient?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
+            touchClient?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
             aimingState.pointerDown = true
             val now = System.currentTimeMillis()
             val dist = Math.sqrt((errorX * errorX + errorY * errorY).toDouble()).toFloat()
@@ -750,7 +776,7 @@ class FloatService : Service() {
             bezierMover.start(now, now + duration)
         } else {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
-                shizukuClient?.lift()
+                touchClient?.lift()
                 aimingState.pointerDown = false
                 aimingState.lockedTarget = null
                 return
@@ -770,7 +796,7 @@ class FloatService : Service() {
             if (aimSwayAmplitude > 0) aimingState.centerY += computeSway()
             aimingState.centerX += moveX; aimingState.centerY += moveY
             if (applyDragSafety()) return
-            shizukuClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
+            touchClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
         }
     }
 
@@ -790,12 +816,12 @@ class FloatService : Service() {
             aimingState.startX = aimingState.centerX; aimingState.startY = aimingState.centerY
             aimingState.prevErrorX = 0f; aimingState.prevErrorY = 0f
             aimingState.integralX = 0f; aimingState.integralY = 0f
-            shizukuClient?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
+            touchClient?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
             aimingState.pointerDown = true
             Log.d(TAG, "aim DOWN at (${aimingState.centerX}, ${aimingState.centerY}) target=($targetX, $targetY)")
         } else {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
-                shizukuClient?.lift()
+                touchClient?.lift()
                 aimingState.pointerDown = false
                 aimingState.lockedTarget = null
                 Log.d(TAG, "aim converged error=($errorX, $errorY)")
@@ -821,7 +847,7 @@ class FloatService : Service() {
             }
             aimingState.centerX += moveX; aimingState.centerY += moveY
             if (applyDragSafety()) return
-            shizukuClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
+            touchClient?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
         }
     }
 
@@ -850,7 +876,7 @@ class FloatService : Service() {
         val dy = aimingState.centerY - aimingState.startY
         val dragDist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
         if (dragDist > aimingState.maxDragDist) {
-            shizukuClient?.lift()
+            touchClient?.lift()
             aimingState.pointerDown = false
             aimingState.lockedTarget = null
             bezierMover.cancel()
@@ -870,9 +896,9 @@ class FloatService : Service() {
         super.onConfigurationChanged(newConfig)
         Log.d(TAG, "orientation changed: display=${screenWidth}x${screenHeight} capture=${captureW}x${captureH}")
         // Use current display dimensions for orientation (captureW/h not yet updated)
-        shizukuClient?.setOrientationConfig(screenWidth > screenHeight)
+        touchClient?.setOrientationConfig(screenWidth > screenHeight)
         // Touch resolution always uses natural orientation (captureW/captureH)
-        shizukuClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+        touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
         centerX = captureW / 2f; centerY = captureH / 2f
 
         // Update overlay positions (UI uses current display metrics)
@@ -924,8 +950,8 @@ class FloatService : Service() {
                 Log.w(TAG, "VirtualDisplay resize failed: ${e.message}")
             }
             captureW = curW; captureH = curH
-            shizukuClient?.setOrientationConfig(captureW > captureH)
-            shizukuClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+            touchClient?.setOrientationConfig(captureW > captureH)
+            touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
             centerX = captureW / 2f; centerY = captureH / 2f
             if (wasRunning) startInferLoop()
         }
@@ -933,9 +959,9 @@ class FloatService : Service() {
 
     override fun onDestroy() {
         inferRunning.set(false); executor.shutdown()
-        shizukuClient?.stopGeteventListener()
-        shizukuClient?.destroyRemote()
-        shizukuClient?.disconnect()
+        touchClient?.stopGeteventListener()
+        touchClient?.destroyRemote()
+        touchClient?.disconnect()
         mediaProjection?.stop()
         cleanupViews()
         try { stopForeground(true) } catch (_: Exception) {}

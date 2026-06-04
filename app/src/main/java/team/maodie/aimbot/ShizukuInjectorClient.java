@@ -14,7 +14,7 @@ import java.io.InputStreamReader;
 import rikka.shizuku.Shizuku;
 import team.maodie.aimbot.IRemoteInjector;
 
-public class ShizukuInjectorClient {
+public class ShizukuInjectorClient implements TouchInjectorInterface {
     private static final String TAG = "ShizukuInjector";
     private static final long CONNECT_TIMEOUT_MS = 10000;
 
@@ -22,12 +22,6 @@ public class ShizukuInjectorClient {
     private volatile boolean connected = false;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private IRemoteInjector remoteService;
-
-    public interface InjectorCallback {
-        void onConnected();
-        void onDisconnected();
-        void onError(String msg);
-    }
 
     public ShizukuInjectorClient(Context context) {
         this.context = context;
