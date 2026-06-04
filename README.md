@@ -1,200 +1,156 @@
-# AI Aimbot for Android
+# AI Aimbot Android
 
-An Android FPS game AI aiming assistant using TFLite with NNAPI delegate for real-time object detection on Qualcomm Snapdragon (Hexagon DSP/NPU). The app captures the screen via MediaProjection, runs YOLOv8n inference, and draws detection overlays.
-
-[中文](#中文说明)
+Android FPS 游戏 AI 瞄准辅助工具，基于 YOLOv8n 实时目标检测，支持骁龙 Hexagon DSP/NPU 加速。
 
 ---
 
-## Features
+## 设备要求
 
-- **Real-time Detection**: YOLOv8n inference via TFLite + NNAPI on Hexagon DSP/NPU
-- **Screen Capture**: MediaProjection API with ImageReader for low-latency frame acquisition
-- **Detection Overlay**: Transparent full-screen canvas showing bounding boxes
-- **Touch Injection**: Shizuku-based injection for auto-aim (right-side virtual joystick mode)
-- **Configurable**: Confidence threshold, aim speed, and model selection via GUI panel
-
-## Architecture
-
-```
-MainActivity.kt                    # Entry point - permissions, model loading, Shizuku auth
-    ↓
-FloatService.kt                    # Foreground service - owns the UI layer
-    ├── FloatBallView.kt           # Draggable toggle (blue MD3 FAB)
-    ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes)
-    ├── GuiPanelView.kt           # MD3 control panel (自瞄/扳机/防闪/模型 tabs)
-    ├── TouchInjector.kt          # Touch injection via Shizuku (+ IInputManager reflection)
-    ├── UinputInjector.kt         # Direct uinput from app process (fallback)
-    ├── ShizukuInjectorClient.kt  # AIDL client for RemoteInjectorService
-    └── JniCallBack.kt            # JNI bridge (native libaimbot.so)
-            └── aimbot.cpp         # TFLite inference with NNAPI delegate
-RemoteInjectorService.java         # Shizuku UserService with uinput access (separate process)
-    └── uinput_inject.cpp         # Native uinput touch injection with 90° rotation
-```
-
-### Data Flow
-
-1. `MediaProjection` captures screen into `ImageReader`
-2. Inference thread reads `ImageReader.acquireLatestImage()` via JNI
-3. `JniCallBack.detect()` runs TFLite model via NNAPI, returns detection boxes
-4. `FloatService` converts normalized coords to pixels, posts to `OverlayCanvasView`
-5. Detection overlay only — touch injection is NOT auto-triggered, must be called explicitly
-
-## Build
-
-```bash
-# Debug build
-./gradlew assembleDebug
-
-# Release build (requires signing config)
-./gradlew assembleRelease
-
-# Clean and rebuild
-./gradlew clean assembleDebug
-
-# Install to device
-./gradlew installDebug
-```
-
-## Model Files
-
-Models are stored in `app/src/main/assets/`. Model files are **excluded from git** (too large). Download from [Releases](https://github.com/xiangsu1145/Auto-aim_android-yolo/releases) or convert from .pt files.
-
-| File | Description |
-|------|-------------|
-| `models.json` | Model configuration |
-| `yolov8n_float_192.tflite` | Float32 model (onnx2tf conversion) |
-| `yolov8n_int8_192_calibrated.tflite` | INT8 model (calibrated with valorant.yaml) |
-| `yolov8n_int8_256_calibrated.tflite` | INT8 256x256 model |
-
-### Model Conversion
-
-**INT8 Quantization (Recommended)**:
-
-```python
-from ultralytics import YOLO
-
-model = YOLO('best_192.pt')
-model.export(
-    format='tflite',
-    int8=True,
-    data='valorant.yaml'  # Your calibration dataset
-)
-```
-
-**Float32 (For testing)**:
-
-```python
-import onnx2tf
-onnx2tf.convert(
-    input_onnx_file_path='best_192.onnx',
-    output_folder_path='output_dir',
-    non_verbose=True
-)
-```
-
-## Touch Injection
-
-### Coordinate Mapping (OnePlus Pad Pro OPD2404)
-
-- Screen resolution: 3000x2120 (landscape)
-- Touch device ABS range: X=[0,21199], Y=[0,29999] (portrait)
-- **90° rotation required**: screen Y → device X, screen X → device Y
-
-```cpp
-dev_x = y * device_abs_max_x / screen_height;
-dev_y = x * device_abs_max_y / screen_width;
-```
-
-### Setup Requirements
-
-- Shizuku app installed and running (via wireless debugging)
-- App authorized in Shizuku
-- `rikka.shizuku.ShizukuProvider` declared in AndroidManifest (with `exported="true"`)
-
-### API
-
-```kotlin
-val injector = TouchInjector()
-injector.init()
-
-injector.tap(x, y)                            // Tap at screen coordinates
-injector.swipe(x1, y1, x2, y2, durationMs) // Swipe gesture
-injector.aimAt(targetX, targetY, centerX, centerY, speed, screenW, screenH)  // Auto-aim
-```
-
-## Known Issues
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| `dlopen failed: library "libcdsprpc.so" not found` | `libcdsprpc.so` is in `/vendor/lib64/`, inaccessible to third-party apps | Use TFLite with NNAPI delegate instead of direct QNN API |
-| Inference takes 50ms+ instead of 10-15ms | NNAPI fell back to CPU execution | Check if your device supports NNAPI acceleration |
-
-## Dependencies
-
-- `org.tensorflow:tensorflow-lite` - TFLite runtime
-- `dev.rikka.shizuku:api` / `dev.rikka.shizuku:provider` - Shizuku
-- `com.google.android.material` - MD3 components
-- AndroidX libraries
-
-## Requirements
-
-- minSdk=31 (Android 12)
-- targetSdk=35
-- Qualcomm Snapdragon device with NNAPI support
-
----
-
-## 中文说明
-
-Android FPS 游戏 AI 瞄准辅助工具，使用 TFLite + NNAPI 在高通骁龙（Hexagon DSP/NPU）上进行实时目标检测。应用通过 MediaProjection 截取屏幕，运行 YOLOv8n 推理并绘制检测框。
-
-### 主要功能
-
-- **实时检测**：通过 TFLite + NNAPI 在 Hexagon DSP/NPU 上运行 YOLOv8n 推理
-- **屏幕捕获**：使用 MediaProjection + ImageReader 实现低延迟画面获取
-- **检测覆盖层**：透明全屏画布显示边界框
-- **触控注入**：基于 Shizuku 的虚拟摇杆式自动瞄准
-- **可配置**：通过 GUI 面板调节置信度阈值、瞄准速度和模型选择
-
-### 项目结构
-
-主要代码位于 `app/src/main/` 目录，核心文件：
-
-| 文件 | 说明 |
+| 项目 | 要求 |
 |------|------|
-| `MainActivity.kt` | 入口，处理权限、模型加载、Shizuku 认证 |
-| `FloatService.kt` | 前台服务，拥有所有 UI 视图和推理执行器 |
-| `FloatBallView.kt` | 可拖动的悬浮球（蓝色 MD3 FAB） |
-| `OverlayCanvasView.kt` | 全屏透明覆盖层（检测框） |
-| `GuiPanelView.kt` | MD3 控制面板（自瞄/扳机/防闪/模型标签页） |
-| `TouchInjector.kt` | 通过 Shizuku + IInputManager 反射实现触控注入 |
-| `uinput_inject.cpp` | 原生 uinput 触控注入（含 90° 坐标旋转） |
-| `aimbot.cpp` | TFLite 推理（NNAPI 委托） |
+| 芯片 | **骁龙 8 Gen 1 及以上**（SM8450+） |
+| 系统 | Android 12 (API 31) 及以上 |
+| 架构 | arm64-v8a |
 
-### 构建
+> 低于骁龙 8 Gen 1 的设备可能无法正常运行或推理速度过慢。
 
-```bash
-./gradlew assembleDebug    # Debug 构建
-./gradlew assembleRelease   # Release 构建（需要签名配置）
-./gradlew installDebug      # 安装到设备
-```
+---
 
-### 模型文件
+## 下载安装
 
-模型文件存储在 `app/src/main/assets/`，由于体积过大已从 Git 排除。请从 [Releases](https://github.com/xiangsu1145/Auto-aim_android-yolo/releases) 下载或自行转换。
+1. 前往 [Releases](https://github.com/xiangsu1145/Auto-aim_android-yolo/releases) 页面
+2. 下载最新版本的 APK 文件
+3. 在手机上安装 APK（需允许安装未知来源应用）
 
-推荐使用 INT8 量化模型，推理速度更快。
+---
 
-### 触控注入说明
+## 前置准备
 
-触控注入**不会自动触发**——FloatService 推理循环仅负责检测和显示。如需自动瞄准，需在代码中调用 `touchInjector?.aimAt()` 等方法。
+### 1. 安装 Shizuku
 
-### 设备兼容
+本应用依赖 Shizuku 进行触控注入，必须先完成 Shizuku 的设置：
 
-- 需要高通骁龙设备（Snapdragon 865+）
-- 需要 NNAPI 硬件加速支持
-- 测试设备：OnePlus Pad Pro (OPD2404)
+1. 在应用商店或 [Shizuku 官网](https://shizuku.rikka.app/) 下载安装 Shizuku
+2. 打开 Shizuku，选择 **通过无线调试启动**
+3. 按照 Shizuku 内的指引完成配对（需在开发者选项中开启无线调试）
+4. 确保 Shizuku 状态显示为 **运行中**
+
+### 2. 授权应用
+
+1. 打开 Shizuku → **管理已授权应用**
+2. 找到本应用，开启授权
+
+---
+
+## 使用教程
+
+### 第一步：启动应用
+
+打开应用后，主界面会显示当前状态和可用模型列表。
+
+### 第二步：授予权限
+
+首次运行需要授予以下权限：
+
+- **屏幕录制权限**：用于截取游戏画面进行检测
+- **悬浮窗权限**：用于显示检测覆盖层和控制面板
+
+应用会自动弹出权限请求，按提示允许即可。
+
+### 第三步：选择模型
+
+在主界面选择要使用的检测模型：
+
+| 模型 | 说明 |
+|------|------|
+| INT8 192 | 推荐，速度快，精度足够 |
+| INT8 256 | 精度更高，速度稍慢 |
+| Float32 192 | 测试用，不推荐日常使用 |
+
+### 第四步：启动服务
+
+1. 点击 **启动** 按钮
+2. 悬浮球（蓝色圆形按钮）会出现在屏幕上
+3. 切换到游戏
+
+### 第五步：游戏内操作
+
+**悬浮球**：
+- 可以拖动到任意位置
+- 点击悬浮球打开/关闭控制面板
+- 长按悬浮球可停止服务
+
+**控制面板**（点击悬浮球打开）：
+
+| 标签 | 功能 |
+|------|------|
+| 自瞄 | 开关自动瞄准、调节 PID 参数（响应速度/平滑度） |
+| 扳机 | 开关自动扳机（准心对准目标时自动开火） |
+| 防闪 | 防闪光设置 |
+| 模型 | 切换检测模型 |
+| 系统 | 置信度阈值、系统设置 |
+
+### 功能说明
+
+**自动瞄准**：
+- 检测到敌人后，自动将准心移动到目标位置
+- 通过 PID 控制器实现平滑追踪，不会出现瞬移
+- 支持调节响应速度：Kp（比例）越大响应越快，Kd（微分）越大越平滑
+
+**自动扳机**：
+- 当准心与检测到的目标重合时，自动开火
+- 可设置触发区域大小
+
+**按住开火（Hold-to-Fire）**：
+- 需要用物理手指按住触发区域，自动瞄准才会激活
+- 松手即停止，防止非预期操作
+
+**检测覆盖层**：
+- 屏幕上会显示检测到的目标边界框
+- 绿色框 = 高置信度，黄色框 = 低置信度
+- 可在设置中关闭覆盖层显示
+
+---
+
+## 常见问题
+
+### Q: 启动后没有检测框出现
+
+- 确认已授予屏幕录制权限
+- 确认 Shizuku 正在运行且已授权本应用
+- 尝试降低置信度阈值（控制面板 → 系统）
+
+### Q: 自瞄不生效
+
+- 确认 Shizuku 状态为运行中
+- 确认已在控制面板中开启自瞄开关
+- 如果开启了「按住开火」，需要物理手指按住触发区域
+
+### Q: 推理速度慢 / 卡顿
+
+- 确认设备芯片为骁龙 8 Gen 1 或以上
+- 尝试切换到 INT8 192 模型（速度最快）
+- 关闭其他占用性能的应用
+
+### Q: 提示 Shizuku 连接失败
+
+- 重新启动 Shizuku（通过无线调试启动）
+- 确认无线调试的配对码已正确输入
+- 重启手机后重试
+
+### Q: 游戏内触摸无响应
+
+- 检查是否与其他悬浮窗应用冲突
+- 重新启动本应用的服务
+
+---
+
+## 注意事项
+
+- 本工具仅供学习和研究用途
+- 在线游戏中使用可能违反游戏条款，请自行承担风险
+- 首次启动时模型文件会从 assets 解压到内部存储，可能需要几秒钟
+- 建议在游戏开始前启动服务，游戏结束后停止服务以节省电量
 
 ---
 
