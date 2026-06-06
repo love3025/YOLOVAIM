@@ -3,6 +3,7 @@ package team.maodie.aimbot
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -146,10 +147,95 @@ class MainActivity : AppCompatActivity() {
         setContentView(createRootLayout())
         ProjectionHolder.setStateListener(stateListener)
         loadStateFromPrefs()
+
+        if (!isDisclaimerAccepted()) {
+            showDisclaimerDialog()
+        } else {
+            initAfterDisclaimer()
+        }
+    }
+
+    private fun initAfterDisclaimer() {
         android.os.Handler(mainLooper).postDelayed({ loadDefaultModel() }, 500)
         android.os.Handler(mainLooper).postDelayed({
             if (::statusText.isInitialized) checkPermissionsOnStart()
         }, 1500)
+    }
+
+    private fun isDisclaimerAccepted(): Boolean {
+        val prefs = getSharedPreferences("disclaimer_prefs", Context.MODE_PRIVATE)
+        return prefs.getBoolean("accepted", false)
+    }
+
+    private fun setDisclaimerAccepted() {
+        getSharedPreferences("disclaimer_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("accepted", true)
+            .putLong("accepted_at", System.currentTimeMillis())
+            .apply()
+    }
+
+    private fun showDisclaimerDialog() {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_disclaimer, null)
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setView(dialogView)
+            .setCancelable(false)
+            .setPositiveButton("同意 (${30})", null)
+            .setNegativeButton("退出") { _, _ -> finish() }
+            .create()
+
+        dialog.setOnShowListener {
+            val positiveBtn = dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+            positiveBtn.isEnabled = false
+            positiveBtn.alpha = 0.5f
+
+            var timeReady = false
+            var scrolledToBottom = false
+
+            fun updateButtonState() {
+                val canAccept = timeReady && scrolledToBottom
+                positiveBtn.isEnabled = canAccept
+                positiveBtn.alpha = if (canAccept) 1.0f else 0.5f
+            }
+
+            // 30 秒倒计时
+            val handler = android.os.Handler(mainLooper)
+            val countdownRunnable = object : Runnable {
+                var remaining = 30
+                override fun run() {
+                    remaining--
+                    if (remaining > 0) {
+                        positiveBtn.text = "同意 ($remaining)"
+                        handler.postDelayed(this, 1000)
+                    } else {
+                        positiveBtn.text = "同意"
+                        timeReady = true
+                        updateButtonState()
+                    }
+                }
+            }
+            handler.postDelayed(countdownRunnable, 1000)
+
+            // 滚动监听
+            val scrollView = dialogView.findViewById<android.widget.ScrollView>(R.id.disclaimerScrollView)
+            scrollView?.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+                val child = scrollView.getChildAt(0)
+                if (child != null) {
+                    val diff = child.bottom - (scrollView.height + scrollY)
+                    scrolledToBottom = diff <= 50
+                    updateButtonState()
+                }
+            }
+
+            positiveBtn.setOnClickListener {
+                setDisclaimerAccepted()
+                dialog.dismiss()
+                initAfterDisclaimer()
+            }
+        }
+
+        dialog.show()
     }
 
     private fun createRootLayout(): View {
@@ -760,6 +846,22 @@ class MainActivity : AppCompatActivity() {
         popupView.findViewById<LinearLayout>(R.id.menuChangelog).setOnClickListener {
             popup.dismiss()
             showChangelogDialog()
+        }
+        popupView.findViewById<LinearLayout>(R.id.menuGithub).setOnClickListener {
+            popup.dismiss()
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/xiangsu1145/Auto-aim_android-yolo/")))
+        }
+        popupView.findViewById<LinearLayout>(R.id.menuSettings).setOnClickListener {
+            popup.dismiss()
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+        popupView.findViewById<LinearLayout>(R.id.menuGithub).setOnClickListener {
+            popup.dismiss()
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/xiangsu1145/Auto-aim_android-yolo/")))
+        }
+        popupView.findViewById<LinearLayout>(R.id.menuSettings).setOnClickListener {
+            popup.dismiss()
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
 
         popupView.measure(

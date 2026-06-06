@@ -23,6 +23,14 @@
       "inputSize": 192,
       "outputSize": 756,
       "description": "yolov8n"
+    },
+    {
+      "filename": "valorant_int8_256_v2.tflite",
+      "displayName": "无畏契约-橙 256 V2 (INT8)",
+      "precision": "INT8",
+      "inputSize": 256,
+      "outputSize": 1344,
+      "description": "yolov8n"
     }
   ]
 }
