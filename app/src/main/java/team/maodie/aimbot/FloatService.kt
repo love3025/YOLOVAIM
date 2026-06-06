@@ -36,7 +36,13 @@ class FloatService : Service() {
     private var imageReader: ImageReader? = null
     private var captureVirtualDisplay: android.hardware.display.VirtualDisplay? = null
     private var mediaRecorder: android.media.MediaRecorder? = null
+    private var recordSurface: Surface? = null
     private var recordEnabled = false
+    private var autoSaveDataset = false
+    private var datasetCounter = -1  // -1 = 未初始化，首次保存时扫描目录
+    private val datasetDir: java.io.File by lazy {
+        java.io.File(getExternalFilesDir(null), "dataset").apply { mkdirs() }
+    }
     private var captureW = 0; private var captureH = 0  // natural display size for ImageReader + coords
     // 使用 Display.getRealSize() 获取完整屏幕尺寸（包括挖孔区域），
     // 避免 displayMetrics 可能受安全区影响
@@ -147,7 +153,7 @@ class FloatService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
-            // 同步清理所有视图，避免残影
+            if (mediaRecorder != null) toggleRecording(false)
             inferRunning.set(false)
             executor.shutdown()
             cleanupViews()
@@ -272,23 +278,21 @@ class FloatService : Service() {
         if (enabled) {
             if (mediaRecorder != null) return
             try {
-                val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
-                val dcimDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DCIM)
-                val outputFile = java.io.File(dcimDir, "aimbot_$timestamp.mp4")
+                val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", java.util.Locale.US).format(java.util.Date())
+                val random = (1000..9999).random()
+                val dir = java.io.File("/storage/emulated/0/Pictures/Screenshots")
+                if (!dir.exists()) dir.mkdirs()
+                val outputFile = java.io.File(dir, "Aimbot_${timestamp}_$random.mp4")
                 val mr = android.media.MediaRecorder()
                 mr.setVideoSource(android.media.MediaRecorder.VideoSource.SURFACE)
                 mr.setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
                 mr.setOutputFile(outputFile.absolutePath)
-                mr.setVideoEncodingBitRate(20_000_000)
+                mr.setVideoEncodingBitRate(32_000_000)
                 mr.setVideoFrameRate(60)
                 mr.setVideoSize(captureW, captureH)
-                mr.setVideoEncoder(android.media.MediaRecorder.VideoEncoder.H264)
+                mr.setVideoEncoder(android.media.MediaRecorder.VideoEncoder.HEVC)
                 mr.prepare()
-                val vd = mediaProjection?.createVirtualDisplay(
-                    "AimbotRecord", captureW, captureH, screenDensity,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    mr.surface, null, null
-                )
+                recordSurface = mr.surface
                 mr.start()
                 mediaRecorder = mr
                 recordEnabled = true
@@ -297,15 +301,48 @@ class FloatService : Service() {
                 Log.e(TAG, "Recording failed", e)
                 try { mediaRecorder?.release() } catch (_: Exception) {}
                 mediaRecorder = null
+                recordSurface = null
             }
         } else {
+            recordEnabled = false
             try {
                 mediaRecorder?.stop()
                 mediaRecorder?.release()
             } catch (e: Exception) { Log.e(TAG, "Stop failed", e) }
             mediaRecorder = null
-            recordEnabled = false
+            recordSurface = null
             Log.d(TAG, "Recording stopped")
+        }
+    }
+
+    private fun saveDatasetFrame(hwBuf: android.hardware.HardwareBuffer, result: FloatArray, count: Int) {
+        try {
+            // 首次保存时扫描目录，找到最大编号避免覆盖
+            if (datasetCounter < 0) {
+                datasetCounter = datasetDir.listFiles { f -> f.name.endsWith(".jpg") }
+                    ?.mapNotNull { f -> f.nameWithoutExtension.toIntOrNull() }
+                    ?.maxOrNull()?.let { it + 1 } ?: 0
+            }
+            val bmp = Bitmap.wrapHardwareBuffer(hwBuf, null) ?: return
+            val idx = datasetCounter++
+            val name = "%06d".format(idx)
+            val imgFile = java.io.File(datasetDir, "$name.jpg")
+            java.io.FileOutputStream(imgFile).use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+            bmp.recycle()
+            // 生成 YOLO 标注文件
+            val txtFile = java.io.File(datasetDir, "$name.txt")
+            java.io.BufferedWriter(java.io.FileWriter(txtFile)).use { w ->
+                for (i in 0 until count) {
+                    val classId = result[i * 6].toInt()
+                    val x1 = result[i * 6 + 2]; val y1 = result[i * 6 + 3]
+                    val x2 = result[i * 6 + 4]; val y2 = result[i * 6 + 5]
+                    val cx = (x1 + x2) / 2f; val cy = (y1 + y2) / 2f
+                    val bw = x2 - x1; val bh = y2 - y1
+                    w.write("$classId $cx $cy $bw $bh\n")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Dataset save failed", e)
         }
     }
 
@@ -415,6 +452,8 @@ class FloatService : Service() {
         guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
         guiPanel.aimTouchSize = savedTouchSize
         guiPanel.modelRunning = modelRunning
+        guiPanel.recordEnabled = recordEnabled
+        guiPanel.autoSaveDataset = autoSaveDataset
         guiPanel.showCaptureRange = cfg.showCaptureRange
         guiPanel.showDetectionBox = cfg.showDetectionBox
         guiPanel.showCenterDot = cfg.showCenterDot
@@ -494,6 +533,8 @@ class FloatService : Service() {
             overlayView.postInvalidate()
             ConfigManager.updateConfig { showCenterDot = on }
         }
+        guiPanel.onRecordEnabledChanged = { on -> toggleRecording(on) }
+        guiPanel.onAutoSaveDatasetChanged = { on -> autoSaveDataset = on }
         guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) { inferRunning.set(false); broadcastState(1) } }
         guiPanel.onTestCircle = {
             mainHandler.post {
@@ -601,7 +642,23 @@ class FloatService : Service() {
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
                 val image = imageReader?.acquireLatestImage()
                 if (image == null) { Thread.yield(); continue }
+                val hwBuf = image.hardwareBuffer
                 try {
+                    // 录屏: 把当前帧转发给 MediaRecorder
+                    if (recordEnabled && recordSurface != null && hwBuf != null) {
+                        try {
+                            val canvas = recordSurface!!.lockHardwareCanvas()
+                            try {
+                                val bmp = Bitmap.wrapHardwareBuffer(hwBuf, null)
+                                if (bmp != null) {
+                                    canvas.drawBitmap(bmp, 0f, 0f, null)
+                                    bmp.recycle()
+                                }
+                            } finally {
+                                recordSurface!!.unlockCanvasAndPost(canvas)
+                            }
+                        } catch (_: Exception) {}
+                    }
                     hasDetects.set(false)
                     val plane = image.planes[0]; val buffer = plane.buffer
                     val regionW = cachedRangePx * 2; val regionH = cachedRangePx * 2
@@ -618,6 +675,10 @@ class FloatService : Service() {
                         hasDetects.set(rectCount > 0)
                         lastDetections = rectBuffer.take(rectCount)
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
+
+                        if (autoSaveDataset && rectCount > 0 && hwBuf != null) {
+                            saveDatasetFrame(hwBuf, result, count)
+                        }
 
                         // 按住激发: 物理手指按在触发区时才能自瞄
                         val holdToAimActive = if (aimHoldEnabled) touchClient?.isFingerInTriggerZone() ?: false else true
@@ -685,7 +746,7 @@ class FloatService : Service() {
 
                     if (result == null) { hasDetects.set(false); lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
-                finally { image.close() }
+                finally { hwBuf?.close(); image.close() }
             }
             inferRunning.set(false)
         }
@@ -958,6 +1019,7 @@ class FloatService : Service() {
     }
 
     override fun onDestroy() {
+        if (mediaRecorder != null) toggleRecording(false)
         inferRunning.set(false); executor.shutdown()
         touchClient?.stopGeteventListener()
         touchClient?.destroyRemote()

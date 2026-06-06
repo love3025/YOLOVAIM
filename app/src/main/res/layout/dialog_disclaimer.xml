@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/disclaimerScrollView"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingTop="24dp"
+    android:paddingBottom="16dp"
+    android:paddingStart="24dp"
+    android:paddingEnd="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="免责声明与使用协议"
+        android:textSize="24sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="最后更新：2026年6月5日"
+        android:textSize="12sp"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:layout_marginTop="4dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="请仔细阅读以下全部条款，并滑动至页面底部后方可同意。使用本软件即表示您已充分理解并接受以下内容。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="16dp"
+        android:lineSpacingExtra="4dp" />
+
+    <!-- 一、软件性质 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="一、软件性质与用途"
+        android:textSize="15sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="本软件（Aimbot Android）是一款基于 AI 目标检测技术的辅助工具，仅供学习、研究和技术交流之用。本软件并非为任何特定游戏设计，也不鼓励或支持在任何在线游戏中使用以获取不正当优势。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="8dp"
+        android:lineSpacingExtra="4dp" />
+
+    <!-- 二、免责条款 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="二、免责声明"
+        android:textSize="15sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="1. 本软件按「现状」提供，不附带任何形式的明示或暗示保证，包括但不限于对适销性、特定用途适用性和不侵权的保证。\n\n2. 开发者不对因使用或无法使用本软件所导致的任何直接、间接、偶然、特殊、惩戒性或后果性损害承担责任，包括但不限于设备损坏、数据丢失、账号封禁、游戏处罚或其他任何损失。\n\n3. 用户因使用本软件而违反任何游戏服务条款、法律法规或第三方权利所产生的一切后果，由用户自行承担，与开发者无关。\n\n4. 开发者不保证本软件的持续可用性、无错误运行或与任何设备/系统的兼容性。\n\n5. 用户使用本软件进行的任何行为，其法律责任由用户本人承担。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="8dp"
+        android:lineSpacingExtra="4dp" />
+
+    <!-- 三、禁止行为 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="三、禁止行为"
+        android:textSize="15sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="1. 禁止对本软件进行二次修改（二改）后重新发布或分发。\n\n2. 禁止以任何形式对本软件或其衍生版本进行商业销售、收费分发或盈利性传播。\n\n3. 禁止将本软件打包、集成到任何付费产品或服务中。\n\n4. 禁止移除或修改本软件中的版权声明、许可证信息。\n\n5. 禁止利用本软件从事任何违反当地法律法规的活动。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="8dp"
+        android:lineSpacingExtra="4dp" />
+
+    <!-- 四、用户责任 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="四、用户责任"
+        android:textSize="15sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="用户应确保在合法、合规的前提下使用本软件，并自行承担使用本软件所带来的一切风险和后果。在下载、安装或使用本软件之前，请确保您所在地区的法律允许使用此类工具，并已充分了解可能面临的风险（包括但不限于游戏账号封禁等）。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="8dp"
+        android:lineSpacingExtra="4dp" />
+
+    <!-- 五、知识产权 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="五、知识产权"
+        android:textSize="15sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="本软件的源代码、文档、图标及其他相关内容的知识产权归开发者所有。本软件基于开源许可证发布，用户在遵守许可证条款的前提下可自由使用、修改和分发，但不得用于商业目的。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="8dp"
+        android:lineSpacingExtra="4dp" />
+
+    <!-- 六、协议修改 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="六、协议修改"
+        android:textSize="15sp"
+        android:textColor="?attr/colorOnSurface"
+        android:textStyle="bold"
+        android:layout_marginTop="20dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="开发者保留随时修改本协议的权利。协议修改后，用户继续使用本软件即视为接受修改后的条款。重大修改将在软件内以弹窗形式通知用户。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorOnSurface"
+        android:layout_marginTop="8dp"
+        android:lineSpacingExtra="4dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="如果您对以上条款有任何疑问或不同意，请勿使用本软件。"
+        android:textSize="14sp"
+        android:textColor="?attr/colorError"
+        android:textStyle="bold"
+        android:layout_marginTop="24dp"
+        android:lineSpacingExtra="4dp" />
+
+</LinearLayout>
+
+</ScrollView>

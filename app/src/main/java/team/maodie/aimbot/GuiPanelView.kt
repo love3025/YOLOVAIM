@@ -52,6 +52,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onShowDetectionBoxChanged: ((Boolean) -> Unit)? = null
     var onShowCenterDotChanged: ((Boolean) -> Unit)? = null
     var onAreaSettingsToggle: (() -> Unit)? = null
+    var onRecordEnabledChanged: ((Boolean) -> Unit)? = null
+    var onAutoSaveDatasetChanged: ((Boolean) -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
@@ -65,6 +67,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
     var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false; var triggerOffsetYRatio = 0f
     var modelRunning = false
+    var recordEnabled = false
+    var autoSaveDataset = false
     private var navScrollView: ScrollView? = null
     private var savedNavScrollY = 0
 
@@ -302,6 +306,22 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onTestCircle?.invoke(); isChecked = false } } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "在屏幕中心画一个圆"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "录屏"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = recordEnabled; setOnCheckedChangeListener { _, c -> recordEnabled = c; onRecordEnabledChanged?.invoke(c) } })
+        })
+        contentContainer.addView(MaterialTextView(context).apply { text = "H265编码，60帧，保存到Pictures/Screenshots"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "自动保存数据集"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = autoSaveDataset; setOnCheckedChangeListener { _, c -> autoSaveDataset = c; onAutoSaveDatasetChanged?.invoke(c) } })
+        })
+        contentContainer.addView(MaterialTextView(context).apply { text = "检测到目标时自动截图+YOLO标注，保存到应用外部存储"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(LinearLayout(context).apply {
