@@ -37,7 +37,14 @@ data class AppConfig(
     var aimMode: Int = 0,
     var bezierDuration: Int = 30,
     var bezierControlOffset: Float = 0.3f,
-    var bezierRandomSpread: Float = 0.1f
+    var bezierRandomSpread: Float = 0.1f,
+    var aimClasses: Set<Int> = emptySet(),  // empty = all classes
+    var priorityClass: Int = -1,            // -1 = no priority
+    var classAimOffsets: Map<Int, Float> = emptyMap(),  // per-class Y offset overrides
+    var boxAimRatio: Float = 0.5f,          // 0=top, 0.5=center, 1=bottom
+    var classBoxAimRatios: Map<Int, Float> = emptyMap(),  // per-class box aim ratio
+    var classTriggerOffsets: Map<Int, Float> = emptyMap(),  // per-class trigger Y offset
+    var triggerClasses: Set<Int> = emptySet()  // empty = all classes
 )
 
 object ConfigManager {
@@ -87,7 +94,14 @@ object ConfigManager {
                         aimMode = obj.optInt("aimMode", 0),
                         bezierDuration = obj.optInt("bezierDuration", 30),
                         bezierControlOffset = obj.optDouble("bezierControlOffset", 0.3).toFloat(),
-                        bezierRandomSpread = obj.optDouble("bezierRandomSpread", 0.1).toFloat()
+                        bezierRandomSpread = obj.optDouble("bezierRandomSpread", 0.1).toFloat(),
+                        aimClasses = parseIntSet(obj.optJSONArray("aimClasses")),
+                        priorityClass = obj.optInt("priorityClass", -1),
+                        classAimOffsets = parseFloatMap(obj.optJSONObject("classAimOffsets")),
+                        boxAimRatio = obj.optDouble("boxAimRatio", 0.5).toFloat(),
+                        classBoxAimRatios = parseFloatMap(obj.optJSONObject("classBoxAimRatios")),
+                        classTriggerOffsets = parseFloatMap(obj.optJSONObject("classTriggerOffsets")),
+                        triggerClasses = parseIntSet(obj.optJSONArray("triggerClasses"))
                     )
                 }
             }
@@ -132,6 +146,13 @@ object ConfigManager {
                     put("bezierDuration", config.bezierDuration)
                     put("bezierControlOffset", config.bezierControlOffset.toDouble())
                     put("bezierRandomSpread", config.bezierRandomSpread.toDouble())
+                    put("aimClasses", serializeIntSet(config.aimClasses))
+                    put("priorityClass", config.priorityClass)
+                    put("classAimOffsets", serializeFloatMap(config.classAimOffsets))
+                    put("boxAimRatio", config.boxAimRatio.toDouble())
+                    put("classBoxAimRatios", serializeFloatMap(config.classBoxAimRatios))
+                    put("classTriggerOffsets", serializeFloatMap(config.classTriggerOffsets))
+                    put("triggerClasses", serializeIntSet(config.triggerClasses))
                 }
                 file.writeText(obj.toString(2))
             }
@@ -157,6 +178,32 @@ object ConfigManager {
             ))
         }
         return list
+    }
+
+    private fun parseIntSet(arr: JSONArray?): Set<Int> {
+        if (arr == null) return emptySet()
+        val set = mutableSetOf<Int>()
+        for (i in 0 until arr.length()) set.add(arr.getInt(i))
+        return set
+    }
+
+    private fun serializeIntSet(set: Set<Int>): JSONArray {
+        val arr = JSONArray()
+        set.forEach { arr.put(it) }
+        return arr
+    }
+
+    private fun parseFloatMap(obj: JSONObject?): Map<Int, Float> {
+        if (obj == null) return emptyMap()
+        val map = mutableMapOf<Int, Float>()
+        obj.keys().forEach { key -> map[key.toInt()] = obj.optDouble(key, 0.0).toFloat() }
+        return map
+    }
+
+    private fun serializeFloatMap(map: Map<Int, Float>): JSONObject {
+        val obj = JSONObject()
+        map.forEach { (k, v) -> obj.put(k.toString(), v.toDouble()) }
+        return obj
     }
 
     private fun serializeAreas(areas: List<AreaConfig>): JSONArray {

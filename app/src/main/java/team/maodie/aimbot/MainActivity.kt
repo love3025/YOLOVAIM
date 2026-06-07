@@ -49,7 +49,8 @@ class MainActivity : AppCompatActivity() {
         val precision: String,
         val inputSize: Int,
         val outputSize: Int,
-        val description: String
+        val description: String,
+        val classes: Map<Int, String> = emptyMap()
     )
 
     private var modelList: List<ModelInfo> = emptyList()
@@ -101,7 +102,7 @@ class MainActivity : AppCompatActivity() {
             ProjectionHolder.resultCode = result.resultCode
             ProjectionHolder.resultData = data
             ProjectionHolder.modelList = modelList.map { m ->
-                ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description)
+                ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description, m.classes)
             }
             ProjectionHolder.selectedModelIndex = selectedModelIndex
             startForegroundService(Intent(this, FloatService::class.java))
@@ -401,7 +402,7 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(MD3_ON_SURFACE_VARIANT)
                 })
                 addView(TextView(context).apply {
-                    text = "1.0.6"
+                    text = "1.0.7"
                     textSize = 14f
                     setTextColor(MD3_ON_SURFACE)
                     typeface = Typeface.DEFAULT_BOLD
@@ -568,6 +569,11 @@ class MainActivity : AppCompatActivity() {
             addView(buildInfoRow("输出数量", model.outputSize.toString()))
             addView(createSpacer(8))
             addView(buildInfoRow("描述", model.description))
+            if (model.classes.isNotEmpty()) {
+                addView(createSpacer(8))
+                val classStr = model.classes.entries.sortedBy { it.key }.joinToString(", ") { "${it.key}:${it.value}" }
+                addView(buildInfoRow("类别", classStr))
+            }
         }
     }
 
@@ -919,13 +925,21 @@ class MainActivity : AppCompatActivity() {
 
             modelList = (0 until modelsArray.length()).map { i ->
                 val model = modelsArray.getJSONObject(i)
+                val classesMap = mutableMapOf<Int, String>()
+                if (model.has("classes")) {
+                    val classesObj = model.getJSONObject("classes")
+                    classesObj.keys().forEach { key ->
+                        classesMap[key.toInt()] = classesObj.getString(key)
+                    }
+                }
                 ModelInfo(
                     filename = model.getString("filename"),
                     displayName = model.getString("displayName"),
                     precision = model.getString("precision"),
                     inputSize = model.getInt("inputSize"),
                     outputSize = model.getInt("outputSize"),
-                    description = model.getString("description")
+                    description = model.getString("description"),
+                    classes = classesMap
                 )
             }
 

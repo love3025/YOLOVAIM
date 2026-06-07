@@ -60,14 +60,24 @@ class FloatService : Service() {
     private val aimbotOn = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val rectBuffer = Array(20) { RectF() }
-    private var lastDetections: List<RectF> = emptyList()
+    private val detectionBuffer = Array(20) { DetectionInfo(RectF(), -1, "") }
+    private var lastDetections: List<DetectionInfo> = emptyList()
     private var centerX = 0f; private var centerY = 0f
     private var cachedRange = 0f; private var cachedRangePx = 0
 
     private var touchClient: TouchInjectorInterface? = null
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
     private var modelRunning = false
+    private var currentClasses: Map<Int, String> = emptyMap()
+
+    // Class filtering for aimbot
+    private var aimClasses: MutableSet<Int> = mutableSetOf()  // empty = all
+    private var priorityClass: Int = -1
+    private var classAimOffsets: Map<Int, Float> = emptyMap()  // per-class Y offset
+    private var boxAimRatio = 0.5f  // 0=top, 0.5=center, 1=bottom
+    private var classBoxAimRatios: Map<Int, Float> = emptyMap()  // per-class box aim ratio
+    private var classTriggerOffsets: Map<Int, Float> = emptyMap()  // per-class trigger Y offset
+    private var triggerClasses: MutableSet<Int> = mutableSetOf()  // empty = all
 
     // PID auto-aim state
     private var aimOffsetYRatio = 0f; private var aimSwayAmplitude = 0; private var aimPrediction = 0; private var triggerOffsetYRatio = 0f
@@ -145,6 +155,13 @@ class FloatService : Service() {
         touchDisplayEnabled = cfg.aimTouchDisplay
         cachedRangePx = cfg.range.coerceIn(50, 800)
         aimbotOn.set(cfg.aimbotEnabled)
+        aimClasses = cfg.aimClasses.toMutableSet()
+        priorityClass = cfg.priorityClass
+        classAimOffsets = cfg.classAimOffsets
+        boxAimRatio = cfg.boxAimRatio
+        classBoxAimRatios = cfg.classBoxAimRatios
+        classTriggerOffsets = cfg.classTriggerOffsets
+        triggerClasses = cfg.triggerClasses.toMutableSet()
         savedAreas.clear()
         savedAreas.addAll(cfg.areas)
         JniCallBack.setConfidence(cfg.confidence)
@@ -173,6 +190,12 @@ class FloatService : Service() {
             } catch (e: Exception) { Log.e(TAG, "projection创建失败: ${e.message}") }
         }
         setupBall(); setupOverlay(); initTouchInjector()
+        // Load classes map for current model
+        val entry = ProjectionHolder.modelList.getOrNull(ProjectionHolder.selectedModelIndex)
+        currentClasses = entry?.classes ?: emptyMap()
+        if (aimClasses.isEmpty() && currentClasses.isNotEmpty()) aimClasses = currentClasses.keys.toMutableSet()
+        if (triggerClasses.isEmpty() && currentClasses.isNotEmpty()) triggerClasses = currentClasses.keys.toMutableSet()
+        Log.d(TAG, "启动模型类别: $currentClasses, aimClasses=$aimClasses, triggerClasses=$triggerClasses")
         ProjectionHolder.updateState(1, JniCallBack.getBackend())
         return START_NOT_STICKY
     }
@@ -406,6 +429,20 @@ class FloatService : Service() {
             if (JniCallBack.init(modelFile.absolutePath)) {
                 Log.d(TAG, "模型切换成功: $filename")
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()
+                // Load classes map from ProjectionHolder
+                val entry = ProjectionHolder.modelList.find { it.filename == filename }
+                currentClasses = entry?.classes ?: emptyMap()
+                // 模型切换时更新类别选择：保留仍存在的类别，新增的自动选中
+                if (currentClasses.isNotEmpty()) {
+                    val validIds = currentClasses.keys
+                    aimClasses = aimClasses.filter { it in validIds }.toMutableSet()
+                    if (aimClasses.isEmpty()) aimClasses = validIds.toMutableSet()
+                    triggerClasses = triggerClasses.filter { it in validIds }.toMutableSet()
+                    if (triggerClasses.isEmpty()) triggerClasses = validIds.toMutableSet()
+                }
+                Log.d(TAG, "模型类别: $currentClasses, aimClasses=$aimClasses, triggerClasses=$triggerClasses")
+                // Update GUI class list
+                if (guiAdded) { guiPanel.classMap = currentClasses; guiPanel.aimClasses = aimClasses.toMutableSet(); guiPanel.triggerClasses = triggerClasses.toMutableSet(); guiPanel.buildUI() }
                 broadcastState(ProjectionHolder.currentState)
             } else { Log.e(TAG, "模型切换失败: $filename") }
         } catch (e: Exception) { Log.e(TAG, "模型切换异常: ${e.message}") }
@@ -415,15 +452,26 @@ class FloatService : Service() {
     private fun toggleGui() { if (guiVisible) hideGui() else showGui() }
 
     private fun showGui() {
-        if (guiAdded && guiVisible) {
+        if (guiAdded) {
+            // 复用已有面板，只更新状态并刷新UI
+            guiPanel.aimbotEnabled = aimbotOn.get()
+            guiPanel.modelRunning = modelRunning
+            guiPanel.recordEnabled = recordEnabled
+            guiPanel.autoSaveDataset = autoSaveDataset
+            guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
+            guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
+            guiPanel.classMap = currentClasses
+            guiPanel.aimClasses = aimClasses.toMutableSet()
+            guiPanel.priorityClass = priorityClass
+            guiPanel.classAimOffsets = classAimOffsets.toMutableMap()
+            guiPanel.boxAimRatio = boxAimRatio
+            guiPanel.classBoxAimRatios = classBoxAimRatios.toMutableMap()
+            guiPanel.classTriggerOffsets = classTriggerOffsets.toMutableMap()
+            guiPanel.triggerClasses = triggerClasses.toMutableSet()
+            guiPanel.buildUI()
             guiPanel.visibility = View.VISIBLE; guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
             guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start(); guiVisible = true; return
         }
-        // Save state from old panel before destroying
-        val savedTab = if (guiAdded) guiPanel.activeTab else 0
-        val savedTouchSize = if (guiAdded) guiPanel.aimTouchSize else 20
-        if (guiAdded) { try { wm.removeView(guiPanel) } catch (_: Exception) {} }
-        guiAdded = false
         guiPanel = GuiPanelView(this)
         ProjectionHolder.guiPanelView = guiPanel
         val cfg = ConfigManager.getConfig()
@@ -450,20 +498,28 @@ class FloatService : Service() {
         guiPanel.bezierControlOffset = cfg.bezierControlOffset
         guiPanel.bezierRandomSpread = cfg.bezierRandomSpread
         guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
-        guiPanel.aimTouchSize = savedTouchSize
+        guiPanel.aimTouchSize = 20
         guiPanel.modelRunning = modelRunning
         guiPanel.recordEnabled = recordEnabled
         guiPanel.autoSaveDataset = autoSaveDataset
         guiPanel.showCaptureRange = cfg.showCaptureRange
         guiPanel.showDetectionBox = cfg.showDetectionBox
         guiPanel.showCenterDot = cfg.showCenterDot
-        guiPanel.activeTab = savedTab
+        guiPanel.activeTab = 0
         guiPanel.modelNames = ProjectionHolder.modelList.map { it.displayName }
         guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
         guiPanel.onModelSelected = { idx ->
             val e = ProjectionHolder.modelList.getOrNull(idx)
             if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
         }
+        guiPanel.classMap = currentClasses
+        guiPanel.aimClasses = aimClasses.toMutableSet()
+        guiPanel.priorityClass = priorityClass
+        guiPanel.classAimOffsets = classAimOffsets.toMutableMap()
+        guiPanel.boxAimRatio = boxAimRatio
+        guiPanel.classBoxAimRatios = classBoxAimRatios.toMutableMap()
+        guiPanel.classTriggerOffsets = classTriggerOffsets.toMutableMap()
+        guiPanel.triggerClasses = triggerClasses.toMutableSet()
         guiPanel.buildUI()
         val panelH = (screenHeight * 0.68f).toInt()
         guiParams = makeParams((280 * resources.displayMetrics.density).toInt(), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
@@ -535,6 +591,13 @@ class FloatService : Service() {
         }
         guiPanel.onRecordEnabledChanged = { on -> toggleRecording(on) }
         guiPanel.onAutoSaveDatasetChanged = { on -> autoSaveDataset = on }
+        guiPanel.onAimClassesChanged = { classes -> aimClasses = classes.toMutableSet(); ConfigManager.updateConfig { aimClasses = classes } }
+        guiPanel.onPriorityClassChanged = { cls -> priorityClass = cls; ConfigManager.updateConfig { priorityClass = cls } }
+        guiPanel.onClassAimOffsetChanged = { id, value -> classAimOffsets = classAimOffsets.toMutableMap().apply { put(id, value) }; ConfigManager.updateConfig { classAimOffsets = this@FloatService.classAimOffsets } }
+        guiPanel.onBoxAimRatioChanged = { boxAimRatio = it; ConfigManager.updateConfig { boxAimRatio = it } }
+        guiPanel.onClassBoxAimRatioChanged = { id, value -> classBoxAimRatios = classBoxAimRatios.toMutableMap().apply { put(id, value) }; ConfigManager.updateConfig { classBoxAimRatios = this@FloatService.classBoxAimRatios } }
+        guiPanel.onClassTriggerOffsetChanged = { id, value -> classTriggerOffsets = classTriggerOffsets.toMutableMap().apply { put(id, value) }; ConfigManager.updateConfig { classTriggerOffsets = this@FloatService.classTriggerOffsets } }
+        guiPanel.onTriggerClassesChanged = { classes -> triggerClasses = classes.toMutableSet(); ConfigManager.updateConfig { triggerClasses = classes } }
         guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) { inferRunning.set(false); broadcastState(1) } }
         guiPanel.onTestCircle = {
             mainHandler.post {
@@ -667,35 +730,50 @@ class FloatService : Service() {
                     val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
 
                     if (result != null) {
-                        val count = result.size / 6; var rectCount = 0; var i = 0
-                        while (i < count && rectCount < rectBuffer.size) {
-                            rectBuffer[rectCount].set(result[i*6+2]*captureW, result[i*6+3]*captureH, result[i*6+4]*captureW, result[i*6+5]*captureH)
-                            rectCount++; i++
+                        val count = result.size / 6
+                        if (count > 0) {
+                            val cid = result[0].toInt()
+                            val sc = result[1]
+                            val className = currentClasses[cid] ?: "unknown"
+                            Log.d(TAG, "detect: count=$count, classId=$cid ($className) score=${"%.3f".format(sc)}")
                         }
-                        hasDetects.set(rectCount > 0)
-                        lastDetections = rectBuffer.take(rectCount)
+                        var detCount = 0; var i = 0
+                        while (i < count && detCount < detectionBuffer.size) {
+                            val cid = result[i * 6].toInt()
+                            val rect = RectF(result[i*6+2]*captureW, result[i*6+3]*captureH, result[i*6+4]*captureW, result[i*6+5]*captureH)
+                            detectionBuffer[detCount] = DetectionInfo(rect, cid, currentClasses[cid] ?: "cls$cid")
+                            detCount++; i++
+                        }
+                        lastDetections = detectionBuffer.take(detCount)
+                        hasDetects.set(detCount > 0)
                         mainHandler.post { overlayView.updateDetections(lastDetections) }
 
-                        if (autoSaveDataset && rectCount > 0 && hwBuf != null) {
+                        if (autoSaveDataset && detCount > 0 && hwBuf != null) {
                             saveDatasetFrame(hwBuf, result, count)
                         }
 
                         // 按住激发: 物理手指按在触发区时才能自瞄
                         val holdToAimActive = if (aimHoldEnabled) touchClient?.isFingerInTriggerZone() ?: false else true
 
-                        if (aimbotOn.get() && rectCount > 0 && holdToAimActive) {
-                            val target = selectTarget(rectBuffer, rectCount, centerX, centerY)
+                        // Filter detections by aimClasses
+                        val aimDets = if (aimClasses.isEmpty()) lastDetections
+                            else lastDetections.filter { it.classId in aimClasses }
+
+                        if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
+                            val target = selectTarget(aimDets, centerX, centerY)
                             if (target != null) {
-                                val tcx = target.centerX(); val tcy = target.centerY()
+                                val tcx = target.rect.centerX(); val tcy = target.rect.centerY()
                                 var boxH = 0f; var minD = Float.MAX_VALUE
-                                for (j in 0 until rectCount) {
-                                    val r = rectBuffer[j]
+                                for (det in aimDets) {
+                                    val r = det.rect
                                     val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
                                     if (d < minD) { minD = d; boxH = r.height() }
                                 }
                                 aimingState.updateVelocity(tcx, tcy)
+                                val classOffset = classAimOffsets[target.classId] ?: aimOffsetYRatio
+                                val classBoxRatio = classBoxAimRatios[target.classId] ?: boxAimRatio
                                 var aimX = tcx
-                                var aimY = tcy - boxH * aimOffsetYRatio
+                                var aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
                                 if (aimPrediction > 0) {
                                     aimX += aimingState.smoothVelX * aimPrediction
                                     aimY += aimingState.smoothVelY * aimPrediction
@@ -709,13 +787,17 @@ class FloatService : Service() {
                         aimingState.lockedTarget = null
                     }
 
-                    // detection-based trigger: center in any detection box
+                    // detection-based trigger: center in any detection box (filtered by aimClasses)
                     val triggerAvailable = touchClient?.isConnected() == true
-                    if (triggerEnabled && hasDetects.get() && triggerAvailable) {
+                    val triggerDets = if (triggerClasses.isEmpty()) lastDetections
+                        else lastDetections.filter { it.classId in triggerClasses }
+                    if (triggerEnabled && triggerDets.isNotEmpty() && triggerAvailable) {
                         val cx = centerX.toInt(); val cy = centerY.toInt()
                         var onTarget = false
-                        for (r in lastDetections) {
-                            val extendY = r.height() * (-triggerOffsetYRatio)
+                        for (det in triggerDets) {
+                            val r = det.rect
+                            val classOff = classTriggerOffsets[det.classId] ?: triggerOffsetYRatio
+                            val extendY = r.height() * (-classOff)
                             if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom + extendY) { onTarget = true; break }
                         }
                         if (onTarget) {
@@ -771,36 +853,44 @@ class FloatService : Service() {
         }
     }
 
-    // SelectTarget: finds locked target with hysteresis, or picks closest to crosshair
-    private fun selectTarget(rects: Array<RectF>, rectCount: Int, cx: Float, cy: Float): RectF? {
+    // SelectTarget: locked target hysteresis + priority class selection
+    private fun selectTarget(dets: List<DetectionInfo>, cx: Float, cy: Float): DetectionInfo? {
         val lock = aimingState.lockedTarget
         if (lock != null) {
             val lockCx = lock.centerX(); val lockCy = lock.centerY()
-            var minDist = Float.MAX_VALUE; var bx = 0f; var by = 0f
-            for (i in 0 until rectCount) {
-                val r = rects[i]
+            var minDist = Float.MAX_VALUE; var bestDet: DetectionInfo? = null
+            for (det in dets) {
+                val r = det.rect
                 val bcx = (r.left + r.right) * 0.5f
                 val bcy = (r.top + r.bottom) * 0.5f
                 val d = (bcx - lockCx) * (bcx - lockCx) + (bcy - lockCy) * (bcy - lockCy)
-                if (d < minDist) { minDist = d; bx = bcx; by = bcy }
+                if (d < minDist) { minDist = d; bestDet = det }
             }
-            if (minDist < 22500f) {
-                lock.set(bx, by, bx, by)
-                return lock
+            if (minDist < 22500f && bestDet != null) {
+                lock.set(bestDet.rect.centerX(), bestDet.rect.centerY(), bestDet.rect.centerX(), bestDet.rect.centerY())
+                return bestDet
             }
             aimingState.lockedTarget = null
         }
+        // Priority: if priorityClass is set and present, only consider that class
+        val candidates = if (priorityClass >= 0) {
+            val prioritized = dets.filter { it.classId == priorityClass }
+            if (prioritized.isNotEmpty()) prioritized else dets
+        } else dets
         // Pick closest to crosshair
-        var bestDistSq = Float.MAX_VALUE; var bestX = cx; var bestY = cy
-        for (i in 0 until rectCount) {
-            val r = rects[i]
+        var bestDistSq = Float.MAX_VALUE; var bestDet: DetectionInfo? = null
+        for (det in candidates) {
+            val r = det.rect
             val bcx = (r.left + r.right) * 0.5f
             val bcy = (r.top + r.bottom) * 0.5f
             val d = (bcx - cx) * (bcx - cx) + (bcy - cy) * (bcy - cy)
-            if (d < bestDistSq) { bestDistSq = d; bestX = bcx; bestY = bcy }
+            if (d < bestDistSq) { bestDistSq = d; bestDet = det }
         }
-        aimingState.lockedTarget = android.graphics.RectF(bestX, bestY, bestX, bestY)
-        return aimingState.lockedTarget
+        if (bestDet != null) {
+            val bcx = bestDet.rect.centerX(); val bcy = bestDet.rect.centerY()
+            aimingState.lockedTarget = RectF(bcx, bcy, bcx, bcy)
+        }
+        return bestDet
     }
 
     // ExecuteAiming: PID or Bezier controller that drags virtual finger to target

@@ -36,7 +36,9 @@ static TfLiteDelegate* g_delegate = nullptr;
 static std::string g_backend_type = "QNN HTP";
 static int g_input_height = 256;
 static int g_input_width = 256;
+static bool g_input_nhwc = false;  // false=NCHW [1,3,H,W], true=NHWC [1,H,W,3]
 static int g_num_outputs = 1344;
+static int g_num_classes = 1;  // 1 = single-class (score only), >1 = multi-class
 static float g_conf_thresh = 0.25f;
 
 static void deleteDelegate() {
@@ -230,8 +232,28 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
     if (input_count > 0) {
         const TfLiteTensor* input_tensor = TfLiteInterpreterGetInputTensor(g_interpreter, 0);
         if (input_tensor) {
-            g_input_height = TfLiteTensorDim(input_tensor, 1);
-            g_input_width = TfLiteTensorDim(input_tensor, 2);
+            int ndim = TfLiteTensorNumDims(input_tensor);
+            int dim1 = TfLiteTensorDim(input_tensor, 1);
+            int dim2 = TfLiteTensorDim(input_tensor, 2);
+            if (ndim >= 4) {
+                int dim3 = TfLiteTensorDim(input_tensor, 3);
+                // NCHW: [1, 3, H, W] → dim1==3, dim3==W
+                // NHWC: [1, H, W, 3] → dim3==3, dim2==W
+                if (dim3 == 3 && dim1 != 3) {
+                    g_input_nhwc = true;
+                    g_input_height = dim1;
+                    g_input_width = dim2;
+                } else {
+                    g_input_nhwc = false;
+                    g_input_height = dim1;
+                    g_input_width = dim2;
+                }
+            } else {
+                g_input_nhwc = false;
+                g_input_height = dim1;
+                g_input_width = dim2;
+            }
+            LOGD("Input format: %s, H=%d, W=%d", g_input_nhwc ? "NHWC" : "NCHW", g_input_height, g_input_width);
         }
     }
 
@@ -241,8 +263,11 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         if (out) {
             int ndim = TfLiteTensorNumDims(out);
             g_num_outputs = TfLiteTensorDim(out, ndim - 1);
-            LOGD("Input: %dx%d, Output dims: %d, num_outputs: %d",
-                 g_input_width, g_input_height, ndim, g_num_outputs);
+            int channels = TfLiteTensorDim(out, 1);  // [1, channels, num_outputs]
+            g_num_classes = channels - 4;  // 4 bbox params (cx, cy, w, h)
+            if (g_num_classes < 1) g_num_classes = 1;
+            LOGD("Input: %dx%d, Output dims: %d, channels: %d, num_outputs: %d, num_classes: %d",
+                 g_input_width, g_input_height, ndim, channels, g_num_outputs, g_num_classes);
         }
     }
 
@@ -289,7 +314,8 @@ static std::vector<Detection> nms(std::vector<Detection>& boxes, float iouThresh
             float interArea = interW * interH;
             float unionArea = (x2a - x1a) * (y2a - y1a) + (x2b - x1b) * (y2b - y1b) - interArea;
 
-            if (unionArea > 0 && interArea / unionArea > iouThreshold) {
+            if (unionArea > 0 && interArea / unionArea > iouThreshold &&
+                boxes[i].classId == boxes[j].classId) {
                 suppressed[j] = 1;
             }
         }
@@ -425,10 +451,25 @@ Java_team_maodie_aimbot_JniCallBack_detect(
 
     float invW = 1.0f / screenWidth;
     float invH = 1.0f / screenHeight;
+    float debugMaxScore = -1e9f;
+    int debugMaxClass = -1;
 
     TfLiteType output_type = TfLiteTensorType(output_tensor);
     void* output_data = const_cast<void*>(TfLiteTensorData(output_tensor));
     TfLiteQuantizationParams qp_output = TfLiteTensorQuantizationParams(output_tensor);
+
+    // Auto-detect bbox format: normalized [0,1] vs pixel coords (0~input_size)
+    // If any bbox coord > 1.5, treat as pixel coords and normalize
+    auto normalizeIfNeeded = [](float cx, float cy, float bw, float bh,
+                                 float& ncx, float& ncy, float& nbw, float& nbh) {
+        if (cx > 1.5f || cy > 1.5f) {
+            float inv = 1.0f / (float)g_input_width;
+            ncx = cx * inv; ncy = cy * inv;
+            nbw = bw * inv; nbh = bh * inv;
+        } else {
+            ncx = cx; ncy = cy; nbw = bw; nbh = bh;
+        }
+    };
 
     if (output_type == kTfLiteInt8) {
         int8_t* data = static_cast<int8_t*>(output_data);
@@ -436,12 +477,32 @@ Java_team_maodie_aimbot_JniCallBack_detect(
         int out_zp = qp_output.zero_point;
 
         for (int i = 0; i < g_num_outputs; ++i) {
-            float cx = (data[i] - out_zp) * out_scale;
-            float cy = (data[g_num_outputs + i] - out_zp) * out_scale;
-            float bw = (data[2 * g_num_outputs + i] - out_zp) * out_scale;
-            float bh = (data[3 * g_num_outputs + i] - out_zp) * out_scale;
-            float score = (data[4 * g_num_outputs + i] - out_zp) * out_scale;
+            float cx_raw = (data[i] - out_zp) * out_scale;
+            float cy_raw = (data[g_num_outputs + i] - out_zp) * out_scale;
+            float bw_raw = (data[2 * g_num_outputs + i] - out_zp) * out_scale;
+            float bh_raw = (data[3 * g_num_outputs + i] - out_zp) * out_scale;
+            float cx, cy, bw, bh;
+            normalizeIfNeeded(cx_raw, cy_raw, bw_raw, bh_raw, cx, cy, bw, bh);
 
+            float score;
+            int classId = 0;
+
+            if (g_num_classes <= 1) {
+                // Single-class: channel 4 = objectness score
+                score = (data[4 * g_num_outputs + i] - out_zp) * out_scale;
+            } else {
+                // Multi-class: channels 4..4+num_classes-1 = class probabilities
+                float maxProb = -1e9f;
+                int maxClass = 0;
+                for (int c = 0; c < g_num_classes; c++) {
+                    float prob = (data[(4 + c) * g_num_outputs + i] - out_zp) * out_scale;
+                    if (prob > maxProb) { maxProb = prob; maxClass = c; }
+                }
+                score = maxProb;
+                classId = maxClass;
+            }
+
+            if (score > debugMaxScore) { debugMaxScore = score; debugMaxClass = classId; }
             if (score < g_conf_thresh) continue;
             if (bw <= 0 || bh <= 0) continue;
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
@@ -453,7 +514,7 @@ Java_team_maodie_aimbot_JniCallBack_detect(
                 (offsetX + (cx + hw) * regionWidth) * invW,
                 (offsetY + (cy + hh) * regionHeight) * invH,
                 score,
-                0.0f
+                (float)classId
             });
         }
     } else {
@@ -461,12 +522,32 @@ Java_team_maodie_aimbot_JniCallBack_detect(
         float* data = static_cast<float*>(output_data);
 
         for (int i = 0; i < g_num_outputs; ++i) {
-            float cx = data[i];
-            float cy = data[g_num_outputs + i];
-            float bw = data[2 * g_num_outputs + i];
-            float bh = data[3 * g_num_outputs + i];
-            float score = data[4 * g_num_outputs + i];
+            float cx_raw = data[i];
+            float cy_raw = data[g_num_outputs + i];
+            float bw_raw = data[2 * g_num_outputs + i];
+            float bh_raw = data[3 * g_num_outputs + i];
+            float cx, cy, bw, bh;
+            normalizeIfNeeded(cx_raw, cy_raw, bw_raw, bh_raw, cx, cy, bw, bh);
 
+            float score;
+            int classId = 0;
+
+            if (g_num_classes <= 1) {
+                // Single-class: channel 4 = objectness score
+                score = data[4 * g_num_outputs + i];
+            } else {
+                // Multi-class: channels 4..4+num_classes-1 = class probabilities
+                float maxProb = -1e9f;
+                int maxClass = 0;
+                for (int c = 0; c < g_num_classes; c++) {
+                    float prob = data[(4 + c) * g_num_outputs + i];
+                    if (prob > maxProb) { maxProb = prob; maxClass = c; }
+                }
+                score = maxProb;
+                classId = maxClass;
+            }
+
+            if (score > debugMaxScore) { debugMaxScore = score; debugMaxClass = classId; }
             if (score < g_conf_thresh) continue;
             if (bw <= 0 || bh <= 0) continue;
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
@@ -478,16 +559,23 @@ Java_team_maodie_aimbot_JniCallBack_detect(
                 (offsetX + (cx + hw) * regionWidth) * invW,
                 (offsetY + (cy + hh) * regionHeight) * invH,
                 score,
-                0.0f
+                (float)classId
             });
         }
     }
 
-    LOGD("Raw detections: %zu", detections.size());
+    LOGD("Raw detections: %zu, num_classes: %d, max_raw_score: %.3f (classId=%d), conf_thresh: %.2f",
+         detections.size(), g_num_classes, debugMaxScore, debugMaxClass, g_conf_thresh);
 
     // Apply NMS
     auto finalDetections = nms(detections, 0.45f);
     LOGD("After NMS: %zu", finalDetections.size());
+    for (size_t k = 0; k < finalDetections.size() && k < 5; ++k) {
+        LOGD("  det[%zu] classId=%.0f score=%.3f box=(%.2f,%.2f,%.2f,%.2f)",
+             k, finalDetections[k].classId, finalDetections[k].score,
+             finalDetections[k].x1, finalDetections[k].y1,
+             finalDetections[k].x2, finalDetections[k].y2);
+    }
 
     if (finalDetections.empty()) {
         return nullptr;

@@ -26,6 +26,45 @@
         android:orientation="vertical"
         android:layout_marginTop="24dp">
 
+        <!-- v1.0.7 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.0.7"
+                android:textSize="16sp"
+                android:textColor="?attr/colorOnSurface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2026-06-07"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:layout_marginTop="2dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="• 新增多款检测模型，覆盖更多游戏场景\n• 自瞄与扳机支持多目标类别选择，可独立控制每类别的开关和参数\n• 录屏功能优化，提升稳定性和兼容性\n• 修复目标类别选择状态不保存的问题\n• 修复若干已知问题，提升整体稳定性"
+                android:textSize="14sp"
+                android:textColor="?attr/colorOnSurface"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="?attr/colorOutlineVariant"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
         <!-- v1.0.6 -->
         <LinearLayout
             android:layout_width="match_parent"

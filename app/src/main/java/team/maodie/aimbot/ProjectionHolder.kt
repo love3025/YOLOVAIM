@@ -17,7 +17,8 @@ object ProjectionHolder {
         val precision: String,
         val inputSize: Int,
         val outputSize: Int,
-        val description: String
+        val description: String,
+        val classes: Map<Int, String> = emptyMap()
     )
 
     var modelList: List<ModelEntry> = emptyList()
