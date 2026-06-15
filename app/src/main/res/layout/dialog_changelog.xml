@@ -26,6 +26,45 @@
         android:orientation="vertical"
         android:layout_marginTop="24dp">
 
+        <!-- v1.0.8 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.0.8"
+                android:textSize="16sp"
+                android:textColor="?attr/colorOnSurface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2026-06-15"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:layout_marginTop="2dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="• 自瞄新增收敛阈值，误差低于阈值时自动抬手，减少无效微调\n• 新增 CPU 推理模式（设置页），支持多线程配置，兼容非骁龙设备\n• 主界面与悬浮窗模型选择双向同步\n• 模型选择持久化，重启后自动恢复上次选择\n• 设置页 UI 完善，选项保存修复\n• 优化系统 tab 布局，区域设置入口调整\n• 修复若干已知问题"
+                android:textSize="14sp"
+                android:textColor="?attr/colorOnSurface"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="?attr/colorOutlineVariant"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
         <!-- v1.0.7 -->
         <LinearLayout
             android:layout_width="match_parent"

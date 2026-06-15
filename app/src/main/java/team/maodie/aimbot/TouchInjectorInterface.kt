@@ -23,6 +23,11 @@ interface TouchInjectorInterface {
 
     fun setTriggerZone(left: Int, top: Int, right: Int, bottom: Int)
     fun isFingerInTriggerZone(): Boolean
+    fun setFireZone(left: Int, top: Int, right: Int, bottom: Int)
+    fun isFingerInFireZone(): Boolean
+    fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int)
+    fun isFingerInJoystickZone(): Boolean
+    fun liftJoystickFinger(): Boolean
 
     fun setInputMethod(method: Int)
     fun initRemote(): Boolean

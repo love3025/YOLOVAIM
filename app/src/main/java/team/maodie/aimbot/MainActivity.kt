@@ -56,6 +56,8 @@ class MainActivity : AppCompatActivity() {
     private var modelList: List<ModelInfo> = emptyList()
     private var selectedModelIndex = 0
     private var modelInfoCardView: LinearLayout? = null
+    private var modelAutoComplete: MaterialAutoCompleteTextView? = null
+    private var modelSection: LinearLayout? = null
     private var aimbotState = AimbotState.STANDBY
 
     private lateinit var statusText: TextView
@@ -144,9 +146,30 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ConfigManager.init(this)
         loadModelsFromJson()
+        val cfgModelIndex = ConfigManager.getConfig().modelIndex
+        if (cfgModelIndex !in 0 until modelList.size) {
+            ConfigManager.updateConfig { modelIndex = 0 }
+        }
+        selectedModelIndex = if (cfgModelIndex in 0 until modelList.size) cfgModelIndex else 0
+        ProjectionHolder.selectedModelIndex = selectedModelIndex
         setContentView(createRootLayout())
         ProjectionHolder.setStateListener(stateListener)
+        ProjectionHolder.setModelIndexListener { idx ->
+            runOnUiThread {
+                if (idx in modelList.indices) {
+                    selectedModelIndex = idx
+                    val model = modelList[idx]
+                    modelAutoComplete?.setText(model.displayName, false)
+                    modelSection?.let { section ->
+                        modelInfoCardView?.let { section.removeView(it) }
+                        modelInfoCardView = buildModelInfoCard(model)
+                        section.addView(modelInfoCardView)
+                    }
+                }
+            }
+        }
         loadStateFromPrefs()
 
         if (!isDisclaimerAccepted()) {
@@ -290,7 +313,7 @@ class MainActivity : AppCompatActivity() {
         content.addView(createSpacer(16))
 
         // 模型卡片
-        content.addView(buildModelCard())
+        buildModelCard().also { modelSection = it; content.addView(it) }
 
         scrollView.addView(content)
         root.addView(scrollView)
@@ -516,8 +539,10 @@ class MainActivity : AppCompatActivity() {
             // 从xml加载 MD3 外露下拉菜单
             val dropdownLayout = layoutInflater.inflate(R.layout.dropdown_layout, null) as TextInputLayout
             val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
+            modelAutoComplete = autoComplete
 
-            autoComplete.setText(displayNames[selectedModelIndex], false)
+            val safeIndex = if (selectedModelIndex in displayNames.indices) selectedModelIndex else 0
+            autoComplete.setText(displayNames[safeIndex], false)
 
             val adapter = ArrayAdapter(
                 this@MainActivity,
@@ -528,11 +553,15 @@ class MainActivity : AppCompatActivity() {
 
             autoComplete.setOnItemClickListener { _, _, position, _ ->
                 selectedModelIndex = position
+                ProjectionHolder.selectedModelIndex = position
+                ConfigManager.updateConfig { modelIndex = position }
                 val model = modelList[position]
                 loadModel(model.filename)
                 modelInfoCardView?.let { removeView(it) }
                 modelInfoCardView = buildModelInfoCard(model)
                 addView(modelInfoCardView!!)
+                // 通知 FloatService 同步模型
+                syncModelToFloatService()
             }
 
             addView(dropdownLayout)
@@ -667,6 +696,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         ProjectionHolder.removeStateListener()
+        ProjectionHolder.removeModelIndexListener()
     }
 
     override fun onStop() {
@@ -681,6 +711,22 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updatePermissionStates()
+        if (ProjectionHolder.needsModelReload) {
+            ProjectionHolder.needsModelReload = false
+            loadDefaultModel()
+        }
+        // 同步悬浮窗的模型选择到 MainActivity UI
+        val holderIndex = ProjectionHolder.selectedModelIndex
+        if (holderIndex != selectedModelIndex && holderIndex in modelList.indices) {
+            selectedModelIndex = holderIndex
+            val model = modelList[holderIndex]
+            modelAutoComplete?.setText(model.displayName, false)
+            modelSection?.let { section ->
+                modelInfoCardView?.let { section.removeView(it) }
+                modelInfoCardView = buildModelInfoCard(model)
+                section.addView(modelInfoCardView)
+            }
+        }
         syncStateFromHolder()
         if (permissionDialog?.isShowing == true) {
             refreshPermissionDialog()
@@ -965,6 +1011,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            val cfg = ConfigManager.getConfig()
+            JniCallBack.setForceCpu(cfg.useCpuInference)
+            JniCallBack.setCpuThreads(cfg.cpuThreadCount)
             val success = JniCallBack.init(modelFile.absolutePath)
             if (success) {
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()
@@ -981,6 +1030,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun syncModelToFloatService() {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val running = am.getRunningServices(100).any {
+            it.service.className == FloatService::class.java.name
+        }
+        if (running) {
+            startForegroundService(Intent(this, FloatService::class.java).apply {
+                action = "SYNC_MODEL"
+            })
+        }
+    }
+
     private fun loadDefaultModel() {
         if (modelList.isEmpty()) return
 
@@ -990,7 +1051,8 @@ class MainActivity : AppCompatActivity() {
                 qnnCache.deleteRecursively()
             }
             qnnCache.mkdirs()
-            val defaultModel = modelList[0]
+            val idx = selectedModelIndex.coerceIn(0, modelList.size - 1)
+            val defaultModel = modelList[idx]
             val modelFile = File(filesDir, defaultModel.filename)
             if (!modelFile.exists()) {
                 assets.open(defaultModel.filename).use { input ->
@@ -999,6 +1061,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            val cfg2 = ConfigManager.getConfig()
+            JniCallBack.setForceCpu(cfg2.useCpuInference)
+            JniCallBack.setCpuThreads(cfg2.cpuThreadCount)
             val ok = JniCallBack.init(modelFile.absolutePath)
             if (ok) {
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()

@@ -31,8 +31,17 @@ object ProjectionHolder {
     var currentState: Int = 0
     var currentModelName: String = "QNN HTP"
 
+    // 设置变更后需要重新加载模型
+    var needsModelReload: Boolean = false
+
+    // 上次通知的模型索引，用于 FloatService 检测 MainActivity 的模型切换
+    var lastNotifiedModelIndex: Int = 0
+
     // 状态变更回调（替代广播，兼容 Android 14+ 广播限制）
     private var stateListener: ((Int, String) -> Unit)? = null
+
+    // 模型索引变更回调（悬浮窗→主页面同步）
+    private var modelIndexListener: ((Int) -> Unit)? = null
 
     fun setStateListener(listener: (Int, String) -> Unit) {
         stateListener = listener
@@ -40,6 +49,19 @@ object ProjectionHolder {
 
     fun removeStateListener() {
         stateListener = null
+    }
+
+    fun setModelIndexListener(listener: (Int) -> Unit) {
+        modelIndexListener = listener
+    }
+
+    fun removeModelIndexListener() {
+        modelIndexListener = null
+    }
+
+    fun notifyModelIndexChanged(index: Int) {
+        selectedModelIndex = index
+        modelIndexListener?.invoke(index)
     }
 
     fun updateState(state: Int, modelName: String) {

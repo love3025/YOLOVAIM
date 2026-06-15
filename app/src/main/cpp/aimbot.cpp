@@ -40,6 +40,8 @@ static bool g_input_nhwc = false;  // false=NCHW [1,3,H,W], true=NHWC [1,H,W,3]
 static int g_num_outputs = 1344;
 static int g_num_classes = 1;  // 1 = single-class (score only), >1 = multi-class
 static float g_conf_thresh = 0.25f;
+static bool g_force_cpu = false;
+static int g_cpu_threads = 4;
 
 static void deleteDelegate() {
     if (g_delegate) {
@@ -176,31 +178,41 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         return JNI_FALSE;
     }
 
-    // Try QNN HTP delegate first
-    g_delegate = buildQnnDelegate();
-    if (g_delegate) {
-        g_backend_type = "QNN HTP";
-        LOGD("Using QNN HTP delegate");
+    // Try QNN HTP delegate first (skip if force CPU)
+    if (g_force_cpu) {
+        g_backend_type = "CPU";
+        g_delegate = nullptr;
+        LOGD("Force CPU mode, skipping hardware delegates");
     } else {
-        // Fallback to NNAPI delegate
-        LOGW("QNN HTP unavailable, falling back to NNAPI delegate");
-        TfLiteNnapiDelegateOptions nnapi_opts = TfLiteNnapiDelegateOptionsDefault();
-        nnapi_opts.disallow_nnapi_cpu = 1;
-        g_delegate = TfLiteNnapiDelegateCreate(&nnapi_opts);
+        g_delegate = buildQnnDelegate();
         if (g_delegate) {
-            g_backend_type = "NNAPI";
-            LOGD("Using NNAPI delegate");
+            g_backend_type = "QNN HTP";
+            LOGD("Using QNN HTP delegate");
         } else {
-            LOGE("Both QNN HTP and NNAPI delegates unavailable.");
-            TfLiteInterpreterOptionsDelete(options);
-            TfLiteModelDelete(g_model);
-            g_model = nullptr;
-            env->ReleaseStringUTFChars(model_path, path);
-            return JNI_FALSE;
+            // Fallback to NNAPI delegate
+            LOGW("QNN HTP unavailable, falling back to NNAPI delegate");
+            TfLiteNnapiDelegateOptions nnapi_opts = TfLiteNnapiDelegateOptionsDefault();
+            nnapi_opts.disallow_nnapi_cpu = 1;
+            g_delegate = TfLiteNnapiDelegateCreate(&nnapi_opts);
+            if (g_delegate) {
+                g_backend_type = "NNAPI";
+                LOGD("Using NNAPI delegate");
+            } else {
+                LOGE("Both QNN HTP and NNAPI delegates unavailable.");
+                TfLiteInterpreterOptionsDelete(options);
+                TfLiteModelDelete(g_model);
+                g_model = nullptr;
+                env->ReleaseStringUTFChars(model_path, path);
+                return JNI_FALSE;
+            }
         }
     }
-    TfLiteInterpreterOptionsAddDelegate(options, g_delegate);
-    TfLiteInterpreterOptionsSetNumThreads(options, 1);
+    if (g_delegate) {
+        TfLiteInterpreterOptionsAddDelegate(options, g_delegate);
+    }
+    int numThreads = g_force_cpu ? g_cpu_threads : 1;
+    TfLiteInterpreterOptionsSetNumThreads(options, numThreads);
+    LOGD("TFLite numThreads=%d (force_cpu=%d)", numThreads, g_force_cpu);
 
     // Create interpreter
     g_interpreter = TfLiteInterpreterCreate(g_model, options);
@@ -613,6 +625,26 @@ JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_JniCallBack_setConfidence(JNIEnv* /*env*/, jobject /*thiz*/, jfloat threshold) {
     g_conf_thresh = threshold;
     LOGD("Confidence threshold set to %.2f", g_conf_thresh);
+}
+
+//==============================================================================
+//  Set force CPU mode
+//==============================================================================
+extern "C"
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_JniCallBack_setForceCpu(JNIEnv* /*env*/, jobject /*thiz*/, jboolean useCpu) {
+    g_force_cpu = useCpu;
+    LOGD("Force CPU mode: %s", useCpu ? "ON" : "OFF");
+}
+
+//==============================================================================
+//  Set CPU thread count
+//==============================================================================
+extern "C"
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_JniCallBack_setCpuThreads(JNIEnv* /*env*/, jobject /*thiz*/, jint threads) {
+    g_cpu_threads = threads;
+    LOGD("CPU threads set to %d", threads);
 }
 
 //==============================================================================

@@ -44,7 +44,13 @@ data class AppConfig(
     var boxAimRatio: Float = 0.5f,          // 0=top, 0.5=center, 1=bottom
     var classBoxAimRatios: Map<Int, Float> = emptyMap(),  // per-class box aim ratio
     var classTriggerOffsets: Map<Int, Float> = emptyMap(),  // per-class trigger Y offset
-    var triggerClasses: Set<Int> = emptySet()  // empty = all classes
+    var triggerClasses: Set<Int> = emptySet(),  // empty = all classes
+    var recoilEnabled: Boolean = false,
+    var recoilStrength: Float = 0.5f,  // 0.0 ~ 1.0
+    var convergeThresh: Int = 10,
+    var autoStopEnabled: Boolean = false,
+    var useCpuInference: Boolean = false,
+    var cpuThreadCount: Int = 4
 )
 
 object ConfigManager {
@@ -101,7 +107,13 @@ object ConfigManager {
                         boxAimRatio = obj.optDouble("boxAimRatio", 0.5).toFloat(),
                         classBoxAimRatios = parseFloatMap(obj.optJSONObject("classBoxAimRatios")),
                         classTriggerOffsets = parseFloatMap(obj.optJSONObject("classTriggerOffsets")),
-                        triggerClasses = parseIntSet(obj.optJSONArray("triggerClasses"))
+                        triggerClasses = parseIntSet(obj.optJSONArray("triggerClasses")),
+                        recoilEnabled = obj.optBoolean("recoilEnabled", false),
+                        recoilStrength = obj.optDouble("recoilStrength", 0.5).toFloat(),
+                        convergeThresh = obj.optInt("convergeThresh", 10),
+                        autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
+                        useCpuInference = obj.optBoolean("useCpuInference", false),
+                        cpuThreadCount = obj.optInt("cpuThreadCount", 4)
                     )
                 }
             }
@@ -153,6 +165,12 @@ object ConfigManager {
                     put("classBoxAimRatios", serializeFloatMap(config.classBoxAimRatios))
                     put("classTriggerOffsets", serializeFloatMap(config.classTriggerOffsets))
                     put("triggerClasses", serializeIntSet(config.triggerClasses))
+                    put("recoilEnabled", config.recoilEnabled)
+                    put("recoilStrength", config.recoilStrength.toDouble())
+                    put("convergeThresh", config.convergeThresh)
+                    put("autoStopEnabled", config.autoStopEnabled)
+                    put("useCpuInference", config.useCpuInference)
+                    put("cpuThreadCount", config.cpuThreadCount)
                 }
                 file.writeText(obj.toString(2))
             }

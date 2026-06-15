@@ -68,6 +68,7 @@ class FloatService : Service() {
     private var touchClient: TouchInjectorInterface? = null
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
     private var modelRunning = false
+    private var lastModelIndex = 0
     private var currentClasses: Map<Int, String> = emptyMap()
 
     // Class filtering for aimbot
@@ -89,6 +90,7 @@ class FloatService : Service() {
     private var aimMode = 0 // 0=PID, 1=Bezier
     private var bezierDuration = 30; private var bezierControlOffset = 0.3f; private var bezierRandomSpread = 0.1f
     private val bezierMover = BezierMover()
+    private var convergeThresh = 10f
 
     // Hold-to-fire (按住激发) state — uses trigger slot, separate from aim slot
 
@@ -106,6 +108,7 @@ class FloatService : Service() {
     private val AREA_INDEX_FIRE = 0
     private val AREA_INDEX_TRIGGER = 1
     private val AREA_INDEX_AIM = 2
+    private val AREA_INDEX_JOYSTICK = 3
 
     // Device resolution for uinput — auto-detected by detect_touch_device() in native code.
     // Hardcoded defaults are NOT used; pass placeholder 0 values.
@@ -116,6 +119,7 @@ class FloatService : Service() {
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
     private var triggerTouchDuration = 10; private var triggerTouchRange = 100
     private var triggerShowArea = false
+    private var autoStopEnabled = false
     private var triggerOverlay: TriggerOverlayView? = null
     private var triggerOverlayAdded = false
     private var triggerAreaX = 0; private var triggerAreaY = 0; private var lastTriggerMs = 0L
@@ -142,6 +146,7 @@ class FloatService : Service() {
         triggerTouchDuration = cfg.triggerTouchDuration
         triggerTouchRange = cfg.triggerTouchRange
         triggerShowArea = cfg.triggerShowArea
+        autoStopEnabled = cfg.autoStopEnabled
         aimHoldEnabled = cfg.aimHoldEnabled
         aimOffsetYRatio = cfg.aimOffsetYRatio
         aimSwayAmplitude = cfg.aimSwayAmplitude
@@ -152,6 +157,7 @@ class FloatService : Service() {
         bezierDuration = cfg.bezierDuration
         bezierControlOffset = cfg.bezierControlOffset
         bezierRandomSpread = cfg.bezierRandomSpread
+        convergeThresh = cfg.convergeThresh.toFloat()
         touchDisplayEnabled = cfg.aimTouchDisplay
         cachedRangePx = cfg.range.coerceIn(50, 800)
         aimbotOn.set(cfg.aimbotEnabled)
@@ -163,12 +169,49 @@ class FloatService : Service() {
         classTriggerOffsets = cfg.classTriggerOffsets
         triggerClasses = cfg.triggerClasses.toMutableSet()
         savedAreas.clear()
-        savedAreas.addAll(cfg.areas)
+        savedAreas.addAll(cfg.areas.filter { it.name != "摇杆范围" })
+        // 确保有3个区域（兼容旧配置）
+        while (savedAreas.size < 3) {
+            savedAreas.add(AreaConfig(name = when (savedAreas.size) {
+                0 -> "开火区"
+                1 -> "触发区"
+                else -> "瞄准区"
+            }, color = when (savedAreas.size) {
+                1 -> android.graphics.Color.parseColor("#FF1976D2")
+                else -> android.graphics.Color.WHITE
+            }))
+        }
         JniCallBack.setConfidence(cfg.confidence)
-        ProjectionHolder.selectedModelIndex = cfg.modelIndex
+        val cfgIdx = cfg.modelIndex
+        if (cfgIdx !in 0 until ProjectionHolder.modelList.size) {
+            ConfigManager.updateConfig { modelIndex = 0 }
+        }
+        ProjectionHolder.selectedModelIndex = if (cfgIdx in 0 until ProjectionHolder.modelList.size) cfgIdx else 0
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "RELOAD_MODEL") {
+            Log.d(TAG, "收到RELOAD_MODEL, useCpuInference=${ConfigManager.getConfig().useCpuInference}")
+            val entry = ProjectionHolder.modelList.getOrNull(ProjectionHolder.selectedModelIndex)
+            if (entry != null) {
+                loadModel(entry.filename)
+                Log.d(TAG, "模型重新加载完成 (CPU推理设置变更), 后端=${JniCallBack.getBackend()}")
+            }
+            return START_STICKY
+        }
+        if (intent?.action == "SYNC_MODEL") {
+            val idx = ProjectionHolder.selectedModelIndex
+            if (idx != lastModelIndex) {
+                val entry = ProjectionHolder.modelList.getOrNull(idx)
+                if (entry != null) {
+                    lastModelIndex = idx
+                    loadModel(entry.filename)
+                    if (guiAdded) { guiPanel.modelIndex = idx; guiPanel.buildUI() }
+                    Log.d(TAG, "同步模型切换: index=$idx, ${entry.displayName}")
+                }
+            }
+            return START_STICKY
+        }
         if (intent?.action == "STOP") {
             if (mediaRecorder != null) toggleRecording(false)
             inferRunning.set(false)
@@ -190,6 +233,7 @@ class FloatService : Service() {
             } catch (e: Exception) { Log.e(TAG, "projection创建失败: ${e.message}") }
         }
         setupBall(); setupOverlay(); initTouchInjector()
+        lastModelIndex = ProjectionHolder.selectedModelIndex
         // Load classes map for current model
         val entry = ProjectionHolder.modelList.getOrNull(ProjectionHolder.selectedModelIndex)
         currentClasses = entry?.classes ?: emptyMap()
@@ -243,6 +287,8 @@ class FloatService : Service() {
                     touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
                     touchClient?.setInputMethod(ProjectionHolder.selectedTouchMethod)
                     updateTriggerZone()
+                    updateFireZone()
+                    updateJoystickZone()
                     Log.d(TAG, "TouchInjector connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
                     try {
                         val initOk = touchClient?.initRemote() ?: false
@@ -319,6 +365,8 @@ class FloatService : Service() {
                 mr.start()
                 mediaRecorder = mr
                 recordEnabled = true
+                // 开录屏时自动启动推理循环
+                if (!inferRunning.get()) startInferLoop()
                 Log.d(TAG, "Recording started: ${outputFile.absolutePath}")
             } catch (e: Exception) {
                 Log.e(TAG, "Recording failed", e)
@@ -334,6 +382,8 @@ class FloatService : Service() {
             } catch (e: Exception) { Log.e(TAG, "Stop failed", e) }
             mediaRecorder = null
             recordSurface = null
+            // 如果模型没在运行，停止推理循环
+            if (!modelRunning) { inferRunning.set(false); broadcastState(1) }
             Log.d(TAG, "Recording stopped")
         }
     }
@@ -426,9 +476,15 @@ class FloatService : Service() {
             if (qnnCache.exists()) qnnCache.deleteRecursively()
             qnnCache.mkdirs()
             if (!modelFile.exists()) { assets.open(filename).use { i -> java.io.FileOutputStream(modelFile).use { o -> i.copyTo(o) } } }
+            val cfg = ConfigManager.getConfig()
+            val useCpu = cfg.useCpuInference
+            Log.d(TAG, "loadModel: useCpuInference=$useCpu, threads=${cfg.cpuThreadCount}")
+            JniCallBack.setForceCpu(useCpu)
+            JniCallBack.setCpuThreads(cfg.cpuThreadCount)
             if (JniCallBack.init(modelFile.absolutePath)) {
-                Log.d(TAG, "模型切换成功: $filename")
-                ProjectionHolder.currentModelName = JniCallBack.getBackend()
+                val backend = JniCallBack.getBackend()
+                Log.d(TAG, "模型切换成功: $filename, 后端=$backend")
+                ProjectionHolder.currentModelName = backend
                 // Load classes map from ProjectionHolder
                 val entry = ProjectionHolder.modelList.find { it.filename == filename }
                 currentClasses = entry?.classes ?: emptyMap()
@@ -487,6 +543,7 @@ class FloatService : Service() {
         guiPanel.triggerTouchDuration = cfg.triggerTouchDuration
         guiPanel.triggerTouchRange = cfg.triggerTouchRange
         guiPanel.triggerShowArea = cfg.triggerShowArea
+        guiPanel.autoStopEnabled = cfg.autoStopEnabled
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
@@ -497,6 +554,7 @@ class FloatService : Service() {
         guiPanel.bezierDuration = cfg.bezierDuration
         guiPanel.bezierControlOffset = cfg.bezierControlOffset
         guiPanel.bezierRandomSpread = cfg.bezierRandomSpread
+        guiPanel.convergeThresh = cfg.convergeThresh
         guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
         guiPanel.aimTouchSize = 20
         guiPanel.modelRunning = modelRunning
@@ -510,7 +568,7 @@ class FloatService : Service() {
         guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
         guiPanel.onModelSelected = { idx ->
             val e = ProjectionHolder.modelList.getOrNull(idx)
-            if (e != null) { ProjectionHolder.selectedModelIndex = idx; loadModel(e.filename) }
+            if (e != null) { ProjectionHolder.notifyModelIndexChanged(idx); lastModelIndex = idx; loadModel(e.filename) }
         }
         guiPanel.classMap = currentClasses
         guiPanel.aimClasses = aimClasses.toMutableSet()
@@ -542,6 +600,7 @@ class FloatService : Service() {
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it; ConfigManager.updateConfig { triggerTouchDuration = it } }
         guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize(); ConfigManager.updateConfig { triggerTouchRange = px } }
         guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility(); ConfigManager.updateConfig { triggerShowArea = show } }
+        guiPanel.onAutoStopEnabledChanged = { autoStopEnabled = it; ConfigManager.updateConfig { autoStopEnabled = it } }
         guiPanel.onAimOffsetYRatioChanged = { aimOffsetYRatio = it; ConfigManager.updateConfig { aimOffsetYRatio = it } }
         guiPanel.onAimSwayAmplitudeChanged = { aimSwayAmplitude = it; ConfigManager.updateConfig { aimSwayAmplitude = it } }
         guiPanel.onAimPredictionChanged = { aimPrediction = it; ConfigManager.updateConfig { aimPrediction = it } }
@@ -552,6 +611,7 @@ class FloatService : Service() {
         guiPanel.onBezierDurationChanged = { bezierDuration = it; ConfigManager.updateConfig { bezierDuration = it } }
         guiPanel.onBezierControlOffsetChanged = { bezierControlOffset = it; ConfigManager.updateConfig { bezierControlOffset = it } }
         guiPanel.onBezierRandomSpreadChanged = { bezierRandomSpread = it; ConfigManager.updateConfig { bezierRandomSpread = it } }
+        guiPanel.onConvergeThreshChanged = { convergeThresh = it.toFloat(); ConfigManager.updateConfig { convergeThresh = it } }
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
@@ -598,7 +658,17 @@ class FloatService : Service() {
         guiPanel.onClassBoxAimRatioChanged = { id, value -> classBoxAimRatios = classBoxAimRatios.toMutableMap().apply { put(id, value) }; ConfigManager.updateConfig { classBoxAimRatios = this@FloatService.classBoxAimRatios } }
         guiPanel.onClassTriggerOffsetChanged = { id, value -> classTriggerOffsets = classTriggerOffsets.toMutableMap().apply { put(id, value) }; ConfigManager.updateConfig { classTriggerOffsets = this@FloatService.classTriggerOffsets } }
         guiPanel.onTriggerClassesChanged = { classes -> triggerClasses = classes.toMutableSet(); ConfigManager.updateConfig { triggerClasses = classes } }
-        guiPanel.onToggleModel = { running -> modelRunning = running; if (running && !inferRunning.get()) startInferLoop() else if (!running) { inferRunning.set(false); broadcastState(1) } }
+        guiPanel.onToggleModel = { running ->
+            modelRunning = running
+            if (running && !inferRunning.get()) startInferLoop()
+            else if (!running) {
+                // 如果录屏还在运行，不要停止推理循环
+                if (!recordEnabled) {
+                    inferRunning.set(false)
+                    broadcastState(1)
+                }
+            }
+        }
         guiPanel.onTestCircle = {
             mainHandler.post {
                 Thread {
@@ -643,6 +713,8 @@ class FloatService : Service() {
                 savedAreas.addAll(areas)
                 ConfigManager.updateConfig { this.areas = areas.toList() }
                 updateTriggerZone()
+                updateFireZone()
+                updateJoystickZone()
                 removeAreaSettingsView()
                 if (!guiVisible) showGui()
             }
@@ -678,6 +750,18 @@ class FloatService : Service() {
         val zone = savedAreas.getOrNull(AREA_INDEX_TRIGGER) ?: return
         touchClient?.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateTriggerZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
+    }
+
+    private fun updateFireZone() {
+        val zone = savedAreas.getOrNull(AREA_INDEX_FIRE) ?: return
+        touchClient?.setFireZone(zone.x, zone.y, zone.right, zone.bottom)
+        Log.d(TAG, "updateFireZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
+    }
+
+    private fun updateJoystickZone() {
+        val zone = savedAreas.getOrNull(AREA_INDEX_JOYSTICK) ?: return
+        touchClient?.setJoystickZone(zone.x, zone.y, zone.right, zone.bottom)
+        Log.d(TAG, "updateJoystickZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
     private fun setupImageReader() {
@@ -769,15 +853,10 @@ class FloatService : Service() {
                                     val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
                                     if (d < minD) { minD = d; boxH = r.height() }
                                 }
-                                aimingState.updateVelocity(tcx, tcy)
                                 val classOffset = classAimOffsets[target.classId] ?: aimOffsetYRatio
                                 val classBoxRatio = classBoxAimRatios[target.classId] ?: boxAimRatio
-                                var aimX = tcx
-                                var aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
-                                if (aimPrediction > 0) {
-                                    aimX += aimingState.smoothVelX * aimPrediction
-                                    aimY += aimingState.smoothVelY * aimPrediction
-                                }
+                                val aimX = tcx
+                                val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
                                 executeAiming(aimX, aimY, centerX, centerY)
                             }
                         }
@@ -789,9 +868,10 @@ class FloatService : Service() {
 
                     // detection-based trigger: center in any detection box (filtered by aimClasses)
                     val triggerAvailable = touchClient?.isConnected() == true
+                    val fingerOnFire = touchClient?.isFingerInFireZone() ?: false
                     val triggerDets = if (triggerClasses.isEmpty()) lastDetections
                         else lastDetections.filter { it.classId in triggerClasses }
-                    if (triggerEnabled && triggerDets.isNotEmpty() && triggerAvailable) {
+                    if (triggerEnabled && triggerDets.isNotEmpty() && triggerAvailable && !fingerOnFire) {
                         val cx = centerX.toInt(); val cy = centerY.toInt()
                         var onTarget = false
                         for (det in triggerDets) {
@@ -807,6 +887,11 @@ class FloatService : Service() {
                                 if (lastTriggerMs == 0L) lastTriggerMs = now
                                 if (now - lastTriggerMs >= triggerReactionSpeed.coerceIn(10, 500)) {
                                     triggerFired = true
+                                    // 自动急停：开枪前松开摇杆区域的手指
+                                    if (autoStopEnabled) {
+                                        val lifted = touchClient?.liftJoystickFinger() ?: false
+                                        Log.d(TAG, "autoStop: liftJoystickFinger=$lifted")
+                                    }
                                     lastTriggerMs = now
                                     fireTriggerTap()
                                 }
@@ -814,6 +899,11 @@ class FloatService : Service() {
                                 // 第二发起：使用冷却时间
                                 val cd = triggerCooldown.coerceIn(10, 1000)
                                 if (now - lastTriggerMs >= cd) {
+                                    // 自动急停：开枪前松开摇杆区域的手指
+                                    if (autoStopEnabled) {
+                                        val lifted = touchClient?.liftJoystickFinger() ?: false
+                                        Log.d(TAG, "autoStop: liftJoystickFinger=$lifted")
+                                    }
                                     lastTriggerMs = now
                                     fireTriggerTap()
                                 }
@@ -905,7 +995,6 @@ class FloatService : Service() {
     private fun executeAimingBezier(targetX: Float, targetY: Float, cx: Float, cy: Float) {
         val errorX = targetX - cx
         val errorY = targetY - cy
-        val convergeThresh = 10f
 
         if (!aimingState.pointerDown) {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
@@ -954,7 +1043,6 @@ class FloatService : Service() {
     private fun executeAimingPid(targetX: Float, targetY: Float, cx: Float, cy: Float) {
         val errorX = targetX - cx
         val errorY = targetY - cy
-        val convergeThresh = 10f
         if (!aimingState.pointerDown) {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
             val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
@@ -990,7 +1078,7 @@ class FloatService : Service() {
             var moveY = errorY * kp + aimingState.integralY * ki + derivY * kd
             if (aimSwayAmplitude > 0) moveY += computeSway()
             aimingState.prevErrorX = errorX; aimingState.prevErrorY = errorY
-            val maxPerFrame = 600f
+            val maxPerFrame = 1200f
             val moveDist = Math.sqrt((moveX * moveX + moveY * moveY).toDouble()).toFloat()
             if (moveDist > maxPerFrame) {
                 moveX = moveX / moveDist * maxPerFrame

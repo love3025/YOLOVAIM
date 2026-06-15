@@ -172,6 +172,29 @@ class RootInjectorClient(private val context: Context) : TouchInjectorInterface 
         return resp == "OK:1"
     }
 
+    override fun setFireZone(left: Int, top: Int, right: Int, bottom: Int) {
+        execOk("SET_FIRE_ZONE $left $top $right $bottom")
+    }
+
+    override fun isFingerInFireZone(): Boolean {
+        val resp = execCmd("IS_FINGER_IN_FIRE_ZONE")
+        return resp == "OK:1"
+    }
+
+    override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {
+        execOk("SET_JOYSTICK_ZONE $left $top $right $bottom")
+    }
+
+    override fun isFingerInJoystickZone(): Boolean {
+        val resp = execCmd("IS_FINGER_IN_JOYSTICK_ZONE")
+        return resp == "OK:1"
+    }
+
+    override fun liftJoystickFinger(): Boolean {
+        val resp = execCmd("LIFT_JOYSTICK_FINGER")
+        return resp == "OK:1"
+    }
+
     override fun setInputMethod(method: Int) {
         // Root always uses uinput, method param ignored
     }
