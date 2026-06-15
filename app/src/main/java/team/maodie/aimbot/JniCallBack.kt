@@ -25,5 +25,9 @@ object JniCallBack {
 
     external fun setConfidence(threshold: Float)
 
+    external fun setForceCpu(useCpu: Boolean)
+
+    external fun setCpuThreads(threads: Int)
+
     external fun release()
 }

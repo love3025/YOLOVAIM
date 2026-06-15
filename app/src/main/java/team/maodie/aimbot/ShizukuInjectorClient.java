@@ -172,6 +172,39 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
         return false;
     }
 
+    public void setFireZone(int left, int top, int right, int bottom) {
+        if (remoteService != null) {
+            try { remoteService.setFireZone(left, top, right, bottom); } catch (Exception e) { Log.e(TAG, "setFireZone: " + e.getMessage()); }
+        }
+    }
+
+    public boolean isFingerInFireZone() {
+        if (remoteService != null) {
+            try { return remoteService.isFingerInFireZone(); } catch (Exception e) { Log.e(TAG, "isFingerInFireZone: " + e.getMessage()); }
+        }
+        return false;
+    }
+
+    public void setJoystickZone(int left, int top, int right, int bottom) {
+        if (remoteService != null) {
+            try { remoteService.setJoystickZone(left, top, right, bottom); } catch (Exception e) { Log.e(TAG, "setJoystickZone: " + e.getMessage()); }
+        }
+    }
+
+    public boolean isFingerInJoystickZone() {
+        if (remoteService != null) {
+            try { return remoteService.isFingerInJoystickZone(); } catch (Exception e) { Log.e(TAG, "isFingerInJoystickZone: " + e.getMessage()); }
+        }
+        return false;
+    }
+
+    public boolean liftJoystickFinger() {
+        if (remoteService != null) {
+            try { return remoteService.liftJoystickFinger(); } catch (Exception e) { Log.e(TAG, "liftJoystickFinger: " + e.getMessage()); }
+        }
+        return false;
+    }
+
     public void setInputMethod(int method) {
         if (remoteService != null) {
             try {

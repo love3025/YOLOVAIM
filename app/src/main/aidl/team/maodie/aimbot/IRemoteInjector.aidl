@@ -23,4 +23,9 @@ interface IRemoteInjector {
     void triggerTap(int x, int y, int durationMs);
     void setTriggerZone(int left, int top, int right, int bottom);
     boolean isFingerInTriggerZone();
+    void setFireZone(int left, int top, int right, int bottom);
+    boolean isFingerInFireZone();
+    void setJoystickZone(int left, int top, int right, int bottom);
+    boolean isFingerInJoystickZone();
+    boolean liftJoystickFinger();
 }

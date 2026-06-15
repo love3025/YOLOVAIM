@@ -359,6 +359,33 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
         return nativeIsFingerInTriggerZone();
     }
 
+    @Override
+    public void setFireZone(int left, int top, int right, int bottom) throws android.os.RemoteException {
+        nativeSetFireZone(left, top, right, bottom);
+        Log.d(TAG, "setFireZone: (" + left + "," + top + ")-(" + right + "," + bottom + ")");
+    }
+
+    @Override
+    public boolean isFingerInFireZone() throws android.os.RemoteException {
+        return nativeIsFingerInFireZone();
+    }
+
+    @Override
+    public void setJoystickZone(int left, int top, int right, int bottom) throws android.os.RemoteException {
+        nativeSetJoystickZone(left, top, right, bottom);
+        Log.d(TAG, "setJoystickZone: (" + left + "," + top + ")-(" + right + "," + bottom + ")");
+    }
+
+    @Override
+    public boolean isFingerInJoystickZone() throws android.os.RemoteException {
+        return nativeIsFingerInJoystickZone();
+    }
+
+    @Override
+    public boolean liftJoystickFinger() throws android.os.RemoteException {
+        return nativeLiftJoystickFinger();
+    }
+
     public void linkToDeath(IBinder token) {
         if (token == null) return;
         try {
@@ -401,6 +428,11 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static native void uinputTriggerUp();
     private static native void nativeSetTriggerZone(int left, int top, int right, int bottom);
     private static native boolean nativeIsFingerInTriggerZone();
+    private static native void nativeSetFireZone(int left, int top, int right, int bottom);
+    private static native boolean nativeIsFingerInFireZone();
+    private static native void nativeSetJoystickZone(int left, int top, int right, int bottom);
+    private static native boolean nativeIsFingerInJoystickZone();
+    private static native boolean nativeLiftJoystickFinger();
     private static native void setDeviceResolution(int devW, int devH);
     private static native void setScreenResolution(int screenW, int screenH);
     private static native void setLandscapeStart(int isLandscape);

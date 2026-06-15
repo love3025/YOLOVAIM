@@ -61,6 +61,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onClassBoxAimRatioChanged: ((Int, Float) -> Unit)? = null
     var onClassTriggerOffsetChanged: ((Int, Float) -> Unit)? = null
     var onTriggerClassesChanged: ((Set<Int>) -> Unit)? = null
+    var onRecoilEnabledChanged: ((Boolean) -> Unit)? = null
+    var onRecoilStrengthChanged: ((Float) -> Unit)? = null
+    var onConvergeThreshChanged: ((Int) -> Unit)? = null
+    var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.3f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
@@ -69,6 +73,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var aimTouchDisplay = false; var aimTouchSize = 20
     var aimMode = 0; var bezierDuration = 30; var bezierControlOffset = 0.3f; var bezierRandomSpread = 0.1f
     var aimHoldEnabled = false
+    var convergeThresh = 10
     var showCaptureRange = false; var showDetectionBox = false; var showCenterDot = false
     var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
@@ -84,6 +89,9 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var classTriggerOffsets: MutableMap<Int, Float> = mutableMapOf()
     var triggerClasses: MutableSet<Int> = mutableSetOf()  // empty = all
     var autoSaveDataset = false
+    var recoilEnabled = false
+    var recoilStrength = 0.5f
+    var autoStopEnabled = false
     private var navScrollView: ScrollView? = null
     private var savedNavScrollY = 0
 
@@ -192,6 +200,19 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4))
+            addView(MaterialTextView(context).apply { text = "压枪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = recoilEnabled; setOnCheckedChangeListener { _, c -> recoilEnabled = c; onRecoilEnabledChanged?.invoke(c) } })
+        })
+        contentContainer.addView(buildSlider("压枪强度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键时持续下压"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(buildSliderInt("收敛阈值", convergeThresh, 0, 100, "px") { convergeThresh = it; onConvergeThreshChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "误差小于此值时抬手"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         // Mode toggle
         contentContainer.addView(MaterialTextView(context).apply { text = "算法模式"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
         contentContainer.addView(spacer(dp(4)))
@@ -217,11 +238,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             // PID controls
             contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
             contentContainer.addView(spacer(dp(4)))
-            contentContainer.addView(buildSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+            contentContainer.addView(buildSlider("Kp", speed, 0.01f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.20f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
+            contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.50f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.30f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
+            contentContainer.addView(buildSlider("Kd", kd, 0.00f, 1.00f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
         } else {
             // Bezier controls
             contentContainer.addView(MaterialTextView(context).apply { text = "贝塞尔参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
@@ -267,8 +288,6 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         }
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSliderInt("摆动幅度", aimSwayAmplitude, 0, 2, "px") { aimSwayAmplitude = it; onAimSwayAmplitudeChanged?.invoke(it) })
-        contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("预测强度", aimPrediction, 0, 10, "") { aimPrediction = it; onAimPredictionChanged?.invoke(it) })
 
         // Class selection
         if (classMap.isNotEmpty()) {
@@ -429,6 +448,14 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "区域设置"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onAreaSettingsToggle?.invoke(); isChecked = false } } })
+        })
+        contentContainer.addView(MaterialTextView(context).apply { text = "配置开火/触发/瞄准区域"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             addView(MaterialTextView(context).apply { text = "录屏"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = recordEnabled; setOnCheckedChangeListener { _, c -> recordEnabled = c; onRecordEnabledChanged?.invoke(c) } })
         })
@@ -441,14 +468,6 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = autoSaveDataset; setOnCheckedChangeListener { _, c -> autoSaveDataset = c; onAutoSaveDatasetChanged?.invoke(c) } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "检测到目标时自动截图+YOLO标注，保存到应用外部存储"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
-        contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            addView(MaterialTextView(context).apply { text = "区域设置"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
-            addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onAreaSettingsToggle?.invoke(); isChecked = false } } })
-        })
-        contentContainer.addView(MaterialTextView(context).apply { text = "配置开火/触发/瞄准区域"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
     }
 
     private fun buildSlider(label: String, value: Float, min: Float, max: Float, fmt: String, onChange: (Float) -> Unit): LinearLayout {

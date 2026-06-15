@@ -99,6 +99,13 @@ static int g_trigger_zone_r = 0;
 static int g_trigger_zone_b = 0;
 static volatile int g_finger_in_zone = 0;
 
+// Fire zone for recoil control finger detection (screen coords)
+static int g_fire_zone_l = 0;
+static int g_fire_zone_t = 0;
+static int g_fire_zone_r = 0;
+static int g_fire_zone_b = 0;
+static volatile int g_finger_in_fire_zone = 0;
+
 static pthread_t reader_thread;
 static volatile int reader_running = 0;
 static int grab_fd = -1;
@@ -456,6 +463,31 @@ static void* direct_reader(void* arg) {
                         }
                     }
                 }
+
+                // Check physical finger in fire zone (for recoil control)
+                if (g_fire_zone_l < g_fire_zone_r && g_fire_zone_t < g_fire_zone_b) {
+                    g_finger_in_fire_zone = 0;
+                    for (int i = 0; i < MAX_SLOTS; i++) {
+                        if (i == g_virtual_slot || i == g_trigger_slot) continue;
+                        if (real_slots[i].active) {
+                            int dev_x = real_slots[i].x;
+                            int dev_y = real_slots[i].y;
+                            int sx, sy;
+                            if (g_landscape_start) {
+                                sx = dev_y * g_screen_w / g_dev_abs_max_y;
+                                sy = g_screen_h - (dev_x * g_screen_h / g_dev_abs_max_x);
+                            } else {
+                                sx = dev_x * g_screen_w / g_dev_abs_max_x;
+                                sy = dev_y * g_screen_h / g_dev_abs_max_y;
+                            }
+                            if (sx >= g_fire_zone_l && sx <= g_fire_zone_r &&
+                                sy >= g_fire_zone_t && sy <= g_fire_zone_b) {
+                                g_finger_in_fire_zone = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
                 pthread_mutex_unlock(&uinput_mutex);
             }
             break;
@@ -688,6 +720,21 @@ static void handle_command(const char* cmd) {
     }
     else if (strcmp(buf, "IS_FINGER_IN_ZONE") == 0) {
         printf("OK:%d\n", g_finger_in_zone ? 1 : 0);
+    }
+    else if (strncmp(buf, "SET_FIRE_ZONE ", 14) == 0) {
+        int l, t, r, b;
+        if (sscanf(buf + 14, "%d %d %d %d", &l, &t, &r, &b) == 4) {
+            g_fire_zone_l = l;
+            g_fire_zone_t = t;
+            g_fire_zone_r = r;
+            g_fire_zone_b = b;
+            puts("OK");
+        } else {
+            puts("ERR:invalid args");
+        }
+    }
+    else if (strcmp(buf, "IS_FINGER_IN_FIRE_ZONE") == 0) {
+        printf("OK:%d\n", g_finger_in_fire_zone ? 1 : 0);
     }
     else if (strcmp(buf, "KEEP_ALIVE") == 0) {
         puts("OK");

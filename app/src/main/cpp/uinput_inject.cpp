@@ -70,6 +70,20 @@ static int g_trigger_zone_r = 0;
 static int g_trigger_zone_b = 0;
 static volatile int g_finger_in_zone = 0;
 
+// Fire zone for recoil control finger detection (screen coords)
+static int g_fire_zone_l = 0;
+static int g_fire_zone_t = 0;
+static int g_fire_zone_r = 0;
+static int g_fire_zone_b = 0;
+static volatile int g_finger_in_fire_zone = 0;
+
+// Joystick zone for auto-stop detection (screen coords)
+static int g_joystick_zone_l = 0;
+static int g_joystick_zone_t = 0;
+static int g_joystick_zone_r = 0;
+static int g_joystick_zone_b = 0;
+static volatile int g_finger_in_joystick_zone = 0;
+
 // Direct fd reader state
 static pthread_t reader_thread;
 static volatile int reader_running = 0;
@@ -496,6 +510,56 @@ static void* direct_reader(void* arg) {
                         }
                     }
                 }
+
+                // Check physical finger in fire zone (for recoil control)
+                if (g_fire_zone_l < g_fire_zone_r && g_fire_zone_t < g_fire_zone_b) {
+                    g_finger_in_fire_zone = 0;
+                    for (int i = 0; i < MAX_SLOTS; i++) {
+                        if (i == g_virtual_slot || i == g_trigger_slot) continue;
+                        if (real_slots[i].active) {
+                            int dev_x = real_slots[i].x;
+                            int dev_y = real_slots[i].y;
+                            int sx, sy;
+                            if (g_landscape_start) {
+                                sx = dev_y * g_screen_w / g_dev_abs_max_y;
+                                sy = g_screen_h - (dev_x * g_screen_h / g_dev_abs_max_x);
+                            } else {
+                                sx = dev_x * g_screen_w / g_dev_abs_max_x;
+                                sy = dev_y * g_screen_h / g_dev_abs_max_y;
+                            }
+                            if (sx >= g_fire_zone_l && sx <= g_fire_zone_r &&
+                                sy >= g_fire_zone_t && sy <= g_fire_zone_b) {
+                                g_finger_in_fire_zone = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Check physical finger in joystick zone
+                if (g_joystick_zone_l < g_joystick_zone_r && g_joystick_zone_t < g_joystick_zone_b) {
+                    g_finger_in_joystick_zone = 0;
+                    for (int i = 0; i < MAX_SLOTS; i++) {
+                        if (i == g_virtual_slot || i == g_trigger_slot) continue;
+                        if (real_slots[i].active) {
+                            int dev_x = real_slots[i].x;
+                            int dev_y = real_slots[i].y;
+                            int sx, sy;
+                            if (g_landscape_start) {
+                                sx = dev_y * g_screen_w / g_dev_abs_max_y;
+                                sy = g_screen_h - (dev_x * g_screen_h / g_dev_abs_max_x);
+                            } else {
+                                sx = dev_x * g_screen_w / g_dev_abs_max_x;
+                                sy = dev_y * g_screen_h / g_dev_abs_max_y;
+                            }
+                            if (sx >= g_joystick_zone_l && sx <= g_joystick_zone_r &&
+                                sy >= g_joystick_zone_t && sy <= g_joystick_zone_b) {
+                                g_finger_in_joystick_zone = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
                 pthread_mutex_unlock(&uinput_mutex);
 
             }
@@ -737,6 +801,84 @@ Java_team_maodie_aimbot_RemoteInjectorService_nativeSetTriggerZone(JNIEnv *env, 
 JNIEXPORT jboolean JNICALL
 Java_team_maodie_aimbot_RemoteInjectorService_nativeIsFingerInTriggerZone(JNIEnv *env, jclass clazz) {
     return g_finger_in_zone ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeSetFireZone(JNIEnv *env, jclass clazz,
+    jint left, jint top, jint right, jint bottom) {
+    g_fire_zone_l = left;
+    g_fire_zone_t = top;
+    g_fire_zone_r = right;
+    g_fire_zone_b = bottom;
+    LOGD("nativeSetFireZone: (%d,%d)-(%d,%d)", left, top, right, bottom);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeIsFingerInFireZone(JNIEnv *env, jclass clazz) {
+    return g_finger_in_fire_zone ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeSetJoystickZone(JNIEnv *env, jclass clazz,
+    jint left, jint top, jint right, jint bottom) {
+    g_joystick_zone_l = left;
+    g_joystick_zone_t = top;
+    g_joystick_zone_r = right;
+    g_joystick_zone_b = bottom;
+    LOGD("nativeSetJoystickZone: (%d,%d)-(%d,%d)", left, top, right, bottom);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeIsFingerInJoystickZone(JNIEnv *env, jclass clazz) {
+    return g_finger_in_joystick_zone ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_team_maodie_aimbot_RemoteInjectorService_nativeLiftJoystickFinger(JNIEnv *env, jclass clazz) {
+    if (uinput_fd < 0) return JNI_FALSE;
+    pthread_mutex_lock(&uinput_mutex);
+
+    int lifted = 0;
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (i == g_virtual_slot || i == g_trigger_slot) continue;
+        if (real_slots[i].active) {
+            int dev_x = real_slots[i].x;
+            int dev_y = real_slots[i].y;
+            int sx, sy;
+            if (g_landscape_start) {
+                sx = dev_y * g_screen_w / g_dev_abs_max_y;
+                sy = g_screen_h - (dev_x * g_screen_h / g_dev_abs_max_x);
+            } else {
+                sx = dev_x * g_screen_w / g_dev_abs_max_x;
+                sy = dev_y * g_screen_h / g_dev_abs_max_y;
+            }
+            if (sx >= g_joystick_zone_l && sx <= g_joystick_zone_r &&
+                sy >= g_joystick_zone_t && sy <= g_joystick_zone_b) {
+                // Lift this finger by setting tracking_id to -1
+                ev(uinput_fd, EV_ABS, ABS_MT_SLOT, i);
+                ev(uinput_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+                real_slots[i].active = 0;
+                uinput_slot_active[i] = 0;
+                lifted = 1;
+                LOGD("liftJoystickFinger: lifted slot %d at (%d,%d)", i, sx, sy);
+            }
+        }
+    }
+
+    if (lifted) {
+        // Check if any physical fingers remain
+        int any_physical = 0;
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            if (real_slots[i].active) { any_physical = 1; break; }
+        }
+        int touch_down = any_physical || virtual_active || trigger_active;
+        ev(uinput_fd, EV_KEY, BTN_TOUCH, touch_down ? 1 : 0);
+        ev(uinput_fd, EV_KEY, BTN_TOOL_FINGER, touch_down ? 1 : 0);
+        sync(uinput_fd);
+    }
+
+    pthread_mutex_unlock(&uinput_mutex);
+    return lifted ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

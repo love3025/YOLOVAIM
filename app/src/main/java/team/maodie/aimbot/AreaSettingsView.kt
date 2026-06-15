@@ -22,6 +22,16 @@ class AreaSettingsView(context: Context) : View(context) {
         add(AreaConfig(name = "瞄准区", color = Color.WHITE))
     }
 
+    private val joystickCenterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = Color.parseColor("#FF4CAF50")
+    }
+    private val joystickCenterBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = Color.WHITE
+    }
+
     private val overlayPaint = Paint().apply { color = Color.parseColor("#AA000000") }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -139,13 +149,25 @@ class AreaSettingsView(context: Context) : View(context) {
                 val newWidth = (initialAreaWidth * ratio).toInt().coerceIn(120, width)
                 val newHeight = (initialAreaHeight * ratio).toInt().coerceIn(120, height)
 
+                // 摇杆范围区域：宽高保持一致（正方形）
+                val finalWidth: Int
+                val finalHeight: Int
+                if (area.name == "摇杆范围") {
+                    val size = newWidth.coerceAtMost(newHeight)
+                    finalWidth = size
+                    finalHeight = size
+                } else {
+                    finalWidth = newWidth
+                    finalHeight = newHeight
+                }
+
                 // 以区域中心为基准缩放，并限制在视图边界内，防止放大后部分区域跑出屏幕
                 val centerX = area.x + area.width / 2
                 val centerY = area.y + area.height / 2
-                area.width = newWidth
-                area.height = newHeight
-                area.x = (centerX - newWidth / 2).coerceIn(0, width - newWidth)
-                area.y = (centerY - newHeight / 2).coerceIn(0, height - newHeight)
+                area.width = finalWidth
+                area.height = finalHeight
+                area.x = (centerX - finalWidth / 2).coerceIn(0, width - finalWidth)
+                area.y = (centerY - finalHeight / 2).coerceIn(0, height - finalHeight)
                 invalidate()
                 return true
             }
@@ -165,17 +187,24 @@ class AreaSettingsView(context: Context) : View(context) {
         super.onSizeChanged(w, h, oldw, oldh)
 
         if (!areasInitialized) {
-            val areaWidth = (w * 0.22f).toInt()
-            val areaHeight = (h * 0.25f).toInt()
-            val totalWidth = areaWidth * 3 + 60 * 2
+            val areaWidth = (w * 0.20f).toInt()
+            val areaHeight = (h * 0.22f).toInt()
+            val spacing = 40
+            val totalWidth = areaWidth * 4 + spacing * 3
             val startX = (w - totalWidth) / 2
             val startY = (h - areaHeight) / 2
 
             areas.forEachIndexed { i, area ->
                 area.width = areaWidth
                 area.height = areaHeight
-                area.x = startX + i * (areaWidth + 60)
+                area.x = startX + i * (areaWidth + spacing)
                 area.y = startY
+                // 摇杆范围区域：宽高保持一致（正方形）
+                if (area.name == "摇杆范围") {
+                    val size = areaWidth.coerceAtMost(areaHeight)
+                    area.width = size
+                    area.height = size
+                }
             }
         }
 
@@ -208,6 +237,15 @@ class AreaSettingsView(context: Context) : View(context) {
         for (area in areas) {
             borderPaint.color = area.color
             canvas.drawRoundRect(area.toRectF(), cornerRadius, cornerRadius, borderPaint)
+
+            // 摇杆范围区域绘制圆形中心点
+            if (area.name == "摇杆范围") {
+                val centerX = area.centerX.toFloat()
+                val centerY = area.centerY.toFloat()
+                val radius = (area.width.coerceAtMost(area.height) * 0.08f).coerceAtLeast(8f)
+                canvas.drawCircle(centerX, centerY, radius, joystickCenterPaint)
+                canvas.drawCircle(centerX, centerY, radius, joystickCenterBorderPaint)
+            }
 
             textPaint.color = area.color
             val textY = area.bottom + textPaint.textSize + 8f
@@ -372,6 +410,28 @@ class AreaSettingsView(context: Context) : View(context) {
     private fun resizeArea(areaIdx: Int, edge: Edge, dx: Int, dy: Int) {
         val area = areas[areaIdx]
         val minSize = 120
+
+        // 摇杆范围区域：宽高保持一致（正方形）
+        if (area.name == "摇杆范围") {
+            val delta = when (edge) {
+                Edge.TOP, Edge.LEFT -> -dx.coerceAtMost(-dy)  // 取较大的缩小量
+                Edge.BOTTOM, Edge.RIGHT -> dx.coerceAtLeast(dy)  // 取较大的增大量
+                Edge.TOP_LEFT -> (-dx).coerceAtLeast(-dy)
+                Edge.TOP_RIGHT -> dx.coerceAtLeast(-dy)
+                Edge.BOTTOM_LEFT -> (-dx).coerceAtLeast(dy)
+                Edge.BOTTOM_RIGHT -> dx.coerceAtLeast(dy)
+                Edge.NONE -> 0
+            }
+
+            val newSize = (area.width + delta).coerceIn(minSize, width.coerceAtMost(height))
+            val centerX = area.x + area.width / 2
+            val centerY = area.y + area.height / 2
+            area.width = newSize
+            area.height = newSize
+            area.x = (centerX - newSize / 2).coerceIn(0, width - newSize)
+            area.y = (centerY - newSize / 2).coerceIn(0, height - newSize)
+            return
+        }
 
         when (edge) {
             Edge.TOP -> {
