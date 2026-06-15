@@ -425,7 +425,7 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(MD3_ON_SURFACE_VARIANT)
                 })
                 addView(TextView(context).apply {
-                    text = "1.0.7"
+                    text = "1.0.8"
                     textSize = 14f
                     setTextColor(MD3_ON_SURFACE)
                     typeface = Typeface.DEFAULT_BOLD
