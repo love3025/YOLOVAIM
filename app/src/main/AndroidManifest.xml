@@ -53,11 +53,19 @@
             android:enabled="true"
             android:exported="false" />
 
+        <!-- Qualcomm QNN HTP DSP -->
         <uses-native-library android:name="libcdsprpc.so" android:required="false" />
         <uses-native-library android:name="libadsprpc.so" android:required="false" />
         <uses-native-library android:name="libvmmem.so" android:required="false" />
         <uses-native-library android:name="vendor.qti.hardware.dsp@1.0.so" android:required="false" />
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <!-- MediaTek Neuron APU (newer Dimensity) -->
+        <uses-native-library android:name="libneuron_runtime.5.so" android:required="false" />
+        <uses-native-library android:name="libneuron_runtime.so" android:required="false" />
+        <uses-native-library android:name="libneuron_platform.so" android:required="false" />
+        <!-- MediaTek Neuron APU (older / NeuroPilot SDK) -->
+        <uses-native-library android:name="libneuronusdk_adapter.mtk.so" android:required="false" />
+        <uses-native-library android:name="libneuronusdk_adapter.mtk.so.5" android:required="false" />
 
     </application>
 
