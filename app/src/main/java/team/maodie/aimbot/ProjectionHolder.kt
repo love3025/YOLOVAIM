@@ -29,7 +29,7 @@ object ProjectionHolder {
 
     // 服务状态（0=待机, 1=运行, 2=推理中）
     var currentState: Int = 0
-    var currentModelName: String = "QNN HTP"
+    var currentModelName: String = ""
 
     // 设置变更后需要重新加载模型
     var needsModelReload: Boolean = false

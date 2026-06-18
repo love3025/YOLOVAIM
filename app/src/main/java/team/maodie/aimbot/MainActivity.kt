@@ -367,7 +367,7 @@ class MainActivity : AppCompatActivity() {
             })
 
             modelBadge = TextView(context).apply {
-                text = "QNN HTP"
+                text = ProjectionHolder.currentModelName.ifEmpty { "---" }
                 setTextColor(MD3_ON_PRIMARY)
                 textSize = 14f
                 typeface = Typeface.DEFAULT_BOLD
@@ -642,7 +642,7 @@ class MainActivity : AppCompatActivity() {
             ProjectionHolder.clearViews(wm)
             // 停止 Service
             stopService(Intent(this, FloatService::class.java))
-            ProjectionHolder.updateState(0, "QNN HTP") // STANDBY
+            ProjectionHolder.updateState(0, ProjectionHolder.currentModelName.ifEmpty { "---" }) // STANDBY
         } else {
             // 启动
             if (!Settings.canDrawOverlays(this)) {
@@ -933,7 +933,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    fun setAimbotState(state: AimbotState, modelName: String = "QNN HTP") {
+    fun setAimbotState(state: AimbotState, modelName: String = ProjectionHolder.currentModelName.ifEmpty { "---" }) {
         aimbotState = state
         if (!::statusText.isInitialized) return
         runOnUiThread {
