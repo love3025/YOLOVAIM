@@ -73,6 +73,7 @@ dependencies {
     implementation(libs.tensorflow.lite) {
         exclude(group = "org.tensorflow", module = "tensorflow-lite-support-api")
     }
+    implementation(libs.tensorflow.lite.gpu)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)

@@ -6,6 +6,7 @@
 #include <android/log.h>
 #include <string>
 #include <vector>
+#include <functional>
 #include <cmath>
 #include <cstring>
 #include <sys/time.h>
@@ -16,7 +17,8 @@
 #include <tensorflow/lite/c/common.h>
 #include <qnn/TFLiteDelegate/QnnTFLiteDelegate.h>
 #include <tensorflow/lite/delegates/nnapi/nnapi_delegate_c_api.h>
-#include <neuron/neuron_delegate.h>  // MediaTek Neuron Delegate (stub)
+// GPU delegate (OpenCL / OpenGL, Qualcomm + MediaTek universal)
+#include <tensorflow/lite/delegates/gpu/delegate.h>
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "TFLite_QNN", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "TFLite_QNN", __VA_ARGS__)
@@ -48,8 +50,8 @@ static void deleteDelegate() {
     if (g_delegate) {
         if (g_backend_type == "QNN HTP") {
             TfLiteQnnDelegateDelete(g_delegate);
-        } else if (g_backend_type == "Neuron") {
-            TfLiteNeuronDelegateDelete(g_delegate);
+        } else if (g_backend_type == "GPU") {
+            TfLiteGpuDelegateV2Delete(g_delegate);
         } else {
             TfLiteNnapiDelegateDelete(g_delegate);
         }
@@ -61,7 +63,6 @@ static void deleteDelegate() {
 //  CPU Architecture Detection
 //==============================================================================
 static bool isQualcommSnapdragon() {
-    // Check /proc/cpuinfo for Qualcomm/Snapdragon string
     FILE* f = fopen("/proc/cpuinfo", "r");
     if (f) {
         char line[512];
@@ -73,7 +74,6 @@ static bool isQualcommSnapdragon() {
         }
         fclose(f);
     }
-    // Also check ro.hardware via getprop (Qualcomm devices set this to "qcom")
     FILE* p = popen("getprop ro.hardware", "r");
     if (p) {
         char line[128];
@@ -86,102 +86,6 @@ static bool isQualcommSnapdragon() {
         pclose(p);
     }
     return false;
-}
-
-//==============================================================================
-//  MediaTek Dimensity Detection
-//==============================================================================
-static bool isMediaTekDimensity() {
-    // Check /proc/cpuinfo for MediaTek string
-    FILE* f = fopen("/proc/cpuinfo", "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof(line), f)) {
-            if (strstr(line, "MT") || strstr(line, "Dimensity") || strstr(line, "MediaTek")) {
-                fclose(f);
-                return true;
-            }
-        }
-        fclose(f);
-    }
-    // Check ro.hardware via getprop
-    FILE* p = popen("getprop ro.hardware", "r");
-    if (p) {
-        char line[128];
-        if (fgets(line, sizeof(line), p)) {
-            if (strstr(line, "mt") || strstr(line, "mediatek")) {
-                pclose(p);
-                return true;
-            }
-        }
-        pclose(p);
-    }
-    // Check ro.soc.manufacturer
-    p = popen("getprop ro.soc.manufacturer", "r");
-    if (p) {
-        char line[128];
-        if (fgets(line, sizeof(line), p)) {
-            if (strstr(line, "MediaTek") || strstr(line, "MTK")) {
-                pclose(p);
-                return true;
-            }
-        }
-        pclose(p);
-    }
-    return false;
-}
-
-//==============================================================================
-//  Build Neuron Delegate (MediaTek APU)
-//==============================================================================
-static TfLiteDelegate* buildNeuronDelegate() {
-    if (!isMediaTekDimensity()) {
-        LOGW("Non-MediaTek CPU detected, skipping Neuron delegate");
-        return nullptr;
-    }
-
-    // Check if Neuron adapter library exists on this device
-    // Newer chips (Dimensity 9000+) use libneuron_runtime.so
-    // Older chips use libneuronusdk_adapter.mtk.so
-    // Try both short name (default linker search) and full vendor path
-    static const char* neuron_libs[] = {
-        "libneuron_runtime.5.so",
-        "libneuron_runtime.so",
-        "libneuronusdk_adapter.mtk.so.5",
-        "libneuronusdk_adapter.mtk.so",
-        "/vendor/lib64/libneuron_runtime.5.so",
-        "/vendor/lib64/libneuron_runtime.so",
-        "/vendor/lib64/libneuronusdk_adapter.mtk.so.5",
-        "/vendor/lib64/libneuronusdk_adapter.mtk.so",
-        nullptr
-    };
-    bool neuron_api_found = false;
-    for (int i = 0; neuron_libs[i]; i++) {
-        void* h = dlopen(neuron_libs[i], RTLD_LAZY | RTLD_LOCAL);
-        if (h) {
-            neuron_api_found = true;
-            LOGD("Neuron adapter found: %s", neuron_libs[i]);
-            dlclose(h);
-            break;
-        }
-    }
-    if (!neuron_api_found) {
-        LOGW("Neuron adapter library not found on this device, skipping");
-        return nullptr;
-    }
-
-    NeuronDelegateOptions options = TfLiteNeuronDelegateOptionsDefault();
-    options.execution_preference = kFastSingleAnswer;
-    options.allow_fp16 = true;
-    options.cache_dir = "/data/data/team.maodie.aimbot/cache/neuron";
-
-    TfLiteDelegate* delegate = TfLiteNeuronDelegateCreate(&options);
-    if (delegate) {
-        LOGD("Neuron delegate created successfully");
-    } else {
-        LOGW("Neuron delegate creation failed");
-    }
-    return delegate;
 }
 
 //==============================================================================
@@ -240,6 +144,28 @@ static TfLiteDelegate* buildQnnDelegate() {
 }
 
 //==============================================================================
+//  Build TFLite GPU Delegate (OpenCL/OpenGL — Qualcomm + MediaTek universal)
+//==============================================================================
+static TfLiteDelegate* buildGpuDelegate() {
+    TfLiteGpuDelegateOptionsV2 gpu_options = TfLiteGpuDelegateOptionsV2Default();
+    // Default already includes: ENABLE_QUANT (INT8 support), FP16 allowed
+    // Set inference preference for single-shot detection (not sustained throughput)
+    gpu_options.inference_preference = TFLITE_GPU_INFERENCE_PREFERENCE_FAST_SINGLE_ANSWER;
+    // Priority: MIN_LATENCY first, then MAX_PRECISION
+    gpu_options.inference_priority1 = TFLITE_GPU_INFERENCE_PRIORITY_MIN_LATENCY;
+    gpu_options.inference_priority2 = TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION;
+    gpu_options.inference_priority3 = TFLITE_GPU_INFERENCE_PRIORITY_AUTO;
+
+    TfLiteDelegate* delegate = TfLiteGpuDelegateV2Create(&gpu_options);
+    if (delegate) {
+        LOGD("GPU delegate created successfully (OpenCL/OpenGL)");
+    } else {
+        LOGW("GPU delegate creation failed");
+    }
+    return delegate;
+}
+
+//==============================================================================
 //  Init
 //==============================================================================
 extern "C"
@@ -277,52 +203,78 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         return JNI_FALSE;
     }
 
-    // Try hardware delegates (skip if force CPU)
-    if (g_force_cpu) {
-        g_backend_type = "CPU";
-        g_delegate = nullptr;
-        LOGD("Force CPU mode, skipping hardware delegates");
-    } else {
-        // 1. Try QNN HTP (Qualcomm Snapdragon)
-        LOGD("Step 1: Trying QNN HTP delegate...");
-        g_delegate = buildQnnDelegate();
-        if (g_delegate) {
-            g_backend_type = "QNN HTP";
-            LOGD("✓ Using QNN HTP delegate (Qualcomm)");
+    // Try hardware delegates with fallback chain:
+    // QNN HTP → GPU → NNAPI → CPU
+    // For each delegate: create delegate → create interpreter → if fails, try next
+    struct DelegateTrial {
+        std::function<TfLiteDelegate*()> builder;
+        std::string name;
+        bool skip;  // true = skip this trial
+    };
+
+    std::vector<DelegateTrial> trials;
+    if (!g_force_cpu) {
+        trials.push_back({[]{ return buildQnnDelegate(); }, "QNN HTP", false});
+        trials.push_back({[]{ return buildGpuDelegate(); }, "GPU", false});
+    }
+
+    bool interpreter_created = false;
+    for (auto& trial : trials) {
+        if (trial.skip) continue;
+
+        LOGD("Trying %s delegate...", trial.name.c_str());
+        TfLiteDelegate* del = trial.builder();
+        if (!del) {
+            LOGD("%s delegate not available, skipping", trial.name.c_str());
+            continue;
+        }
+
+        // Build fresh options for this attempt
+        TfLiteInterpreterOptions* trial_opts = TfLiteInterpreterOptionsCreate();
+        TfLiteInterpreterOptionsAddDelegate(trial_opts, del);
+        TfLiteInterpreterOptionsSetNumThreads(trial_opts, 1);
+
+        TfLiteInterpreter* interp = TfLiteInterpreterCreate(g_model, trial_opts);
+        TfLiteInterpreterOptionsDelete(trial_opts);
+
+        if (interp) {
+            // Success
+            g_delegate = del;
+            g_interpreter = interp;
+            g_backend_type = trial.name;
+            LOGD("✓ Interpreter created with %s delegate", trial.name.c_str());
+            interpreter_created = true;
+            break;
         } else {
-            LOGD("QNN HTP not available, trying Neuron...");
-            // 2. Try Neuron (MediaTek Dimensity)
-            g_delegate = buildNeuronDelegate();
-            if (g_delegate) {
-                g_backend_type = "Neuron";
-                LOGD("✓ Using Neuron delegate (MediaTek APU)");
+            // This delegate failed at interpreter creation, clean up and try next
+            LOGW("%s delegate: interpreter creation failed, trying next...", trial.name.c_str());
+            if (trial.name == "QNN HTP") {
+                TfLiteQnnDelegateDelete(del);
+            } else if (trial.name == "GPU") {
+                TfLiteGpuDelegateV2Delete(del);
             } else {
-                // 3. No delegate, use CPU
-                LOGD("No hardware delegate available, using CPU");
-                g_backend_type = "CPU";
-                g_delegate = nullptr;
+                TfLiteNnapiDelegateDelete(del);
             }
         }
     }
-    LOGD("Backend selected: %s", g_backend_type.c_str());
-    if (g_delegate) {
-        TfLiteInterpreterOptionsAddDelegate(options, g_delegate);
-    }
-    int numThreads = g_force_cpu ? g_cpu_threads : 1;
-    TfLiteInterpreterOptionsSetNumThreads(options, numThreads);
-    LOGD("TFLite numThreads=%d (force_cpu=%d)", numThreads, g_force_cpu);
 
-    // Create interpreter
-    g_interpreter = TfLiteInterpreterCreate(g_model, options);
-    TfLiteInterpreterOptionsDelete(options);
+    if (!interpreter_created) {
+        // All delegates failed, use CPU
+        g_delegate = nullptr;
+        g_backend_type = "CPU";
+        LOGD("All delegates failed, falling back to CPU");
+        TfLiteInterpreterOptions* cpu_opts = TfLiteInterpreterOptionsCreate();
+        TfLiteInterpreterOptionsSetNumThreads(cpu_opts, g_cpu_threads);
+        g_interpreter = TfLiteInterpreterCreate(g_model, cpu_opts);
+        TfLiteInterpreterOptionsDelete(cpu_opts);
 
-    if (!g_interpreter) {
-        LOGE("Failed to create interpreter with %s delegate.", g_backend_type.c_str());
-        deleteDelegate();
-        TfLiteModelDelete(g_model);
-        g_model = nullptr;
-        env->ReleaseStringUTFChars(model_path, path);
-        return JNI_FALSE;
+        if (!g_interpreter) {
+            LOGE("Failed to create interpreter even with CPU");
+            TfLiteModelDelete(g_model);
+            g_model = nullptr;
+            env->ReleaseStringUTFChars(model_path, path);
+            return JNI_FALSE;
+        }
     }
 
     // Allocate tensors
@@ -381,7 +333,7 @@ Java_team_maodie_aimbot_JniCallBack_init(JNIEnv* env, jobject /*thiz*/, jstring 
         }
     }
 
-    LOGD("TFLite + QNN HTP initialized successfully");
+    LOGD("TFLite initialized successfully, backend: %s", g_backend_type.c_str());
 
     env->ReleaseStringUTFChars(model_path, path);
     return JNI_TRUE;
