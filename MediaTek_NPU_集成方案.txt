@@ -1,0 +1,531 @@
+================================================================================
+                MediaTek 天玑 NPU 集成方案
+                LiteRT + Neuron SDK 方案
+================================================================================
+
+一、背景
+================================================================================
+
+当前项目使用 TFLite + QNN HTP Delegate（高通NPU）或 NNAPI（通用）。
+天玑芯片的NPU无法通过QNN调用，需要使用MediaTek的Neuron SDK。
+
+通过逆向分析 Model_2.0.1 APK，找到了调用天玑NPU的完整方案：
+使用 Google LiteRT 框架 + MediaTek LiteRT 插件 → Neuron SDK → 天玑NPU
+
+
+二、调用链路
+================================================================================
+
+Java层:
+    TfLiteInferenceEngine.createMediaTekLiteRtCandidate()
+        ↓
+    LiteRtNativeJni.createSession(modelPath, cacheDir, nativeLibDir)
+        ↓ System.loadLibrary("LiteRt") + System.loadLibrary("litert_bridge")
+
+JNI层:
+    liblitert_bridge.so → nCreateSession()
+        ↓ 调用 LiteRT C API
+
+LiteRT核心:
+    libLiteRt.so
+        ↓ 自动扫描 nativeLibDir，dlopen 插件
+
+MediaTek插件:
+    libLiteRtCompilerPlugin_MediaTek.so
+        ↓ 调用系统库
+
+系统库（天玑设备自带）:
+    libneuronusdk_adapter.so → 驱动天玑NPU硬件
+
+
+三、需要的库文件
+================================================================================
+
+从 APK: G:\ai\逆向\Model_2.0.1\lib\arm64-v8a\ 复制以下文件:
+
+文件名                                  作用
+----------------------------------------  ----------------------------------------
+libLiteRt.so                             LiteRT核心库（Google提供）
+liblitert_bridge.so                      JNI桥接库（连接Java和LiteRT C API）
+libLiteRtCompilerPlugin_MediaTek.so      MediaTek编译插件（调用Neuron SDK）
+libLiteRtDispatch_MediaTek.so            MediaTek调度库
+
+放到项目: app/src/main/jniLibs/arm64-v8a/
+
+
+四、系统依赖（天玑设备自带，无需打包）
+================================================================================
+
+以下库在天玑设备的系统分区中，不需要打包到APK:
+
+路径:
+    /vendor/lib64/libneuronusdk_adapter.9.mtk.so      (v9版本)
+    /system/lib64/libneuronusdk_adapter.9.mtk.so
+    /system_ext/lib64/libneuronusdk_adapter.9.mtk.so
+    /vendor/lib64/libneuronusdk_adapter.mtk.so        (v8版本)
+    /system/lib64/libneuronusdk_adapter.mtk.so
+
+检测逻辑（来自 liblitert_bridge.so 地址 0x9A48）:
+    依次检查以上路径，找到任意一个就表示NPU可用
+    优先使用v9版本，找不到回退v8
+
+
+五、核心API调用流程（C++伪代码）
+================================================================================
+
+```cpp
+#include "litert/c_api.h"
+
+bool initMediaTekNPU(const char* modelPath, const char* cacheDir, const char* nativeLibDir) {
+
+    // ===== 第1步：创建LiteRT环境 =====
+    LiteRtEnvironmentOptions envOpts;
+    LiteRtEnvironment environment;
+    LiteRtEnvironmentOption options[] = {
+        {.type = kLiteRtEnvironmentOptionTypeAccelerator, .value = {.accelerator = 5}}
+    };
+    LiteRtCreateEnvironment(1, options, &environment);
+
+    // ===== 第2步：创建编译选项 =====
+    LiteRtOptions compileOptions;
+    LiteRtCreateOptions(&compileOptions);
+    LiteRtSetOptionsHardwareAccelerators(compileOptions, 5);  // 5 = NPU
+
+    // ===== 第3步：注册DISPATCH_OP自定义算子 =====
+    for (int i = 1; i <= 4; i++) {
+        LiteRtAddCustomOpKernelOption(compileOptions, "DISPATCH_OP", i, "placeholder", 0);
+    }
+
+    // ===== 第4步：构建MediaTek TOML配置 =====
+    // 关键配置项（来自 liblitert_bridge.so 地址 0x9C00）
+    char tomlConfig[1024];
+    snprintf(tomlConfig, sizeof(tomlConfig),
+        "neron_sdk_version = 9\n"
+        "performance_mode = 3\n"            // 最高性能模式
+        "l1_cache_optimizations = true\n"   // L1缓存优化
+        "optimization_hint = 3\n"           // 最大优化
+        "disable_dla_dir_removal = true\n"  // 保留DLA编译缓存
+        "mediatek_dla_dir = \"%s/litert_mtk_dla\"\n",  // DLA缓存目录
+        cacheDir);
+
+    // ===== 第5步：创建MediaTek专用选项 =====
+    LiteRtOpaqueOptions mtkOptions;
+    LiteRtCreateOpaqueOptions("mediatek", tomlConfig, free, &mtkOptions);
+    LiteRtAddOpaqueOptions(compileOptions, mtkOptions);
+
+    // ===== 第6步：加载模型 =====
+    LiteRtModel model;
+    LiteRtStatus status = LiteRtCreateModelFromFile(modelPath, &model);
+    if (status != kLiteRtStatusOk) return false;
+
+    // ===== 第7步：编译模型（这里触发NPU编译） =====
+    LiteRtCompiledModel compiledModel;
+    status = LiteRtCreateCompiledModel(environment, model, compileOptions, &compiledModel);
+    // ↑ 内部调用 libLiteRtCompilerPlugin_MediaTek.so
+    //   → libneuronusdk_adapter.so → 天玑NPU
+
+    // ===== 第8步：获取输入输出信息 =====
+    LiteRtSubgraph subgraph;
+    LiteRtModelSubgraph(model, 0, &subgraph);
+
+    // 获取输入
+    LiteRtTensor inputTensor;
+    LiteRtSubgraphInput(subgraph, 0, &inputTensor);
+    LiteRtTensorBuffer inputBuffer;
+    LiteRtCompiledModelInputBufferRequirements(compiledModel, 0, 0, &inputReqs);
+    LiteRtCreateManagedTensorBufferFromRequirements(environment, ..., &inputBuffer);
+
+    // 获取输出
+    LiteRtTensor outputTensor;
+    LiteRtSubgraphOutput(subgraph, 0, &outputTensor);
+    LiteRtTensorBuffer outputBuffer;
+    LiteRtCompiledModelOutputBufferRequirements(compiledModel, 0, 0, &outputReqs);
+    LiteRtCreateManagedTensorBufferFromRequirements(environment, ..., &outputBuffer);
+
+    return true;
+}
+
+// ===== 运行推理 =====
+void runInference(LiteRtCompiledModel compiledModel,
+                  LiteRtTensorBuffer inputBuffer,
+                  LiteRtTensorBuffer outputBuffer,
+                  uint8_t* imageData, int imageSize) {
+
+    // 写入输入
+    void* inputPtr;
+    LiteRtLockTensorBuffer(inputBuffer, &inputPtr);
+    memcpy(inputPtr, imageData, imageSize);
+    LiteRtUnlockTensorBuffer(inputBuffer);
+
+    // 执行推理
+    LiteRtRunCompiledModel(compiledModel, &inputBuffer, 1, &outputBuffer, 1);
+
+    // 读取输出
+    void* outputPtr;
+    LiteRtLockTensorBuffer(outputBuffer, &outputPtr);
+    float* results = (float*)outputPtr;
+    // ... 处理检测结果
+    LiteRtUnlockTensorBuffer(outputBuffer);
+}
+```
+
+
+六、Java层实现（参考代码）
+================================================================================
+
+6.1 JNI接口类
+----------------
+
+```java
+package team.maodie.aimbot;
+
+public class LiteRtNativeJni {
+    private static Throwable loadError;
+    public static final LiteRtNativeJni INSTANCE = new LiteRtNativeJni();
+    private static boolean isAvailable;
+
+    static {
+        try {
+            System.loadLibrary("LiteRt");
+            System.loadLibrary("litert_bridge");
+            isAvailable = true;
+        } catch (Throwable t) {
+            loadError = t;
+            isAvailable = false;
+        }
+    }
+
+    public boolean isAvailable() { return isAvailable; }
+    public String getErrorMessage() { return loadError != null ? loadError.getMessage() : null; }
+
+    // Native方法
+    private native long nCreateSession(String modelPath, String cacheDir, String nativeLibDir);
+    private native void nDestroySession(long handle);
+    private native float[][] nRun(long handle, java.nio.ByteBuffer inputBuffer);
+    private native int[] nGetInputShape(long handle);
+    private native int[][] nGetOutputShapes(long handle);
+
+    // 公开接口
+    public long createSession(String modelPath, String cacheDir, String nativeLibDir) {
+        if (!isAvailable) throw new UnsatisfiedLinkError("litert_bridge unavailable");
+        long handle = nCreateSession(modelPath, cacheDir, nativeLibDir);
+        if (handle == 0) throw new RuntimeException("LiteRT session create failed");
+        return handle;
+    }
+
+    public void destroySession(long handle) {
+        if (handle != 0 && isAvailable) nDestroySession(handle);
+    }
+
+    public float[][] run(long handle, java.nio.ByteBuffer inputBuffer) {
+        if (!isAvailable) throw new UnsatisfiedLinkError("litert_bridge unavailable");
+        return nRun(handle, inputBuffer);
+    }
+
+    public int[] getInputShape(long handle) { return nGetInputShape(handle); }
+    public int[][] getOutputShapes(long handle) { return nGetOutputShapes(handle); }
+}
+```
+
+6.2 推理引擎类（核心方法）
+--------------------------
+
+```java
+public class MediaTekNpuInference {
+    private long sessionHandle = 0;
+    private int inputWidth, inputHeight;
+    private int[][] outputShapes;
+
+    public boolean init(Context context, String modelAssetName) {
+        try {
+            // 1. 检查可用性
+            if (!LiteRtNativeJni.INSTANCE.isAvailable()) {
+                Log.w("NPU", "LiteRT not available: " + LiteRtNativeJni.INSTANCE.getErrorMessage());
+                return false;
+            }
+
+            // 2. 复制模型到内部存储
+            File modelFile = new File(context.getCacheDir(), modelAssetName);
+            if (!modelFile.exists()) {
+                copyAssetToFile(context, modelAssetName, modelFile);
+            }
+
+            // 3. 准备缓存目录
+            File cacheDir = new File(context.getCodeCacheDir(), "litert_cache");
+            cacheDir.mkdirs();
+
+            // 4. 创建会话
+            String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
+            sessionHandle = LiteRtNativeJni.INSTANCE.createSession(
+                modelFile.getAbsolutePath(),
+                cacheDir.getAbsolutePath(),
+                nativeLibDir
+            );
+
+            // 5. 获取输入输出形状
+            int[] inputShape = LiteRtNativeJni.INSTANCE.getInputShape(sessionHandle);
+            outputShapes = LiteRtNativeJni.INSTANCE.getOutputShapes(sessionHandle);
+
+            inputHeight = inputShape[1];
+            inputWidth = inputShape[2];
+
+            Log.i("NPU", "Init success: input=" + inputWidth + "x" + inputHeight);
+            return true;
+
+        } catch (Exception e) {
+            Log.e("NPU", "Init failed", e);
+            return false;
+        }
+    }
+
+    public float[][] detect(Bitmap bitmap) {
+        if (sessionHandle == 0) return null;
+
+        // 1. 预处理：bitmap → ByteBuffer
+        ByteBuffer inputBuffer = preprocessBitmap(bitmap);
+
+        // 2. 运行推理
+        float[][] results = LiteRtNativeJni.INSTANCE.run(sessionHandle, inputBuffer);
+
+        return results;
+    }
+
+    private ByteBuffer preprocessBitmap(Bitmap bitmap) {
+        // 缩放到模型输入尺寸
+        Bitmap resized = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true);
+
+        ByteBuffer buffer = ByteBuffer.allocateDirect(inputWidth * inputHeight * 3);
+        buffer.order(ByteOrder.nativeOrder());
+
+        int[] pixels = new int[inputWidth * inputHeight];
+        resized.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight);
+
+        for (int pixel : pixels) {
+            buffer.put((byte) ((pixel >> 16) & 0xFF));  // R
+            buffer.put((byte) ((pixel >> 8) & 0xFF));   // G
+            buffer.put((byte) (pixel & 0xFF));           // B
+        }
+
+        buffer.rewind();
+        return buffer;
+    }
+
+    public void release() {
+        if (sessionHandle != 0) {
+            LiteRtNativeJni.INSTANCE.destroySession(sessionHandle);
+            sessionHandle = 0;
+        }
+    }
+}
+```
+
+
+七、与现有代码的集成方案
+================================================================================
+
+7.1 方案A：替换现有推理后端（推荐）
+-------------------------------------
+
+修改 TfliteClassifier.kt，添加 MediaTek NPU 后端:
+
+```kotlin
+class TfliteClassifier {
+    // 现有的 TFLite 推理保持不变（用于高通/通用设备）
+    private var tfliteInterpreter: Interpreter? = null
+
+    // 新增：MediaTek NPU 推理
+    private var mediaTekNpu: MediaTekNpuInference? = null
+    private var usingLiteRt = false
+
+    fun init(context: Context, modelName: String): Boolean {
+        // 检测芯片类型
+        val isMediaTek = Build.HARDWARE.contains("mt", ignoreCase = true) ||
+                         Build.SOC_MANUFACTURER.equals("MediaTek", ignoreCase = true)
+
+        if (isMediaTek && LiteRtNativeJni.INSTANCE.isAvailable()) {
+            // 天玑设备 → 使用 LiteRT NPU
+            mediaTekNpu = MediaTekNpuInference()
+            if (mediaTekNpu!!.init(context, modelName)) {
+                usingLiteRt = true
+                Log.i(TAG, "Using MediaTek NPU via LiteRT")
+                return true
+            }
+        }
+
+        // 其他设备 → 使用原有 TFLite
+        usingLiteRt = false
+        // ... 现有的 TFLite 初始化代码 ...
+        return true
+    }
+
+    fun detect(bitmap: Bitmap): FloatArray {
+        return if (usingLiteRt) {
+            mediaTekNpu!!.detect(bitmap)
+        } else {
+            // 现有的 TFLite 推理
+            runTfliteInference(bitmap)
+        }
+    }
+}
+```
+
+7.2 方案B：在 aimbot.cpp 中集成（JNI层）
+------------------------------------------
+
+在现有的 JniCallBack.cpp 中添加 LiteRT 调用分支。
+
+需要:
+1. 包含 LiteRT C API 头文件
+2. 在 native 层实现推理逻辑
+3. 通过 JNI 返回结果
+
+
+八、模型文件
+================================================================================
+
+8.1 模型格式
+-------------
+
+LiteRT 兼容 TFLite 模型格式，现有的 .tflite 文件可以直接使用:
+    - yolov8n_float_192.tflite
+    - yolov8n_int8_256_calibrated.tflite
+    - yolov8n_int8_192_calibrated.tflite
+
+注意: 不需要加密，直接用原始 tflite 文件。
+
+8.2 模型放置位置
+-----------------
+
+方案1: 放在 assets 目录，运行时复制到内部存储
+方案2: 直接放在内部存储 /sdcard/Android/data/team.maodie.aimbot/files/models/
+
+LiteRT 的 LiteRtCreateModelFromFile 需要文件路径，不能直接读 assets。
+
+
+九、编译配置
+================================================================================
+
+9.1 build.gradle.kts 修改
+--------------------------
+
+```kotlin
+android {
+    defaultConfig {
+        ndk {
+            abiFilters += listOf("arm64-v8a")  // LiteRT只支持arm64
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
+}
+```
+
+9.2 目录结构
+-------------
+
+app/src/main/
+├── jniLibs/
+│   └── arm64-v8a/
+│       ├── libLiteRt.so
+│       ├── liblitert_bridge.so
+│       ├── libLiteRtCompilerPlugin_MediaTek.so
+│       └── libLiteRtDispatch_MediaTek.so
+├── assets/
+│   └── models/
+│       ├── yolov8n_float_192.tflite
+│       └── yolov8n_int8_192_calibrated.tflite
+└── java/
+    └── team/maodie/aimbot/
+        ├── LiteRtNativeJni.java
+        └── MediaTekNpuInference.java
+
+
+十、兼容性处理
+================================================================================
+
+10.1 设备检测
+--------------
+
+```kotlin
+fun isMediaTekDevice(): Boolean {
+    return Build.HARDWARE.lowercase().contains("mt") ||
+           Build.SOC_MANUFACTURER.lowercase().contains("mediatek") ||
+           Build.BOARD.lowercase().contains("mt")
+}
+
+fun isNeuronSdkAvailable(): Boolean {
+    val paths = listOf(
+        "/vendor/lib64/libneuronusdk_adapter.9.mtk.so",
+        "/system/lib64/libneuronusdk_adapter.9.mtk.so",
+        "/system_ext/lib64/libneuronusdk_adapter.9.mtk.so",
+        "/vendor/lib64/libneuronusdk_adapter.mtk.so",
+        "/system/lib64/libneuronusdk_adapter.mtk.so"
+    )
+    return paths.any { File(it).exists() }
+}
+```
+
+10.2 多后端支持策略
+--------------------
+
+优先级:
+    1. 高通设备 → QNN HTP Delegate（现有方案）
+    2. 天玑设备 → LiteRT + MediaTek NPU（新方案）
+    3. 其他设备 → NNAPI Delegate（现有方案）
+    4. 都失败   → CPU 推理（兜底）
+
+
+十一、已知限制
+================================================================================
+
+1. 仅支持 arm64-v8a 架构
+2. 需要天玑设备系统自带 libneuronusdk_adapter.so
+3. 首次编译模型可能需要几秒钟（后续有缓存会快）
+4. INT8 量化模型在NPU上性能最好
+5. 部分自定义算子可能不支持，会回退到CPU
+
+
+十二、参考文件位置
+================================================================================
+
+逆向分析源文件:
+    G:\ai\逆向\Model_2.0.1\
+    ├── java\classes4\sources\com\example\inference\
+    │   ├── TfLiteInferenceEngine.java    ← 完整推理引擎实现
+    │   ├── LiteRtNativeJni.java          ← JNI接口定义
+    │   └── ChipsetDetector.java          ← 芯片检测
+    ├── lib\arm64-v8a\
+    │   ├── libLiteRt.so                  ← LiteRT核心
+    │   ├── liblitert_bridge.so           ← JNI桥接（已用IDA分析）
+    │   ├── libLiteRtCompilerPlugin_MediaTek.so  ← 待分析
+    │   └── libLiteRtDispatch_MediaTek.so ← 待分析
+    └── assets\
+        └── *.tflite.enc                  ← 加密模型（我们不需要）
+
+IDA已分析的关键地址（liblitert_bridge.so）:
+    0x9234  nCreateSession 函数入口
+    0x9A48  检查 libneuronusdk_adapter.so
+    0x9C00  设置 TOML 配置
+    0x9D74  LiteRtCreateOpaqueOptions("mediatek", ...)
+    0x9F18  LiteRtCreateModelFromFile
+    0x9F40  LiteRtCreateCompiledModel
+
+
+十三、下一步工作
+================================================================================
+
+[ ] 1. 从APK复制4个so文件到项目
+[ ] 2. 编写 LiteRtNativeJni.java
+[ ] 3. 编写 MediaTekNpuInference.java
+[ ] 4. 修改 TfliteClassifier 添加多后端支持
+[ ] 5. 在天玑设备上测试
+[ ] 6. (可选) 用IDA分析 libLiteRtCompilerPlugin_MediaTek.so 了解更多细节
+
+
+================================================================================
+                        文档结束
+================================================================================
