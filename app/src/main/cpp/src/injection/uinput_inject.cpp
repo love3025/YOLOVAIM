@@ -40,9 +40,8 @@ JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_service_RemoteInjectorService_setLandscapeStart(
     JNIEnv*, jclass, jint isLandscape)
 {
-    // Landscape flag is managed by touch_core internally via touch_init
-    // This is kept for compatibility; touch_core always uses landscape=true
-    LOGD("setLandscapeStart: %d (managed by touch_core)", isLandscape);
+    touch_set_screen_params(g_screen_w, g_screen_h, isLandscape != 0);
+    LOGD("setLandscapeStart: %d (screen=%dx%d)", isLandscape, g_screen_w, g_screen_h);
 }
 
 // ─── Lifecycle ──────────────────────────────────────────────────────

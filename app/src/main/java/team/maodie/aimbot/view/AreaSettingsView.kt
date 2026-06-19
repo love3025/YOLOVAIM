@@ -21,6 +21,7 @@ class AreaSettingsView(context: Context) : View(context) {
         add(AreaConfig(name = "开火区", color = Color.WHITE))
         add(AreaConfig(name = "触发区", color = Color.parseColor("#FF1976D2")))
         add(AreaConfig(name = "瞄准区", color = Color.WHITE))
+        add(AreaConfig(name = "摇杆范围", color = Color.parseColor("#FF4CAF50")))
     }
 
     private val joystickCenterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -479,8 +480,8 @@ class AreaSettingsView(context: Context) : View(context) {
     private fun performCancel() = close(confirmed = false)
 
     fun setAreas(savedAreas: List<AreaConfig>) {
-        if (savedAreas.size == areas.size) {
-            savedAreas.forEachIndexed { i, config ->
+        savedAreas.forEachIndexed { i, config ->
+            if (i < areas.size) {
                 areas[i].x = config.x
                 areas[i].y = config.y
                 areas[i].width = config.width

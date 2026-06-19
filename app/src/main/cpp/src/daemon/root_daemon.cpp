@@ -74,7 +74,8 @@ static void handle_command(const char* cmd) {
         puts("OK");
     }
     else if (strncmp(buf, "SET_ORIENTATION ", 16) == 0) {
-        // Landscape flag is managed by touch_core internally
+        int landscape = atoi(buf + 16);
+        touch_set_screen_params(g_screen_w, g_screen_h, landscape != 0);
         puts("OK");
     }
     else if (strcmp(buf, "OPEN_UINPUT") == 0) {
