@@ -3,15 +3,15 @@
 //==============================================================================
 #include "qnn_wrapper.h"
 
-QnnEngine::QnnEngine() : m_libHtp(nullptr), m_libSystem(nullptr), m_libBackend(nullptr),
+QnnNativeEngine::QnnEngine() : m_libHtp(nullptr), m_libSystem(nullptr), m_libBackend(nullptr),
                          m_interface(nullptr), m_device(nullptr),
                          m_backend(nullptr), m_context(nullptr) {}
 
-QnnEngine::~QnnEngine() {
+QnnNativeEngine::~QnnEngine() {
     release();
 }
 
-bool QnnEngine::init(const char* model_path) {
+bool QnnNativeEngine::init(const char* model_path) {
     if (!loadLibrary()) return false;
     if (!getProviders()) return false;
 
@@ -42,7 +42,7 @@ bool QnnEngine::init(const char* model_path) {
     return true;
 }
 
-bool QnnEngine::loadLibrary() {
+bool QnnNativeEngine::loadLibrary() {
     // 加载 QNN HTP 库
     m_libHtp = dlopen("libQnnHtp.so", RTLD_NOW);
     if (!m_libHtp) {
@@ -62,7 +62,7 @@ bool QnnEngine::loadLibrary() {
     return true;
 }
 
-bool QnnEngine::getProviders() {
+bool QnnNativeEngine::getProviders() {
     // 直接从 libQnnHtp.so 获取 QnnInterface_getProviders
     QnnInterface_GetProvidersFn_t getProvidersFn =
         (QnnInterface_GetProvidersFn_t)dlsym(m_libHtp, "QnnInterface_getProviders");
@@ -91,15 +91,15 @@ bool QnnEngine::getProviders() {
     return true;
 }
 
-bool QnnEngine::createDevice() {
+bool QnnNativeEngine::createDevice() {
     return true;
 }
 
-bool QnnEngine::createBackend() {
+bool QnnNativeEngine::createBackend() {
     return true;
 }
 
-bool QnnEngine::loadModel(const char* model_path) {
+bool QnnNativeEngine::loadModel(const char* model_path) {
     FILE* f = fopen(model_path, "rb");
     if (!f) {
         LOGD_QNN("打开模型文件失败: %s", model_path);
@@ -141,7 +141,7 @@ bool QnnEngine::loadModel(const char* model_path) {
     return true;
 }
 
-void QnnEngine::release() {
+void QnnNativeEngine::release() {
     auto& v2_34 = m_interface->v2_34;
 
     if (m_context) {
@@ -167,7 +167,7 @@ void QnnEngine::release() {
     LOGD_QNN("QNN 资源已释放");
 }
 
-bool QnnEngine::execute(float* input_data, int input_size, float* output_data, int output_size) {
+bool QnnNativeEngine::execute(float* input_data, int input_size, float* output_data, int output_size) {
     if (!m_initialized) {
         LOGD_QNN("QNN 未初始化");
         return false;

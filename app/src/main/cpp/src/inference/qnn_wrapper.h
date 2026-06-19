@@ -22,7 +22,7 @@
 typedef Qnn_ErrorHandle_t (*QnnInterface_GetProvidersFn_t)(
     const QnnInterface_t*** providerList, uint32_t* numProviders);
 
-class QnnEngine {
+class QnnNativeEngine {
 public:
     QnnEngine();
     ~QnnEngine();
