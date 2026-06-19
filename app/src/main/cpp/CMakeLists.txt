@@ -28,15 +28,20 @@ add_library(tensorflowlite_gpu_jni SHARED IMPORTED)
 set_target_properties(tensorflowlite_gpu_jni PROPERTIES
     IMPORTED_LOCATION ${QNN_LIB_DIR}/libtensorflowlite_gpu_jni.so)
 
-# Compile aimbot.cpp
-add_library(aimbot SHARED aimbot.cpp)
+# Compile aimbot (JNI bridge + inference engines)
+add_library(aimbot SHARED
+    src/inference/aimbot.cpp
+    src/inference/ncnn_engine.cpp
+    src/inference/litert_engine.cpp
+    src/inference/qnn_engine.cpp
+)
 
 # Compile uinput injector
-add_library(uinput_inject SHARED uinput_inject.cpp)
+add_library(uinput_inject SHARED src/injection/uinput_inject.cpp)
 target_link_libraries(uinput_inject android log)
 
 # Root daemon (standalone binary for su execution, packaged as .so for Gradle)
-add_executable(root_daemon root_daemon.cpp)
+add_executable(root_daemon src/daemon/root_daemon.cpp)
 target_link_libraries(root_daemon android log)
 set_target_properties(root_daemon PROPERTIES
     OUTPUT_NAME "libroot_daemon.so"
