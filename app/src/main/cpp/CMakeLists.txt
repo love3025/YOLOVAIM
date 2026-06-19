@@ -36,13 +36,18 @@ add_library(aimbot SHARED
     src/inference/qnn_engine.cpp
 )
 
-# Compile uinput injector
+# Shared touch core library
+add_library(touch_core STATIC src/injection/touch_core.cpp)
+target_link_libraries(touch_core android log)
+
+# Compile uinput injector (JNI wrapper over touch_core)
 add_library(uinput_inject SHARED src/injection/uinput_inject.cpp)
-target_link_libraries(uinput_inject android log)
+target_link_libraries(uinput_inject touch_core android log)
 
 # Root daemon (standalone binary for su execution, packaged as .so for Gradle)
 add_executable(root_daemon src/daemon/root_daemon.cpp)
-target_link_libraries(root_daemon android log)
+target_include_directories(root_daemon PRIVATE src/injection)
+target_link_libraries(root_daemon touch_core android log)
 set_target_properties(root_daemon PROPERTIES
     OUTPUT_NAME "libroot_daemon.so"
 )
