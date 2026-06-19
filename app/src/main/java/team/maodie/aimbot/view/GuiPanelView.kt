@@ -355,6 +355,12 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSliderInt("触摸时间", triggerTouchDuration, 1, 50, "ms") { triggerTouchDuration = it; onTriggerTouchDuration?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(2), 0, dp(2))
+            addView(MaterialTextView(context).apply { text = "自动急停"; textSize = 11f; setTextColor(clOnSurfaceVariant); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = autoStopEnabled; setOnCheckedChangeListener { _, c -> autoStopEnabled = c; onAutoStopEnabledChanged?.invoke(c) } })
+        })
+        contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildSlider("Y偏移", triggerOffsetYRatio, -2f, 0f, "%.0f%%") { triggerOffsetYRatio = it; onTriggerOffsetYRatioChanged?.invoke(it) })
         if (classMap.size > 1) {
             contentContainer.addView(spacer(dp(6)))

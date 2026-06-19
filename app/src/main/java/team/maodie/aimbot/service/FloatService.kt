@@ -268,15 +268,17 @@ class FloatService : Service() {
         classTriggerOffsets = cfg.classTriggerOffsets
         triggerClasses = cfg.triggerClasses.toMutableSet()
         savedAreas.clear()
-        savedAreas.addAll(cfg.areas.filter { it.name != "摇杆范围" })
-        // 确保有3个区域（兼容旧配置）
-        while (savedAreas.size < 3) {
+        savedAreas.addAll(cfg.areas)
+        // 确保有4个区域（兼容旧配置）
+        while (savedAreas.size < 4) {
             savedAreas.add(AreaConfig(name = when (savedAreas.size) {
                 0 -> "开火区"
                 1 -> "触发区"
-                else -> "瞄准区"
+                2 -> "瞄准区"
+                else -> "摇杆范围"
             }, color = when (savedAreas.size) {
                 1 -> android.graphics.Color.parseColor("#FF1976D2")
+                3 -> android.graphics.Color.parseColor("#FF4CAF50")
                 else -> android.graphics.Color.WHITE
             }))
         }
@@ -999,10 +1001,9 @@ class FloatService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         Log.d(TAG, "orientation changed: display=${screenWidth}x${screenHeight} capture=${captureW}x${captureH}")
-        // Use current display dimensions for orientation (captureW/h not yet updated)
+        // Use current display dimensions for orientation and resolution
         touchClient?.setOrientationConfig(screenWidth > screenHeight)
-        // Touch resolution always uses natural orientation (captureW/captureH)
-        touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+        touchClient?.setResolution(screenWidth, screenHeight, deviceAbsMaxX, deviceAbsMaxY)
         centerX = captureW / 2f; centerY = captureH / 2f
 
         // Update overlay positions (UI uses current display metrics)
@@ -1054,8 +1055,8 @@ class FloatService : Service() {
                 Log.w(TAG, "VirtualDisplay resize failed: ${e.message}")
             }
             captureW = curW; captureH = curH
-            touchClient?.setOrientationConfig(captureW > captureH)
-            touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+            touchClient?.setOrientationConfig(curW > curH)
+            touchClient?.setResolution(curW, curH, deviceAbsMaxX, deviceAbsMaxY)
             centerX = captureW / 2f; centerY = captureH / 2f
             if (wasRunning) startInferLoop()
         }
