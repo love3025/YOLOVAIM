@@ -48,6 +48,8 @@ class TriggerController(
     private var triggerAreaX = 0
     private var triggerAreaY = 0
     private var lastTriggerMs = 0L
+    private var lastAutoStopMs = 0L   // 上次急停时间
+    private var autoStopDone = false  // 本轮急停是否已执行
     var triggerFired = false
 
     val mainHandler = Handler(Looper.getMainLooper())
@@ -147,27 +149,57 @@ class TriggerController(
             val now = System.currentTimeMillis()
             if (!triggerFired) {
                 // 第一发：准心进入目标时开始计时，反应速度后开枪
-                if (lastTriggerMs == 0L) lastTriggerMs = now
-                if (now - lastTriggerMs >= triggerReactionSpeed.coerceIn(10, 500)) {
-                    triggerFired = true
-                    // 自动急停：开枪前松开摇杆区域的手指
-                    if (autoStopEnabled) {
+                if (lastTriggerMs == 0L) { lastTriggerMs = now; autoStopDone = false }
+                val elapsed = now - lastTriggerMs
+                val reaction = triggerReactionSpeed.coerceIn(10, 500)
+
+                // 急停：在开枪前 60ms 松开摇杆，给游戏时间注册停止
+                if (autoStopEnabled && !autoStopDone) {
+                    val stopEarly = reaction >= 60
+                    if (stopEarly) {
+                        if (elapsed >= reaction - 60) {
+                            val lifted = touchClient()?.liftJoystickFinger() ?: false
+                            autoStopDone = true
+                            Log.d(TAG, "autoStop (early): liftJoystickFinger=$lifted elapsed=${elapsed}ms")
+                        }
+                    } else {
+                        // 反应速度 < 10ms，直接急停
                         val lifted = touchClient()?.liftJoystickFinger() ?: false
-                        Log.d(TAG, "autoStop: liftJoystickFinger=$lifted")
+                        autoStopDone = true
+                        Log.d(TAG, "autoStop (immediate): liftJoystickFinger=$lifted")
                     }
+                }
+
+                if (elapsed >= reaction) {
+                    triggerFired = true
                     lastTriggerMs = now
+                    autoStopDone = false
                     fireTriggerTap()
                 }
             } else {
                 // 第二发起：使用冷却时间
                 val cd = triggerCooldown.coerceIn(10, 1000)
-                if (now - lastTriggerMs >= cd) {
-                    // 自动急停：开枪前松开摇杆区域的手指
-                    if (autoStopEnabled) {
+                val elapsed = now - lastTriggerMs
+
+                // 急停：在开枪前 60ms 松开摇杆
+                if (autoStopEnabled && !autoStopDone) {
+                    val stopEarly = cd >= 60
+                    if (stopEarly) {
+                        if (elapsed >= cd - 60) {
+                            val lifted = touchClient()?.liftJoystickFinger() ?: false
+                            autoStopDone = true
+                            Log.d(TAG, "autoStop (early): liftJoystickFinger=$lifted elapsed=${elapsed}ms")
+                        }
+                    } else {
                         val lifted = touchClient()?.liftJoystickFinger() ?: false
-                        Log.d(TAG, "autoStop: liftJoystickFinger=$lifted")
+                        autoStopDone = true
+                        Log.d(TAG, "autoStop (immediate): liftJoystickFinger=$lifted")
                     }
+                }
+
+                if (elapsed >= cd) {
                     lastTriggerMs = now
+                    autoStopDone = false
                     fireTriggerTap()
                 }
             }
@@ -175,6 +207,7 @@ class TriggerController(
             // 准心离开目标，重置扳机状态
             triggerFired = false
             lastTriggerMs = 0L
+            autoStopDone = false
         }
     }
 

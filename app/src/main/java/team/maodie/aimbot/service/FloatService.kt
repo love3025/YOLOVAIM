@@ -102,6 +102,7 @@ class FloatService : Service() {
     private var aimOffsetYRatio = 0f; private var aimSwayAmplitude = 0; private var aimPrediction = 0; private var triggerOffsetYRatio = 0f
     private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
     private var aimHoldEnabled = false
+    private var recoilEnabled = false; private var recoilStrength = 0.5f
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -223,6 +224,8 @@ class FloatService : Service() {
         aimController.classAimOffsets = classAimOffsets
         aimController.boxAimRatio = boxAimRatio
         aimController.classBoxAimRatios = classBoxAimRatios
+        aimController.recoilEnabled = recoilEnabled
+        aimController.recoilStrength = recoilStrength
 
         // TriggerController
         triggerController.triggerEnabled = triggerEnabled
@@ -258,6 +261,8 @@ class FloatService : Service() {
         aimSwayAmplitude = cfg.aimSwayAmplitude
         aimPrediction = cfg.aimPrediction
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
+        recoilEnabled = cfg.recoilEnabled
+        recoilStrength = cfg.recoilStrength
         ki = cfg.ki; kd = cfg.kd
         aimMode = cfg.aimMode
         bezierDuration = cfg.bezierDuration
@@ -321,12 +326,20 @@ class FloatService : Service() {
             return START_STICKY
         }
         if (intent?.action == "RECONNECT_TOUCH") {
-            Log.d(TAG, "收到RECONNECT_TOUCH, method=${ProjectionHolder.selectedTouchMethod}")
+            val newMethod = ProjectionHolder.selectedTouchMethod
+            Log.d(TAG, "收到RECONNECT_TOUCH, method=$newMethod")
             executor.execute {
-                touchService.stopGeteventListener()
-                touchService.destroyRemote()
-                touchService.disconnect()
-                initTouchInjector()
+                try {
+                    Log.d(TAG, "RECONNECT: 开始断开旧连接 (state=${touchService.state})")
+                    touchService.stopGeteventListener()
+                    touchService.destroyRemote()
+                    touchService.disconnect()
+                    Log.d(TAG, "RECONNECT: 旧连接已断开, 开始连接新方式: $newMethod")
+                    // 直接在当前线程执行，不提交到 executor 队列末尾
+                    reconnectTouchInline()
+                } catch (e: Exception) {
+                    Log.e(TAG, "RECONNECT_TOUCH error: ${e.message}", e)
+                }
             }
             return START_STICKY
         }
@@ -424,6 +437,37 @@ class FloatService : Service() {
                 }
             })
         }
+    }
+
+    /** 重新连接触摸注入器 — 直接在当前线程发起连接，不提交到 executor 队列 */
+    private fun reconnectTouchInline() {
+        val method = ProjectionHolder.selectedTouchMethod
+        Log.d(TAG, "reconnectTouchInline: 连接 $method")
+        touchService.connect(object : InjectorCallback {
+            override fun onConnected() {
+                Log.d(TAG, "RECONNECT: $method 已连接, 配置中...")
+                touchService.setOrientationConfig(captureW > captureH)
+                touchService.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+                touchService.setInputMethod(method)
+                updateTriggerZone()
+                updateFireZone()
+                updateJoystickZone()
+                try {
+                    val initOk = touchService.initRemote()
+                    Log.d(TAG, "RECONNECT: initRemote=$initOk")
+                    touchService.startGeteventListener()
+                    Log.d(TAG, "RECONNECT: $method 切换完成")
+                } catch (e: Exception) {
+                    Log.e(TAG, "RECONNECT: initRemote error: ${e.message}", e)
+                }
+            }
+            override fun onDisconnected() {
+                Log.w(TAG, "RECONNECT: 新连接断开")
+            }
+            override fun onError(msg: String) {
+                Log.e(TAG, "RECONNECT: 连接失败: $msg")
+            }
+        })
     }
 
     private fun toggleRecording(enabled: Boolean) {
@@ -644,6 +688,8 @@ class FloatService : Service() {
         guiPanel.triggerShowArea = cfg.triggerShowArea
         guiPanel.autoStopEnabled = cfg.autoStopEnabled
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
+        guiPanel.recoilEnabled = cfg.recoilEnabled
+        guiPanel.recoilStrength = cfg.recoilStrength
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
         guiPanel.aimPrediction = cfg.aimPrediction
@@ -712,6 +758,8 @@ class FloatService : Service() {
         guiPanel.onBezierRandomSpreadChanged = { bezierRandomSpread = it; aimController.bezierRandomSpread = it; ConfigManager.updateConfig { bezierRandomSpread = it } }
         guiPanel.onConvergeThreshChanged = { convergeThresh = it.toFloat(); aimController.convergeThresh = it.toFloat(); ConfigManager.updateConfig { convergeThresh = it } }
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
+        guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
+        guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
             ConfigManager.updateConfig { aimTouchDisplay = show }
@@ -965,6 +1013,8 @@ class FloatService : Service() {
 
                     // detection-based trigger: center in any detection box (filtered by aimClasses)
                     triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get())
+                    // 压枪：每帧更新扳机状态（支持手动开火 + 自动扳机）
+                    aimController.triggerHeld = touchService.isFingerInFireZone() || triggerController.triggerFired
 
                     if (result == null) { hasDetects.set(false); lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
