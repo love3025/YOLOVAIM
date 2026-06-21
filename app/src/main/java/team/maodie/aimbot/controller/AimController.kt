@@ -35,6 +35,12 @@ class AimController(
     var aimPrediction = 0
     var aimHoldEnabled = false
 
+    // Recoil compensation
+    var recoilEnabled = false
+    var recoilStrength = 0.5f   // 0.0 ~ 1.0
+    var triggerHeld = false     // true while trigger is actively firing
+    private var recoilOffsetY = 0f
+
     // Class filtering
     var aimClasses: MutableSet<Int> = mutableSetOf()
     var priorityClass: Int = -1
@@ -98,10 +104,20 @@ class AimController(
     }
 
     fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+        // 压枪：按住扳机时持续下压目标位置
+        var adjustedTargetY = targetY
+        if (recoilEnabled) {
+            if (triggerHeld) {
+                recoilOffsetY += recoilStrength * 3f
+                adjustedTargetY += recoilOffsetY
+            } else {
+                recoilOffsetY = 0f
+            }
+        }
         if (aimMode == 1) {
-            executeAimingBezier(targetX, targetY, cx, cy)
+            executeAimingBezier(targetX, adjustedTargetY, cx, cy)
         } else {
-            executeAimingPid(targetX, targetY, cx, cy)
+            executeAimingPid(targetX, adjustedTargetY, cx, cy)
         }
     }
 
@@ -254,8 +270,13 @@ class AimController(
         aimingState.lockedTarget = null
     }
 
+    fun resetRecoil() {
+        recoilOffsetY = 0f
+    }
+
     fun reset() {
         aimingState.reset()
         bezierMover.cancel()
+        resetRecoil()
     }
 }
