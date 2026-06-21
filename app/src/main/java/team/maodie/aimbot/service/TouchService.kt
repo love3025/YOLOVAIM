@@ -3,6 +3,7 @@ package team.maodie.aimbot.service
 import android.content.Context
 import android.util.Log
 import team.maodie.aimbot.injector.InjectorCallback
+import team.maodie.aimbot.injector.InputManagerInjectorClient
 import team.maodie.aimbot.injector.RootInjectorClient
 import team.maodie.aimbot.injector.ShizukuInjectorClient
 import team.maodie.aimbot.injector.TouchInjectorInterface
@@ -35,12 +36,35 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     override fun connect(callback: InjectorCallback) {
         updateState(ConnectionState.CONNECTING)
         when (ProjectionHolder.selectedTouchMethod) {
-            TouchMethod.INPUT_MANAGER -> {
-                Log.d(TAG, "InputManager mode — not implemented yet")
-                updateState(ConnectionState.CONNECTED)
-                callback.onConnected()
-            }
+            TouchMethod.INPUT_MANAGER -> connectInputManager(callback)
             TouchMethod.UINPUT -> connectUinput(callback)
+        }
+    }
+
+    private fun connectInputManager(callback: InjectorCallback) {
+        try {
+            val client = InputManagerInjectorClient(context)
+            client.connect(object : InjectorCallback {
+                override fun onConnected() {
+                    delegate = client
+                    updateState(ConnectionState.CONNECTED)
+                    callback.onConnected()
+                }
+                override fun onDisconnected() {
+                    delegate = null
+                    updateState(ConnectionState.DISCONNECTED)
+                    callback.onDisconnected()
+                }
+                override fun onError(msg: String) {
+                    Log.e(TAG, "InputManager failed: $msg")
+                    updateState(ConnectionState.ERROR)
+                    callback.onError("InputManager failed: $msg")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "InputManager init failed: ${e.message}")
+            updateState(ConnectionState.ERROR)
+            callback.onError("InputManager init failed: ${e.message}")
         }
     }
 

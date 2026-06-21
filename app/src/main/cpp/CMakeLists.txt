@@ -54,6 +54,13 @@ set_target_properties(root_daemon PROPERTIES
     OUTPUT_NAME "libroot_daemon.so"
 )
 
+# InputManager evdev reader (for InputManager injection mode)
+add_library(inputmgr_core STATIC src/injection/inputmgr_core.cpp)
+target_link_libraries(inputmgr_core android log)
+
+add_library(inputmgr_inject SHARED src/injection/inputmgr_jni.cpp)
+target_link_libraries(inputmgr_inject inputmgr_core android log)
+
 target_include_directories(aimbot PRIVATE
         ${QNN_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include/qnn)
