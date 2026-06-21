@@ -6,6 +6,7 @@
 #include "inference_engine.h"
 #include "ncnn_engine.h"
 #include "litert_engine.h"
+#include "mediatek_engine.h"
 
 static std::unique_ptr<InferenceEngine> g_engine;
 
@@ -26,6 +27,14 @@ Java_team_maodie_aimbot_inference_JniCallBack_init(JNIEnv* env, jobject, jstring
     if (InferenceEngine::isNcnnModel(path)) {
         g_engine = std::make_unique<NcnnEngine>();
     } else {
+        // Fallback chain: MTK NPU → LiteRT (QNN HTP → GPU → CPU)
+        g_engine = std::make_unique<MtkEngine>();
+        if (g_engine->init(path)) {
+            env->ReleaseStringUTFChars(model_path, path);
+            return JNI_TRUE;
+        }
+        LOGD("MTK NPU unavailable, falling back to LiteRT");
+
         g_engine = std::make_unique<LiteRtEngine>();
     }
 

@@ -34,6 +34,8 @@ add_library(aimbot SHARED
     src/inference/ncnn_engine.cpp
     src/inference/litert_engine.cpp
     src/inference/qnn_engine.cpp
+    src/inference/mediatek_engine.cpp
+    src/inference/lite_rt_api.cpp
 )
 
 # Shared touch core library
