@@ -378,13 +378,33 @@ bool MtkEngine::init(const char* model_path) {
 
     // 19. Infer num_outputs from output packed size
     // Output shape: [1, 4+num_classes, num_outputs]
+    // Detect INT8 vs float32 by comparing packed_size with expected element count
     if (!m_outputs.empty()) {
         size_t total_bytes = m_outputs[0].packed_size;
-        // Assume float32 (4 bytes per element)
-        int total_floats = (int)(total_bytes / 4);
-        m_num_outputs = total_floats / (4 + m_num_classes);
+        int channels = 4 + m_num_classes;
+
+        // Get total element count from dimensions
+        int total_elements = 1;
+        if (m_outputs[0].tensor_type.layout.rank >= 3) {
+            const int32_t* d = m_outputs[0].tensor_type.layout.dimensions;
+            for (int r = 0; r < m_outputs[0].tensor_type.layout.rank; r++) {
+                if (d[r] > 0) total_elements *= d[r];
+            }
+        }
+
+        // If packed_size == total_elements, it's INT8 (1 byte per element)
+        // If packed_size == total_elements * 4, it's float32
+        if (total_bytes == (size_t)total_elements && total_elements > 0) {
+            // INT8: each element is 1 byte
+            m_num_outputs = total_elements / channels;
+            LOGD("INT8 output detected: packed=%zu, elements=%d", total_bytes, total_elements);
+        } else {
+            // float32: each element is 4 bytes
+            int total_floats = (int)(total_bytes / 4);
+            m_num_outputs = total_floats / channels;
+        }
         if (m_num_outputs < 1) m_num_outputs = 1344;
-        LOGD("Estimated num_outputs: %d", m_num_outputs);
+        LOGD("Estimated num_outputs: %d (channels=%d)", m_num_outputs, channels);
     }
 
     m_initialized = true;
@@ -550,17 +570,46 @@ std::vector<Detection> MtkEngine::detect(
          m_outputs[0].tensor_type.layout.rank > 3 ? m_outputs[0].tensor_type.layout.dimensions[3] : 0,
          m_outputs[0].packed_size);
 
-    // Debug: dump first 20 raw float values from output
-    {
+    // Detect actual output data type by buffer size vs element count
+    // INT8 quantized models may report element_type=FLOAT32 but produce INT8 data
+    int total_elements = m_num_outputs * (4 + m_num_classes);
+    size_t expected_float32_size = total_elements * sizeof(float);
+    size_t actual_size = m_outputs[0].packed_size;
+    bool is_int8_output = (actual_size == total_elements);  // 1 byte per element = INT8
+
+    float out_scale = m_outputs[0].quant_params.scale;
+    int out_zp = (int)m_outputs[0].quant_params.zero_point;
+
+    // If INT8 but no quant params from model, use INT8 defaults (scale=1/127, zp=0)
+    if (is_int8_output && out_scale == 1.0f && out_zp == 0) {
+        out_scale = 1.0f / 127.0f;
+        LOGD("INT8 output detected, using default dequant: scale=%.6f", out_scale);
+    }
+
+    LOGD("Output type: %s (packed=%zu, expected_f32=%zu, elements=%d, scale=%.6f, zp=%d)",
+         is_int8_output ? "INT8" : "FLOAT32", actual_size, expected_float32_size,
+         total_elements, out_scale, out_zp);
+
+    // Debug: dump first 20 raw values
+    if (is_int8_output) {
+        int8_t* dbg = static_cast<int8_t*>(output_ptr);
+        int n = (int)actual_size < 20 ? (int)actual_size : 20;
+        char buf[512] = {0};
+        int off = 0;
+        for (int k = 0; k < n; k++) {
+            off += snprintf(buf + off, sizeof(buf) - off, "%d ", dbg[k]);
+        }
+        LOGD("Output int8[0..%d]: %s", n - 1, buf);
+    } else {
         float* dbg = static_cast<float*>(output_ptr);
-        int total = (int)(m_outputs[0].packed_size / 4);
+        int total = (int)(actual_size / 4);
         int n = total < 20 ? total : 20;
         char buf[512] = {0};
         int off = 0;
         for (int k = 0; k < n; k++) {
             off += snprintf(buf + off, sizeof(buf) - off, "%.4f ", dbg[k]);
         }
-        LOGD("Output raw[0..%d]: %s (total=%d floats)", n - 1, buf, total);
+        LOGD("Output float[0..%d]: %s", n - 1, buf);
     }
 
     std::vector<Detection> detections;
@@ -580,50 +629,7 @@ std::vector<Detection> MtkEngine::detect(
         }
     };
 
-    int out_elem_type = m_outputs[0].tensor_type.element_type;
-    float out_scale = m_outputs[0].quant_params.scale;
-    int out_zp = m_outputs[0].quant_params.zero_point;
-
-    if (out_elem_type == 1) {
-        // Float32 output
-        float* data = static_cast<float*>(output_ptr);
-        for (int i = 0; i < m_num_outputs; ++i) {
-            float cx_raw = data[i];
-            float cy_raw = data[m_num_outputs + i];
-            float bw_raw = data[2 * m_num_outputs + i];
-            float bh_raw = data[3 * m_num_outputs + i];
-            float cx, cy, bw, bh;
-            normalizeIfNeeded(cx_raw, cy_raw, bw_raw, bh_raw, cx, cy, bw, bh);
-
-            float score;
-            int classId = 0;
-            if (m_num_classes <= 1) {
-                score = data[4 * m_num_outputs + i];
-            } else {
-                float maxProb = -1e9f;
-                int maxClass = 0;
-                for (int c = 0; c < m_num_classes; c++) {
-                    float prob = data[(4 + c) * m_num_outputs + i];
-                    if (prob > maxProb) { maxProb = prob; maxClass = c; }
-                }
-                score = maxProb;
-                classId = maxClass;
-            }
-
-            if (score < m_conf_thresh) continue;
-            if (bw <= 0 || bh <= 0) continue;
-            if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
-
-            float hw = bw * 0.5f, hh = bh * 0.5f;
-            detections.push_back({
-                (offsetX + (cx - hw) * regionWidth) * invW,
-                (offsetY + (cy - hh) * regionHeight) * invH,
-                (offsetX + (cx + hw) * regionWidth) * invW,
-                (offsetY + (cy + hh) * regionHeight) * invH,
-                score, (float)classId
-            });
-        }
-    } else if (out_elem_type == 9) {
+    if (is_int8_output) {
         // INT8 output with dequantization
         int8_t* data = static_cast<int8_t*>(output_ptr);
         for (int i = 0; i < m_num_outputs; ++i) {
@@ -663,7 +669,7 @@ std::vector<Detection> MtkEngine::detect(
             });
         }
     } else {
-        // UINT8 or other: treat as float (bridge may have done dequantization)
+        // Float32 output
         float* data = static_cast<float*>(output_ptr);
         for (int i = 0; i < m_num_outputs; ++i) {
             float cx_raw = data[i];
