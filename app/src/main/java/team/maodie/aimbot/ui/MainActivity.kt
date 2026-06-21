@@ -30,6 +30,7 @@ import rikka.shizuku.Shizuku
 import org.json.JSONObject
 import team.maodie.aimbot.manager.ConfigManager
 import team.maodie.aimbot.inference.JniCallBack
+import team.maodie.aimbot.model.TouchMethod
 import team.maodie.aimbot.util.ProjectionHolder
 import team.maodie.aimbot.service.FloatService
 import team.maodie.aimbot.R
@@ -64,6 +65,10 @@ class MainActivity : AppCompatActivity() {
     private var modelAutoComplete: MaterialAutoCompleteTextView? = null
     private var modelSection: LinearLayout? = null
     private var aimbotState = AimbotState.STANDBY
+
+    // 触摸方式选择
+    private var selectedTouchMethod = TouchMethod.entries[ConfigManager.getConfig().touchMethodIndex.coerceIn(0, TouchMethod.entries.size - 1)]
+    private var touchMethodAutoComplete: MaterialAutoCompleteTextView? = null
 
     private lateinit var statusText: TextView
     private lateinit var modelBadge: TextView
@@ -112,6 +117,7 @@ class MainActivity : AppCompatActivity() {
                 ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description, m.classes)
             }
             ProjectionHolder.selectedModelIndex = selectedModelIndex
+            ProjectionHolder.selectedTouchMethod = selectedTouchMethod
             startForegroundService(Intent(this, FloatService::class.java))
         }
     }
@@ -152,6 +158,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ConfigManager.init(this)
+        selectedTouchMethod = TouchMethod.entries[ConfigManager.getConfig().touchMethodIndex.coerceIn(0, TouchMethod.entries.size - 1)]
         loadModelsFromJson()
         val cfgModelIndex = ConfigManager.getConfig().modelIndex
         if (cfgModelIndex !in 0 until modelList.size) {
@@ -174,6 +181,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+        ProjectionHolder.setTouchStatusListener { text ->
+            runOnUiThread { if (::touchValue.isInitialized) touchValue.text = text }
         }
         loadStateFromPrefs()
 
@@ -319,6 +329,10 @@ class MainActivity : AppCompatActivity() {
 
         // 模型卡片
         buildModelCard().also { modelSection = it; content.addView(it) }
+        content.addView(createSpacer(16))
+
+        // 触摸方式卡片
+        content.addView(buildTouchMethodCard())
 
         scrollView.addView(content)
         root.addView(scrollView)
@@ -580,6 +594,52 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun buildTouchMethodCard(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = GradientDrawable().apply {
+                setColor(MD3_SURFACE_CONTAINER)
+                cornerRadius = dp(12).toFloat()
+            }
+
+            addView(TextView(context).apply {
+                text = "触摸方式"
+                textSize = 16f
+                setTextColor(MD3_PRIMARY)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, dp(8))
+            })
+
+            // 从xml加载 MD3 外露下拉菜单
+            val dropdownLayout = layoutInflater.inflate(R.layout.dropdown_layout, null) as TextInputLayout
+            val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
+            touchMethodAutoComplete = autoComplete
+
+            val displayNames = listOf("Uinput - 适合部分设备", "InputManager - 适配大部分设备")
+            val touchMethods = TouchMethod.entries
+
+            val safeIndex = if (selectedTouchMethod.ordinal in touchMethods.indices) selectedTouchMethod.ordinal else 0
+            autoComplete.setText(displayNames[safeIndex], false)
+
+            val adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_dropdown_item_1line,
+                displayNames
+            )
+            autoComplete.setAdapter(adapter)
+
+            autoComplete.setOnItemClickListener { _, _, position, _ ->
+                selectedTouchMethod = touchMethods[position]
+                ProjectionHolder.selectedTouchMethod = selectedTouchMethod
+                ConfigManager.updateConfig { touchMethodIndex = position }
+                syncTouchMethodToFloatService()
+            }
+
+            addView(dropdownLayout)
+        }
+    }
+
     private fun buildModelInfoCard(model: ModelInfo): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -702,6 +762,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         ProjectionHolder.removeStateListener()
         ProjectionHolder.removeModelIndexListener()
+        ProjectionHolder.removeTouchStatusListener()
     }
 
     override fun onStop() {
@@ -752,7 +813,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         overlayValue.text = if (overlay) "Granted" else "Not Granted"
-        touchValue.text = "Running"
+        touchValue.text = ProjectionHolder.touchStatusText
     }
 
     private fun isShizukuGranted(): Boolean {
@@ -1056,6 +1117,18 @@ class MainActivity : AppCompatActivity() {
         if (running) {
             startForegroundService(Intent(this, FloatService::class.java).apply {
                 action = "SYNC_MODEL"
+            })
+        }
+    }
+
+    private fun syncTouchMethodToFloatService() {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val running = am.getRunningServices(100).any {
+            it.service.className == FloatService::class.java.name
+        }
+        if (running) {
+            startForegroundService(Intent(this, FloatService::class.java).apply {
+                action = "RECONNECT_TOUCH"
             })
         }
     }

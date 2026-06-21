@@ -7,6 +7,7 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
+import team.maodie.aimbot.model.TouchMethod
 
 class RootInjectorClient(private val context: Context) : TouchInjectorInterface {
     companion object {
@@ -195,7 +196,7 @@ class RootInjectorClient(private val context: Context) : TouchInjectorInterface 
         return resp == "OK:1"
     }
 
-    override fun setInputMethod(method: Int) {
+    override fun setInputMethod(method: TouchMethod) {
         // Root always uses uinput, method param ignored
     }
 

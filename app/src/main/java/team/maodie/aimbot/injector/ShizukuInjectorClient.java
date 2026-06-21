@@ -13,6 +13,7 @@ import java.io.InputStreamReader;
 
 import rikka.shizuku.Shizuku;
 import team.maodie.aimbot.IRemoteInjector;
+import team.maodie.aimbot.model.TouchMethod;
 import team.maodie.aimbot.service.RemoteInjectorService;
 
 public class ShizukuInjectorClient implements TouchInjectorInterface {
@@ -206,10 +207,10 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
         return false;
     }
 
-    public void setInputMethod(int method) {
+    public void setInputMethod(TouchMethod method) {
         if (remoteService != null) {
             try {
-                remoteService.setInputMethod(method);
+                remoteService.setInputMethod(method.ordinal());
                 Log.d(TAG, "setInputMethod: " + method);
             } catch (Exception e) {
                 Log.e(TAG, "setInputMethod: " + e.getMessage());

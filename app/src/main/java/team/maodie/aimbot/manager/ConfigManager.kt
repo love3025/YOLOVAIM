@@ -51,7 +51,8 @@ data class AppConfig(
     var convergeThresh: Int = 10,
     var autoStopEnabled: Boolean = false,
     var useCpuInference: Boolean = false,
-    var cpuThreadCount: Int = 4
+    var cpuThreadCount: Int = 4,
+    var touchMethodIndex: Int = 0  // 0=Uinput, 1=InputManager
 )
 
 object ConfigManager {
@@ -114,7 +115,8 @@ object ConfigManager {
                         convergeThresh = obj.optInt("convergeThresh", 10),
                         autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
                         useCpuInference = obj.optBoolean("useCpuInference", false),
-                        cpuThreadCount = obj.optInt("cpuThreadCount", 4)
+                        cpuThreadCount = obj.optInt("cpuThreadCount", 4),
+                        touchMethodIndex = obj.optInt("touchMethodIndex", 0)
                     )
                 }
             }
@@ -172,6 +174,7 @@ object ConfigManager {
                     put("autoStopEnabled", config.autoStopEnabled)
                     put("useCpuInference", config.useCpuInference)
                     put("cpuThreadCount", config.cpuThreadCount)
+                    put("touchMethodIndex", config.touchMethodIndex)
                 }
                 file.writeText(obj.toString(2))
             }
