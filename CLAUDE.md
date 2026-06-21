@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Android FPS game AI aiming assistant. Captures screen via MediaProjection, runs YOLOv8n inference through Qualcomm QNN HTP delegate (Hexagon DSP/NPU acceleration), draws detection overlays on a full-screen transparent overlay, and supports auto-aim + trigger bot via virtual touch injection through a Shizuku UserService with uinput access.
+Android FPS game AI aiming assistant. Captures screen via MediaProjection, runs YOLO inference (NCNN or TFLite via QNN HTP delegate), draws detection overlays on a full-screen transparent overlay, and supports auto-aim + trigger bot via virtual touch injection through Shizuku or Root (uinput).
 
 ## Build Commands
 
@@ -31,8 +31,8 @@ git commit -m "描述"
 git push origin master
 
 # 创建 Release tag
-git tag -a v1.0.2 -m "Release v1.0.2"
-git push origin v1.0.2
+git tag -a v1.0.x -m "Release v1.0.x"
+git push origin v1.0.x
 ```
 
 ### Release 流程
@@ -42,7 +42,7 @@ git push origin v1.0.2
 3. 更新 `dialog_changelog.xml` 添加新版本条目
 4. `./gradlew assembleRelease` 构建 release APK
 5. `git tag` 打 tag 并 push
-6. GitHub Release 页面创建 Release，上传 APK，标题格式 `Aimbot Android v1.0.2`
+6. GitHub Release 页面创建 Release，上传 APK，标题格式 `Aimbot Android v1.0.x`
 
 ### 注意事项
 
@@ -52,129 +52,192 @@ git push origin v1.0.2
 
 ## Architecture
 
+### Kotlin/Java 层
+
 ```
-MainActivity.kt                    # Entry point — permissions, model loading, Shizuku auth
-    ↓
-FloatService.kt                    # Foreground service — owns all UI and inference
-    ├── FloatBallView.kt           # Draggable toggle button (blue FAB)
-    ├── OverlayCanvasView.kt       # Full-screen transparent overlay (detection boxes, crosshair, range)
-    ├── GuiPanelView.kt           # MD3 side-nav control panel (自瞄/扳机/防闪/模型/系统 tabs)
-    ├── TriggerOverlayView.kt      # Trigger zone visualizer (circle overlay)
-    ├── TouchDisplayView.kt        # Aim touch point visualizer
-    ├── AreaSettingsView.kt        # Area configuration UI (fire/trigger/aim zones)
-    ├── AreaConfig.kt              # Area data class
-    ├── ShizukuInjectorClient.java # AIDL client for RemoteInjectorService
-    └── JniCallBack.kt             # JNI bridge → libaimbot.so
-            └── aimbot.cpp          # TFLite + QNN HTP delegate inference
-RemoteInjectorService.java         # Shizuku UserService (separate process) with uinput access
-    └── uinput_inject.cpp           # Native uinput touch injection + physical finger reader
-TfliteClassifier.kt                # Alternative classifier (unused in current flow)
+ui/
+├── MainActivity.kt              # Entry point — permissions, model selection, disclaimer, config import/export
+└── SettingsActivity.kt          # CPU inference toggle, thread count slider
+
+service/
+├── FloatService.kt              # Foreground service — owns overlays, MediaProjection, inference loop
+└── RemoteInjectorService.java   # Shizuku UserService (separate process) — uinput or InputManager
+
+controller/
+├── AimController.kt             # PID + Bezier aim modes, target lock, per-class offsets
+└── TriggerController.kt         # Trigger bot, reaction delay, auto-stop joystick
+
+manager/
+├── ConfigManager.kt             # JSON config persistence (config.json), export/import
+├── InferenceManager.kt          # Inference loop, ImageReader, VirtualDisplay, dataset saving, recording
+└── OverlayManager.kt            # Touch display and area overlay lifecycle
+
+model/
+├── DetectionInfo.kt             # rect, classId, className
+├── AreaConfig.kt                # x, y, width, height, name, color
+├── AimingState.kt               # PID state: pointerDown, position, errors, integral, lockedTarget
+└── BezierMover.kt               # Smoothstep easing timer
+
+view/
+├── FloatBallView.kt             # Draggable FAB toggle
+├── OverlayCanvasView.kt         # Full-screen overlay (detection boxes, crosshair, range)
+├── GuiPanelView.kt              # MD3 side-nav control panel (自瞄/扳机/防闪/模型/系统 tabs)
+├── TriggerOverlayView.kt        # Trigger zone visualizer
+├── TouchDisplayView.kt          # Aim touch point visualizer
+├── AreaSettingsView.kt          # Area configuration (fire/trigger/aim/joystick zones)
+└── BezierCurveView.kt           # Bezier curve preview
+
+injector/
+├── TouchInjectorInterface.kt    # Interface: tap, swipe, moveTo, lift, trigger, zone queries
+├── ShizukuInjectorClient.java   # AIDL client for RemoteInjectorService
+├── RootInjectorClient.kt        # Root alternative via su + stdin/stdout protocol
+└── UinputInjector.java          # Legacy standalone injector (superseded)
+
+inference/
+├── JniCallBack.kt               # JNI bridge → libaimbot.so
+└── TfliteClassifier.kt          # Alternative pure-Java TFLite classifier (unused)
+
+util/
+└── ProjectionHolder.kt          # Singleton: MediaProjection, model list, state, callback listeners
+```
+
+### C++ Native 层 (app/src/main/cpp/)
+
+```
+src/inference/
+├── inference_engine.h           # Abstract base: init, detect, release, setConfidence, setInputSize
+├── common.h                     # Detection struct, NMS, sigmoid, timing
+├── aimbot.cpp                   # JNI bridge — creates NcnnEngine or LiteRtEngine by model extension
+├── ncnn_engine.h/cpp            # NCNN inference (YOLOv8 DFL + legacy format, float32 + int8)
+├── litert_engine.h/cpp          # TFLite inference (QNN HTP → GPU → CPU fallback chain)
+├── qnn_engine.h/cpp             # QNN HTP delegate builder (Qualcomm detection, FastRPC preload)
+└── qnn_wrapper.h/cpp            # Direct QNN API wrapper (experimental)
+
+src/injection/
+├── touch_core.h/cpp             # Shared touch logic: uinput device, EVIOCGRAB, zone detection, coord mapping
+└── uinput_inject.cpp            # JNI wrapper over touch_core
+
+src/daemon/
+└── root_daemon.cpp              # Standalone su daemon, stdin/stdout command protocol (20+ commands)
+
+CMakeLists.txt                   # 3 targets: aimbot (shared), uinput_inject (shared), root_daemon (exec)
+                                 # + touch_core (static) shared between injection targets
+                                 # Links NCNN with Vulkan + OpenMP
 ```
 
 ### Data Flow
 
 1. `MediaProjection` captures screen into `ImageReader`
-2. Inference thread calls `JniCallBack.detect()` via JNI
-3. `aimbot.cpp` runs TFLite model via QNN HTP delegate, returns `[classId, score, x1, y1, x2, y2, ...]`
-4. `FloatService` converts to screen pixels, posts to `OverlayCanvasView` for overlay
-5. Auto-aim: PID controller moves virtual finger via `ShizukuInjectorClient` → `RemoteInjectorService` → uinput
-6. Trigger bot: fires tap when crosshair is over detected target
-7. Hold-to-fire: requires physical finger in trigger zone before auto-aim activates
+2. `InferenceManager` calls `JniCallBack.detect()` via JNI
+3. `aimbot.cpp` selects engine by model extension (`.param` → NCNN, `.tflite` → LiteRt/QNN)
+4. Returns `[classId, score, x1, y1, x2, y2, ...]`
+5. `FloatService` converts to screen pixels, posts to `OverlayCanvasView` for overlay
+6. `AimController`: PID or Bezier moves virtual finger via injector client → uinput
+7. `TriggerController`: fires tap when crosshair enters detection box
+8. Hold-to-fire: physical finger must be in trigger zone before auto-aim activates
 
-### Key Classes
-
-- **ProjectionHolder**: Static singleton holding MediaProjection result + model list between Activity and Service
-- **FloatService**: Foreground service owning all overlay views, inference executor, and touch injection client. Contains PID auto-aim, target lock, trigger bot, hold-to-fire logic, and area settings.
-- **GuiPanelView**: MD3 side-nav control panel with tabs for 自瞄(PID)/扳机(trigger)/防闪(blank-tab)/模型(model)/系统(system)
-- **ShizukuInjectorClient**: AIDL client connecting to `RemoteInjectorService` via Shizuku
-- **RemoteInjectorService**: Shizuku UserService with uinput device creation and physical finger detection
-- **uinput_inject.cpp**: Native uinput touch injection with 90° coordinate rotation + EVIOCGRAB physical touch reader
-- **JniCallBack**: JNI bridge to `libaimbot.so`, exposes `init()`, `detect()`, `setConfidence()`, `getBackend()`
-- **aimbot.cpp**: TFLite with QNN HTP delegate (Hexagon DSP/NPU) — fallback to NNAPI if QNN unavailable
-
-## Native Backend (cpp/aimbot.cpp)
-
-### Primary: QNN HTP Delegate
-
-- Uses `TfLiteQnnDelegateCreate` with `kHtpBackend`
-- Preloads `libcdsprpc.so` / `libadsprpc.so` for FastRPC
-- `cache_dir=/data/data/team.maodie.aimbot/cache/qnn` for compiled model cache
-
-### Fallback: NNAPI Delegate
-
-- `TfLiteNnapiDelegateCreate` with `disallow_nnapi_cpu=1`
-- Used when QNN HTP is unavailable
-
-### Output Format
-
-YOLOv8n output shape: `[1, 5, num_outputs]`
-- Channel 0: cx (center X, normalized [0,1])
-- Channel 1: cy (center Y, normalized [0,1])
-- Channel 2: bw (box width, normalized [0,1])
-- Channel 3: bh (box height, normalized [0,1])
-- Channel 4: objectness score
-
-Detection returns `float[count * 6]` = `[classId, score, x1, y1, x2, y2, ...]`
-
-## Touch Injection
-
-### Flow
+### Touch Injection (Dual Path)
 
 ```
 FloatService
-    └── ShizukuInjectorClient (AIDL)
-            └── RemoteInjectorService (Shizuku UserService, separate process)
-                    └── uinput_inject.cpp (uinput device + EVIOCGRAB reader)
+    ├── RootInjectorClient (su + stdin/stdout)     ← preferred
+    │       └── root_daemon.cpp → touch_core.cpp
+    └── ShizukuInjectorClient (AIDL)               ← fallback
+            └── RemoteInjectorService.java → uinput_inject.cpp → touch_core.cpp
 ```
 
-### Coordinate Mapping (OnePlus Pad Pro OPD2404)
+`touch_core.cpp` is the shared native library used by both paths. Creates uinput device, EVIOCGRAB on real touch devices, zone detection, coordinate mapping with 90° rotation.
 
-- Screen: 3000x2120 (landscape)
-- Touch panel ABS: X=[0,21199], Y=[0,29999] (portrait, 90° rotated)
-- Landscape mapping:
-  ```
-  dev_x = (screen_h - y) * dev_abs_max_x / screen_h
-  dev_y = x * dev_abs_max_y / screen_w
-  ```
-- Portrait mapping: direct proportional
+### AIDL (IRemoteInjector.aidl)
 
-### RemoteInjectorService Methods
-
-| Method | Description |
-|--------|-------------|
-| `tap(x, y)` | Tap at screen coordinates (DOWN + UP, 8ms interval) |
-| `swipe(x1, y1, x2, y2, durationMs)` | DOWN → MOVE → UP sequence |
-| `moveTo(x, y)` | Continuous move (pointer must be down) |
-| `lift()` | Lift pointer |
-| `triggerDown/Up/Tap` | Separate trigger slot (TRACKING_ID=2000) |
-| `setTriggerZone` | Set physical finger detection zone |
-| `isFingerInTriggerZone` | Check if physical finger is in zone |
-
-### Hold-to-Fire
-
-Physical finger must be in trigger zone (savedAreas[1]) before auto-aim activates:
-```kotlin
-val holdToAimActive = if (aimHoldEnabled) shizukuClient?.isFingerInTriggerZone() ?: false else true
-if (aimbotOn.get() && rectCount > 0 && holdToAimActive) { ... }
-```
+28 methods covering: tap/swipe/move/lift, trigger operations (triggerDown/triggerUp/triggerTap), zone configuration (setTriggerZone/setFireZone/setJoystickZone), physical finger detection (isFingerInTriggerZone/isFingerInFireZone/isFingerInJoystickZone), device management, lifecycle.
 
 ### Area Settings
 
-Three configurable zones (via AreaSettingsView):
+Four configurable zones (via AreaSettingsView):
 - `savedAreas[0]`: Fire area — random tap position within on trigger
 - `savedAreas[1]`: Trigger zone — physical finger must be here for hold-to-fire
 - `savedAreas[2]`: Aim area — random touch start position for auto-aim
+- `savedAreas[3]`: Joystick zone — auto-stop lifts joystick finger before firing
+
+## Inference Backends
+
+### NCNN (primary for `.param`/`.bin` models)
+
+- `NcnnEngine` in `ncnn_engine.cpp`
+- Supports official YOLOv8 format (2D output, DFL decode) and legacy 3-output format
+- Both float32 and int8 (quantized) outputs
+- Vulkan GPU acceleration + OpenMP threading
+- Static link: `libncnn.a` + Vulkan SPIR-V libs
+
+### LiteRt / TFLite (for `.tflite` models)
+
+- `LiteRtEngine` in `litert_engine.cpp`
+- Delegate chain: QNN HTP → GPU → CPU fallback
+- QNN HTP: `TfLiteQnnDelegateCreate` with `kHtpBackend`, preloads `libcdsprpc.so`
+- GPU: `TfLiteGpuDelegateV2Create`
+- CPU: default TFLite (final fallback)
+- `cache_dir=/data/data/team.maodie.aimbot/cache/qnn`
+
+### Output Format
+
+All engines return `float[count * 6]` = `[classId, score, x1, y1, x2, y2, ...]`
+
+YOLOv8 output shape: `[1, 5, num_outputs]` — cx, cy, bw, bh, objectness (all normalized [0,1])
+
+## Aim Modes
+
+### PID Controller (`AimController`)
+
+- **Kp** = 0.30, **Ki** = 0.02, **Kd** = 0.08
+- Anti-windup: integral resets on error zero-crossing, clamped to ±100
+- Max per-frame movement: 1200px
+- Convergence threshold: <10px → lift pointer
+- Max drag distance: 20% screen diagonal → lift + re-down
+- Target lock: hysteresis by center distance <150px
+
+### Bezier Curve (`AimController` + `BezierMover`)
+
+- Smoothstep easing (slow-fast-slow)
+- Configurable duration, control offset, random spread
+- Alternative to PID for smoother aim movement
+
+### Both Modes Support
+
+- Per-class Y offsets and box aim ratios
+- Priority class target selection
+- Sway simulation
+- Aim area for random touch start position
+
+## Trigger Bot (`TriggerController`)
+
+- Two-phase: first shot uses reaction speed delay, subsequent shots use cooldown
+- Per-class trigger Y offsets
+- Auto-stop: lifts joystick finger before firing (joystick zone)
+- Fire area for random tap position
+
+## Config System
+
+`ConfigManager.kt` persists `AppConfig` (40+ settings) to `config.json` in app filesDir:
+- Aim settings (Kp/Ki/Kd, Bezier params, target lock, sway)
+- Trigger settings (reaction speed, cooldown, per-class offsets)
+- Per-class configuration (aim/trigger enable, offsets, box aim ratio)
+- Area settings (fire/trigger/aim/joystick zones)
+- CPU inference settings (force CPU, thread count)
+- Display options (overlay, crosshair)
+- Export/import via content URI
+
+## Dataset & Recording
+
+Built into `InferenceManager`:
+- **Dataset auto-save**: JPEG screenshots + YOLO format labels (`class cx cy w h`)
+- **Screen recording**: HEVC MP4 at 32Mbps/60fps via MediaCodec
 
 ## Model Files
 
 Stored in `app/src/main/assets/`, loaded via `models.json`:
 
-| File | Description |
-|------|-------------|
-| `models.json` | Model configuration |
-| `yolov8n_float_192.tflite` | Float32 192x192 |
-| `yolov8n_int8_256_calibrated.tflite` | INT8 256x256 (ultralytics export) |
-| `yolov8n_int8_192_calibrated.tflite` | INT8 192x192 (ultralytics export) |
+8 model configurations: YOLOv8n, YOLOv11s, YOLOv26n/s, various input sizes (192/256/320), float32 and INT8. Multi-class support: body/head/friendly/item/infrared/range_body/range_head.
 
 ## Model Conversion
 
@@ -186,47 +249,45 @@ model.export(format='tflite', int8=True, data='valorant.yaml')
 
 Output: `best_192_saved_model/best_192_full_integer_quant.tflite`
 
-Rename to `yolov8n_int8_192_calibrated.tflite` and place in `app/src/main/assets/`.
+Rename and place in `app/src/main/assets/`, add entry to `models.json`.
 
-## PID Auto-Aim
+## Dependencies
 
-Proportional-integral-derivative controller in `FloatService`:
-- **Kp** = proportional gain (default 0.30)
-- **Ki** = integral gain (default 0.02), anti-windup via integral limiting
-- **Kd** = derivative gain (default 0.08)
-- Anti-windup: integral resets on error zero-crossing, clamped to ±100
-- Max per-frame movement: 600px
-- Convergence threshold: <10px error → lift pointer
-- Max drag distance: 20% of screen diagonal → lift + re-down
+- `org.tensorflow:tensorflow-lite:2.14.0` — TFLite runtime
+- `com.microsoft.onnxruntime:onnxruntime-android:1.17.1` — ONNX Runtime (unused in current flow)
+- `dev.rikka.shizuku:api:13.1.5` / `dev.rikka.shizuku:provider:13.1.5` — Shizuku
+- `com.google.android.material:material:1.13.0` — MD3 components
+- AndroidX libraries
+- NCNN (static lib in `app/src/main/cpp/ncnn/`)
+- QNN SDK (prebuilt in `app/src/main/cpp/lib/`)
 
-Target lock: hysteresis by center distance <150px (22500 sq) to avoid flickering.
+## Build Config
+
+- compileSdk=36, minSdk=31, targetSdk=35
+- NDK: arm64-v8a only
+- CMake 3.22.1
+- ViewBinding + AIDL enabled, no Compose
+- AGP 8.10.0, Kotlin 2.0.21
+
+## Important Notes
+
+- Model files copied from assets to internal storage on first launch
+- Inference at `THREAD_PRIORITY_URGENT_DISPLAY` on single thread executor
+- Confidence threshold: `JniCallBack.setConfidence(0.10~0.90)`, default 0.25
+- `ProjectionHolder` uses callback listeners (not broadcasts) for Android 14+ compatibility
+- Disclaimer dialog: 30-second countdown with scroll-to-bottom before accepting
+- Root injector preferred, Shizuku as fallback — `FloatService` tries Root first
 
 ## Known Issues
 
 ### QNN HTP Init Failure
 
-If QNN delegate fails to create, falls back to NNAPI. If both fail, model loading returns false.
-
-### OnePlus Pad Pro — libcdsprpc.so Not Found
-
-dlopen fails because `libcdsprpc.so` is in `/vendor/lib64/`. QNN HTP delegate handles this internally — if `buildQnnDelegate()` returns null, falls back to NNAPI.
+If QNN delegate fails to create, falls back to GPU, then CPU. Check `getBackend()` for current backend.
 
 ### Slow Inference
 
-NNAPI fell back to CPU. Check device NNAPI support: `adb shell dumpsys neuralnetworks`
+Likely CPU fallback. Check: `adb shell dumpsys neuralnetworks` for NNAPI support, or verify QNN libs are present.
 
-## Dependencies
+### libcdsprpc.so Not Found
 
-- `org.tensorflow:tensorflow-lite` — TFLite runtime
-- `dev.rikka.shizuku:api` / `dev.rikka.shizuku:provider` — Shizuku
-- `com.google.android.material` — MD3 components
-- AndroidX libraries
-
-## Important Notes
-
-- minSdk=31 (Android 12), targetSdk=35
-- Model files copied from assets to internal storage on first launch
-- Inference at `THREAD_PRIORITY_URGENT_DISPLAY` on single thread executor
-- Touch injection NOT auto-triggered — FloatService inference loop only detects + overlays
-- Confidence threshold: `JniCallBack.setConfidence(0.10~0.90)`, default 0.25
-- State broadcast: `ProjectionHolder.updateState(state, modelName)` (0=standby, 1=running, 2=inferencing)
+`/vendor/lib64/` path — QNN HTP delegate handles this internally. If `buildQnnDelegate()` returns null, falls back.

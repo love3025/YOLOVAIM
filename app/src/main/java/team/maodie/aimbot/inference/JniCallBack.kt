@@ -1,10 +1,31 @@
 package team.maodie.aimbot.inference
 
+import android.util.Log
 import java.nio.ByteBuffer
 
 object JniCallBack {
-    // 初始化模型
+    private const val TAG = "JniCallBack"
+
     init {
+        try {
+            System.loadLibrary("LiteRt")
+            Log.i(TAG, "libLiteRt.so loaded")
+        } catch (t: Throwable) {
+            Log.e(TAG, "libLiteRt.so failed to load: ${t.message}")
+        }
+        // Load MediaTek LiteRT plugins (must be after LiteRt, before aimbot)
+        try {
+            System.loadLibrary("LiteRtDispatch_MediaTek")
+            Log.i(TAG, "libLiteRtDispatch_MediaTek.so loaded")
+        } catch (t: Throwable) {
+            Log.d(TAG, "libLiteRtDispatch_MediaTek.so not available: ${t.message}")
+        }
+        try {
+            System.loadLibrary("LiteRtCompilerPlugin_MediaTek")
+            Log.i(TAG, "libLiteRtCompilerPlugin_MediaTek.so loaded")
+        } catch (t: Throwable) {
+            Log.d(TAG, "libLiteRtCompilerPlugin_MediaTek.so not available: ${t.message}")
+        }
         System.loadLibrary("aimbot")
     }
 
