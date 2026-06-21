@@ -31,9 +31,6 @@ import team.maodie.aimbot.view.AreaSettingsView
 import team.maodie.aimbot.model.AimingState
 import team.maodie.aimbot.model.AreaConfig
 import team.maodie.aimbot.model.BezierMover
-import team.maodie.aimbot.injector.TouchInjectorInterface
-import team.maodie.aimbot.injector.RootInjectorClient
-import team.maodie.aimbot.injector.ShizukuInjectorClient
 import team.maodie.aimbot.injector.InjectorCallback
 import team.maodie.aimbot.inference.JniCallBack
 import team.maodie.aimbot.util.ProjectionHolder
@@ -86,7 +83,7 @@ class FloatService : Service() {
     private var centerX = 0f; private var centerY = 0f
     private var cachedRange = 0f; private var cachedRangePx = 0
 
-    var touchClient: TouchInjectorInterface? = null
+    val touchService = TouchService(this)
     private var currentSpeed = 0.3f; private var currentConfidence = 0.50f
     private var modelRunning = false
     private var lastModelIndex = 0
@@ -159,19 +156,29 @@ class FloatService : Service() {
         loadConfigToService()
         createNotificationChannel(); startForeground(1, buildNotification())
         initControllers()
+        touchService.onStateChanged = { state ->
+            val text = when (state) {
+                TouchService.ConnectionState.DISCONNECTED -> "Disconnected"
+                TouchService.ConnectionState.CONNECTING -> "Connecting"
+                TouchService.ConnectionState.CONNECTED -> "Running"
+                TouchService.ConnectionState.ERROR -> "Error"
+            }
+            ProjectionHolder.touchStatusText = text
+            Log.d(TAG, "TouchService state: $text")
+        }
     }
 
     private fun initControllers() {
         aimController = AimController(
             service = this,
-            touchClient = { touchClient },
+            touchClient = { touchService },
             savedAreas = { savedAreas }
         )
 
         triggerController = TriggerController(
             context = this,
             wm = wm,
-            touchClient = { touchClient },
+            touchClient = { touchService },
             savedAreas = { savedAreas },
             screenWidth = { screenWidth },
             screenHeight = { screenHeight },
@@ -313,14 +320,24 @@ class FloatService : Service() {
             }
             return START_STICKY
         }
+        if (intent?.action == "RECONNECT_TOUCH") {
+            Log.d(TAG, "收到RECONNECT_TOUCH, method=${ProjectionHolder.selectedTouchMethod}")
+            executor.execute {
+                touchService.stopGeteventListener()
+                touchService.destroyRemote()
+                touchService.disconnect()
+                initTouchInjector()
+            }
+            return START_STICKY
+        }
         if (intent?.action == "STOP") {
             if (mediaRecorder != null) toggleRecording(false)
             inferRunning.set(false)
             executor.shutdown()
             cleanupViews()
-            touchClient?.stopGeteventListener()
-            touchClient?.destroyRemote()
-            touchClient?.disconnect()
+            touchService.stopGeteventListener()
+            touchService.destroyRemote()
+            touchService.disconnect()
             mediaProjection?.stop()
             try { stopForeground(true) } catch (_: Exception) {}
             stopSelf()
@@ -382,65 +399,30 @@ class FloatService : Service() {
 
     private fun initTouchInjector() {
         executor.execute {
-            val commonCallback = object : InjectorCallback {
+            touchService.connect(object : InjectorCallback {
                 override fun onConnected() {
-                    touchClient?.setOrientationConfig(captureW > captureH)
-                    touchClient?.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
-                    touchClient?.setInputMethod(ProjectionHolder.selectedTouchMethod)
+                    touchService.setOrientationConfig(captureW > captureH)
+                    touchService.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
+                    touchService.setInputMethod(ProjectionHolder.selectedTouchMethod)
                     updateTriggerZone()
                     updateFireZone()
                     updateJoystickZone()
                     Log.d(TAG, "TouchInjector connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
                     try {
-                        val initOk = touchClient?.initRemote() ?: false
+                        val initOk = touchService.initRemote()
                         Log.d(TAG, "RemoteInjector init: $initOk")
-                        touchClient?.startGeteventListener()
+                        touchService.startGeteventListener()
                     } catch (e: Exception) {
                         Log.e(TAG, "initRemote error: ${e.message}")
                     }
                 }
                 override fun onDisconnected() {
-                    touchClient = null
                     Log.w(TAG, "TouchInjector disconnected")
                 }
                 override fun onError(msg: String) {
                     Log.e(TAG, "TouchInjector error: $msg")
                 }
-            }
-
-            // Try root first
-            try {
-                val rootClient = RootInjectorClient(this@FloatService)
-                rootClient.connect(object : InjectorCallback {
-                    override fun onConnected() {
-                        touchClient = rootClient
-                        commonCallback.onConnected()
-                    }
-                    override fun onDisconnected() { commonCallback.onDisconnected() }
-                    override fun onError(msg: String) {
-                        Log.d(TAG, "Root not available ($msg), trying Shizuku...")
-                        // Fallback to Shizuku
-                        try {
-                            val shizukuClient = ShizukuInjectorClient(this@FloatService)
-                            shizukuClient.connect(object : InjectorCallback {
-                                override fun onConnected() {
-                                    touchClient = shizukuClient
-                                    commonCallback.onConnected()
-                                }
-                                override fun onDisconnected() { commonCallback.onDisconnected() }
-                                override fun onError(msg2: String) {
-                                    Log.e(TAG, "Shizuku also failed: $msg2")
-                                    commonCallback.onError("Both root and Shizuku failed")
-                                }
-                            })
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Shizuku init failed: ${e.message}")
-                        }
-                    }
-                })
-            } catch (e: Exception) {
-                Log.e(TAG, "Root init failed: ${e.message}")
-            }
+            })
         }
     }
 
@@ -792,16 +774,16 @@ class FloatService : Service() {
                     val cx = screenWidth / 2; val cy = screenHeight / 2
                     val radius = 200; val steps = 72
                     val aspect = screenWidth.toFloat() / screenHeight.toFloat()
-                    touchClient?.swipe(cx, cy, cx, cy, 0)
+                    touchService.swipe(cx, cy, cx, cy, 0)
                     Thread.sleep(50)
                     for (i in 1 until steps) {
                         val angle = (i * 360.0 / steps) * Math.PI / 180.0
                         val x = (cx + radius * aspect * Math.cos(angle)).toInt()
                         val y = (cy + radius * Math.sin(angle)).toInt()
-                        touchClient?.moveTo(x, y)
+                        touchService.moveTo(x, y)
                         Thread.sleep(20)
                     }
-                    touchClient?.lift()
+                    touchService.lift()
                 }.start()
             }
         }
@@ -865,19 +847,19 @@ class FloatService : Service() {
     // 推送触发区域到远程服务，用于物理手指检测
     private fun updateTriggerZone() {
         val zone = savedAreas.getOrNull(AREA_INDEX_TRIGGER) ?: return
-        touchClient?.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
+        touchService.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateTriggerZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
     private fun updateFireZone() {
         val zone = savedAreas.getOrNull(AREA_INDEX_FIRE) ?: return
-        touchClient?.setFireZone(zone.x, zone.y, zone.right, zone.bottom)
+        touchService.setFireZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateFireZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
     private fun updateJoystickZone() {
         val zone = savedAreas.getOrNull(AREA_INDEX_JOYSTICK) ?: return
-        touchClient?.setJoystickZone(zone.x, zone.y, zone.right, zone.bottom)
+        touchService.setJoystickZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateJoystickZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
@@ -901,7 +883,7 @@ class FloatService : Service() {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             while (inferRunning.get()) {
-                if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled shizuku=${touchClient?.isConnected()} detects=${hasDetects.get()}") }
+                if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
                 val image = imageReader?.acquireLatestImage()
@@ -954,7 +936,7 @@ class FloatService : Service() {
                         }
 
                         // 按住激发: 物理手指按在触发区时才能自瞄
-                        val holdToAimActive = if (aimHoldEnabled) touchClient?.isFingerInTriggerZone() ?: false else true
+                        val holdToAimActive = if (aimHoldEnabled) touchService.isFingerInTriggerZone() else true
 
                         // Filter detections by aimClasses
                         val aimDets = if (aimClasses.isEmpty()) lastDetections
@@ -1002,8 +984,8 @@ class FloatService : Service() {
         super.onConfigurationChanged(newConfig)
         Log.d(TAG, "orientation changed: display=${screenWidth}x${screenHeight} capture=${captureW}x${captureH}")
         // Use current display dimensions for orientation and resolution
-        touchClient?.setOrientationConfig(screenWidth > screenHeight)
-        touchClient?.setResolution(screenWidth, screenHeight, deviceAbsMaxX, deviceAbsMaxY)
+        touchService.setOrientationConfig(screenWidth > screenHeight)
+        touchService.setResolution(screenWidth, screenHeight, deviceAbsMaxX, deviceAbsMaxY)
         centerX = captureW / 2f; centerY = captureH / 2f
 
         // Update overlay positions (UI uses current display metrics)
@@ -1055,8 +1037,8 @@ class FloatService : Service() {
                 Log.w(TAG, "VirtualDisplay resize failed: ${e.message}")
             }
             captureW = curW; captureH = curH
-            touchClient?.setOrientationConfig(curW > curH)
-            touchClient?.setResolution(curW, curH, deviceAbsMaxX, deviceAbsMaxY)
+            touchService.setOrientationConfig(curW > curH)
+            touchService.setResolution(curW, curH, deviceAbsMaxX, deviceAbsMaxY)
             centerX = captureW / 2f; centerY = captureH / 2f
             if (wasRunning) startInferLoop()
         }
@@ -1065,9 +1047,9 @@ class FloatService : Service() {
     override fun onDestroy() {
         if (mediaRecorder != null) toggleRecording(false)
         inferRunning.set(false); executor.shutdown()
-        touchClient?.stopGeteventListener()
-        touchClient?.destroyRemote()
-        touchClient?.disconnect()
+        touchService.stopGeteventListener()
+        touchService.destroyRemote()
+        touchService.disconnect()
         mediaProjection?.stop()
         cleanupViews()
         try { stopForeground(true) } catch (_: Exception) {}

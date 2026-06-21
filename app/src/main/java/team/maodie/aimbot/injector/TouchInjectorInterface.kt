@@ -1,5 +1,7 @@
 package team.maodie.aimbot.injector
 
+import team.maodie.aimbot.model.TouchMethod
+
 interface InjectorCallback {
     fun onConnected()
     fun onDisconnected()
@@ -29,7 +31,7 @@ interface TouchInjectorInterface {
     fun isFingerInJoystickZone(): Boolean
     fun liftJoystickFinger(): Boolean
 
-    fun setInputMethod(method: Int)
+    fun setInputMethod(method: TouchMethod)
     fun initRemote(): Boolean
     fun setResolution(screenW: Int, screenH: Int, devW: Int, devH: Int)
     fun setOrientationConfig(landscapeStart: Boolean)

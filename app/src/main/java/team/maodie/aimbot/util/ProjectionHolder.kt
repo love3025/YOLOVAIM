@@ -4,6 +4,7 @@ import android.content.Intent
 import android.media.projection.MediaProjection
 import android.view.View
 import android.view.WindowManager
+import team.maodie.aimbot.model.TouchMethod
 
 object ProjectionHolder {
     var resultCode: Int = -1
@@ -24,8 +25,19 @@ object ProjectionHolder {
     var modelList: List<ModelEntry> = emptyList()
     var selectedModelIndex: Int = 0
 
-    // 触摸方案（0=Uinput, 1=InputManager）
-    var selectedTouchMethod: Int = 0
+    // 触摸方案
+    var selectedTouchMethod: TouchMethod = TouchMethod.UINPUT
+
+    // 触摸连接状态文本
+    var touchStatusText: String = "Disconnected"
+        set(value) {
+            field = value
+            touchStatusListener?.invoke(value)
+        }
+    private var touchStatusListener: ((String) -> Unit)? = null
+
+    fun setTouchStatusListener(listener: (String) -> Unit) { touchStatusListener = listener }
+    fun removeTouchStatusListener() { touchStatusListener = null }
 
     // 服务状态（0=待机, 1=运行, 2=推理中）
     var currentState: Int = 0

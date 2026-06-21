@@ -142,7 +142,7 @@ class InferenceManager(
             var aliveCtr = 0
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) {
-                    Log.d(TAG, "alive trigger=${triggerController.triggerEnabled} shizuku=${service.touchClient?.isConnected()} detects=${hasDetects.get()}")
+                    Log.d(TAG, "alive trigger=${triggerController.triggerEnabled} shizuku=${service.touchService.isConnected()} detects=${hasDetects.get()}")
                 }
                 val currentRange = cachedRangePx
                 if (currentRange != cachedRangePx) {
@@ -212,7 +212,7 @@ class InferenceManager(
                         }
 
                         // 按住激发: 物理手指按在触发区时才能自瞄
-                        val holdToAimActive = if (aimController.aimHoldEnabled) service.touchClient?.isFingerInTriggerZone() ?: false else true
+                        val holdToAimActive = if (aimController.aimHoldEnabled) service.touchService.isFingerInTriggerZone() ?: false else true
 
                         // Filter detections by aimClasses
                         val aimDets = if (aimController.aimClasses.isEmpty()) lastDetections
@@ -408,8 +408,8 @@ class InferenceManager(
             }
             captureW = curW
             captureH = curH
-            service.touchClient?.setOrientationConfig(captureW > captureH)
-            service.touchClient?.setResolution(captureW, captureH, service.deviceAbsMaxX, service.deviceAbsMaxY)
+            service.touchService.setOrientationConfig(captureW > captureH)
+            service.touchService.setResolution(captureW, captureH, service.deviceAbsMaxX, service.deviceAbsMaxY)
             centerX = captureW / 2f
             centerY = captureH / 2f
             if (wasRunning) startInferLoop()

@@ -1,0 +1,173 @@
+package team.maodie.aimbot.service
+
+import android.content.Context
+import android.util.Log
+import team.maodie.aimbot.injector.InjectorCallback
+import team.maodie.aimbot.injector.RootInjectorClient
+import team.maodie.aimbot.injector.ShizukuInjectorClient
+import team.maodie.aimbot.injector.TouchInjectorInterface
+import team.maodie.aimbot.model.TouchMethod
+import team.maodie.aimbot.util.ProjectionHolder
+
+class TouchService(private val context: Context) : TouchInjectorInterface {
+    companion object {
+        private const val TAG = "TouchService"
+    }
+
+    enum class ConnectionState {
+        DISCONNECTED,
+        CONNECTING,
+        CONNECTED,
+        ERROR
+    }
+
+    var state = ConnectionState.DISCONNECTED
+        private set
+    var onStateChanged: ((ConnectionState) -> Unit)? = null
+
+    private var delegate: TouchInjectorInterface? = null
+
+    private fun updateState(newState: ConnectionState) {
+        state = newState
+        onStateChanged?.invoke(newState)
+    }
+
+    override fun connect(callback: InjectorCallback) {
+        updateState(ConnectionState.CONNECTING)
+        when (ProjectionHolder.selectedTouchMethod) {
+            TouchMethod.INPUT_MANAGER -> {
+                Log.d(TAG, "InputManager mode — not implemented yet")
+                updateState(ConnectionState.CONNECTED)
+                callback.onConnected()
+            }
+            TouchMethod.UINPUT -> connectUinput(callback)
+        }
+    }
+
+    private fun connectUinput(callback: InjectorCallback) {
+        try {
+            val rootClient = RootInjectorClient(context)
+            rootClient.connect(object : InjectorCallback {
+                override fun onConnected() {
+                    delegate = rootClient
+                    updateState(ConnectionState.CONNECTED)
+                    callback.onConnected()
+                }
+                override fun onDisconnected() {
+                    delegate = null
+                    updateState(ConnectionState.DISCONNECTED)
+                    callback.onDisconnected()
+                }
+                override fun onError(msg: String) {
+                    Log.d(TAG, "Root not available ($msg), trying Shizuku...")
+                    try {
+                        val shizukuClient = ShizukuInjectorClient(context)
+                        shizukuClient.connect(object : InjectorCallback {
+                            override fun onConnected() {
+                                delegate = shizukuClient
+                                updateState(ConnectionState.CONNECTED)
+                                callback.onConnected()
+                            }
+                            override fun onDisconnected() {
+                                delegate = null
+                                updateState(ConnectionState.DISCONNECTED)
+                                callback.onDisconnected()
+                            }
+                            override fun onError(msg2: String) {
+                                Log.e(TAG, "Shizuku also failed: $msg2")
+                                updateState(ConnectionState.ERROR)
+                                callback.onError("Both root and Shizuku failed")
+                            }
+                        })
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Shizuku init failed: ${e.message}")
+                        updateState(ConnectionState.ERROR)
+                        callback.onError("Shizuku init failed: ${e.message}")
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Root init failed: ${e.message}")
+            callback.onError("Root init failed: ${e.message}")
+        }
+    }
+
+    // --- 触摸操作：转发给 delegate ---
+
+    override fun tap(x: Int, y: Int) { delegate?.tap(x, y) }
+
+    override fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int) {
+        delegate?.swipe(x1, y1, x2, y2, durationMs)
+    }
+
+    override fun moveTo(x: Int, y: Int) { delegate?.moveTo(x, y) }
+
+    override fun lift() { delegate?.lift() }
+
+    override fun keepAlive() { delegate?.keepAlive() }
+
+    override fun triggerDown(x: Int, y: Int) { delegate?.triggerDown(x, y) }
+
+    override fun triggerUp() { delegate?.triggerUp() }
+
+    override fun triggerTap(x: Int, y: Int, durationMs: Int) {
+        delegate?.triggerTap(x, y, durationMs)
+    }
+
+    override fun blockPhysicalTouch() { delegate?.blockPhysicalTouch() }
+
+    override fun unblockPhysicalTouch() { delegate?.unblockPhysicalTouch() }
+
+    // --- 配置/查询/生命周期：转发 ---
+
+    override fun isConnected(): Boolean = delegate?.isConnected() ?: false
+
+    override fun disconnect() {
+        delegate?.disconnect()
+        delegate = null
+        updateState(ConnectionState.DISCONNECTED)
+    }
+
+    override fun setInputMethod(method: TouchMethod) { delegate?.setInputMethod(method) }
+
+    override fun initRemote(): Boolean = delegate?.initRemote() ?: false
+
+    override fun setResolution(screenW: Int, screenH: Int, devW: Int, devH: Int) {
+        delegate?.setResolution(screenW, screenH, devW, devH)
+    }
+
+    override fun setOrientationConfig(landscapeStart: Boolean) {
+        delegate?.setOrientationConfig(landscapeStart)
+    }
+
+    override fun startGeteventListener() { delegate?.startGeteventListener() }
+
+    override fun stopGeteventListener() { delegate?.stopGeteventListener() }
+
+    override fun setTriggerZone(left: Int, top: Int, right: Int, bottom: Int) {
+        delegate?.setTriggerZone(left, top, right, bottom)
+    }
+
+    override fun isFingerInTriggerZone(): Boolean = delegate?.isFingerInTriggerZone() ?: false
+
+    override fun setFireZone(left: Int, top: Int, right: Int, bottom: Int) {
+        delegate?.setFireZone(left, top, right, bottom)
+    }
+
+    override fun isFingerInFireZone(): Boolean = delegate?.isFingerInFireZone() ?: false
+
+    override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {
+        delegate?.setJoystickZone(left, top, right, bottom)
+    }
+
+    override fun isFingerInJoystickZone(): Boolean = delegate?.isFingerInJoystickZone() ?: false
+
+    override fun liftJoystickFinger(): Boolean = delegate?.liftJoystickFinger() ?: false
+
+    override fun destroyRemote() { delegate?.destroyRemote() }
+
+    override fun queryDeviceAbs(devicePath: String, axis: Int): IntArray =
+        delegate?.queryDeviceAbs(devicePath, axis) ?: intArrayOf(0, 0)
+
+    override fun findTouchDevice(): String? = delegate?.findTouchDevice()
+}
