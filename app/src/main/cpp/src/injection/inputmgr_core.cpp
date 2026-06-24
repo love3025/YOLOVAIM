@@ -9,6 +9,7 @@
 #include <linux/input.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <array>
@@ -177,6 +178,70 @@ static bool checkHasSlotSupport(int fd) {
 static void getDeviceName(int fd, char* buf, int bufSize) {
     if (ioctl(fd, EVIOCGNAME(bufSize), buf) < 0)
         buf[0] = '\0';
+}
+
+// Enumerate touch device paths via `getevent -p` (Shizuku-safe).
+// Parses the same fields touch_core.cpp uses (hasSlot && hasX && hasY)
+// and reports each detected path once. Out arrays must hold at least maxResults entries.
+static int enumerateTouchDevicesViaGetevent(char paths[][128], int maxResults) {
+    FILE* fp = popen("/system/bin/getevent -p 2>&1", "r");
+    if (!fp) {
+        LOGE("getevent: popen failed errno=%d", errno);
+        return 0;
+    }
+
+    char currentPath[128] = "";
+    bool hasSlot = false, hasX = false, hasY = false;
+    int found = 0;
+    int lineCount = 0;
+
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        lineCount++;
+        char pathBuf[128];
+        // "add device N: /dev/input/eventX"
+        if (sscanf(line, " add device %*d: %127s", pathBuf) == 1) {
+            // New device header — commit previous one if it qualified.
+            if (currentPath[0] != '\0' && hasSlot && hasX && hasY) {
+                if (found < maxResults) {
+                    strncpy(paths[found], currentPath, 127);
+                    paths[found][127] = '\0';
+                    found++;
+                }
+            }
+            strncpy(currentPath, pathBuf, sizeof(currentPath) - 1);
+            currentPath[sizeof(currentPath) - 1] = '\0';
+            hasSlot = false;
+            hasX = false;
+            hasY = false;
+            continue;
+        }
+
+        if (currentPath[0] == '\0') continue;
+
+        // " 0035: value 0, min 0, max 1079"  (ABS_MT_POSITION_X) — note "value" prefix
+        int code = -1, minV = 0, maxV = 0;
+        if (sscanf(line, " %x : value %*d, min %d, max %d", &code, &minV, &maxV) == 3 ||
+            sscanf(line, " %x : min %d, max %d", &code, &minV, &maxV) == 3) {
+            if (code == ABS_MT_SLOT)         hasSlot = true;
+            else if (code == ABS_MT_POSITION_X) hasX = true;
+            else if (code == ABS_MT_POSITION_Y) hasY = true;
+        }
+    }
+
+    LOGD("getevent: scanned %d lines, %d touch device(s) qualified", lineCount, found);
+
+    // Commit last device
+    if (currentPath[0] != '\0' && hasSlot && hasX && hasY) {
+        if (found < maxResults) {
+            strncpy(paths[found], currentPath, 127);
+            paths[found][127] = '\0';
+            found++;
+        }
+    }
+
+    pclose(fp);
+    return found;
 }
 
 // ─── Close (internal, must hold mutex) ──────────────────────────────
@@ -472,40 +537,39 @@ bool inputmgr_init(int screenW, int screenH) {
     g_cached_finger_grace_until = 0;
 
     DIR* dir = opendir("/dev/input/");
-    if (!dir) { LOGE("open /dev/input failed"); return false; }
+    if (!dir) {
+        LOGE("open /dev/input failed, falling back to getevent");
+    }
+
+    // Use getevent to enumerate touch device paths (Shizuku-safe).
+    char touchPaths[MAX_DEVICES][128];
+    int touchPathCount = enumerateTouchDevicesViaGetevent(touchPaths, MAX_DEVICES);
+    if (touchPathCount == 0) {
+        if (dir) closedir(dir);
+        LOGE("no touch device found via getevent");
+        return false;
+    }
+    LOGD("getevent found %d touch device(s)", touchPathCount);
+    if (dir) closedir(dir);
 
     int best_fd = -1;
     int best_max_x = 0, best_max_y = 0;
     bool best_has_slot = false;
     char best_name[128] = {};
 
-    // Scan for touch devices
-    std::vector<std::pair<std::string, int>> candidates;
-    dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (!strstr(entry->d_name, "event")) continue;
-        char path[128];
-        snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
+    // Open each detected touch device with O_RDONLY (works in both Root and Shizuku).
+    for (int i = 0; i < touchPathCount; i++) {
+        const char* path = touchPaths[i];
         int fd = open(path, O_RDONLY);
-        if (fd < 0) continue;
-        if (checkDeviceIsTouch(fd)) {
-            candidates.emplace_back(path, fd);
-        } else {
-            close(fd);
+        if (fd < 0) {
+            LOGE("open %s failed errno=%d", path, errno);
+            continue;
         }
-    }
-    closedir(dir);
 
-    if (candidates.empty()) {
-        LOGE("no touch device found");
-        return false;
-    }
-
-    // Open all touch devices
-    for (auto& [path, fd] : candidates) {
-        struct input_absinfo absInfoX{}, absInfoY{}, absInfoSlot{};
+        struct input_absinfo absInfoX{}, absInfoY{};
         if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &absInfoX) != 0 ||
             ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &absInfoY) != 0) {
+            LOGE("EVIOCGABS on %s failed errno=%d", path, errno);
             close(fd);
             continue;
         }
@@ -513,14 +577,6 @@ bool inputmgr_init(int screenW, int screenH) {
         int max_x = absInfoX.maximum;
         int max_y = absInfoY.maximum;
         bool has_slot = checkHasSlotSupport(fd);
-
-        // Re-open with O_RDWR | O_NONBLOCK (matches reference: nOpen uses 0x80202)
-        close(fd);
-        fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
-        if (fd < 0) {
-            LOGE("reopen %s failed", path.c_str());
-            continue;
-        }
 
         g_fds.push_back(fd);
 
@@ -543,11 +599,11 @@ bool inputmgr_init(int screenW, int screenH) {
             getDeviceName(fd, name, sizeof(name));
             strncpy(best_name, name, sizeof(best_name));
             LOGD("ref device: %s max=%d,%d id=0x%x hasSlot=%d",
-                 path.c_str(), max_x, max_y, g_device_id, has_slot);
+                 path, max_x, max_y, g_device_id, has_slot);
         }
 
         LOGD("touch device: %s max=%d,%d hasSlot=%d",
-             path.c_str(), max_x, max_y, has_slot);
+             path, max_x, max_y, has_slot);
     }
 
     if (g_fds.empty()) {

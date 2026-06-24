@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -52,6 +53,7 @@ struct TouchObj {
 
 struct Device {
     int fd = 0;
+    char path[256] = "";
     float s2tx = 1.0f;
     float s2ty = 1.0f;
     input_absinfo absX{};
@@ -176,6 +178,7 @@ static void updateZones() {
     g_trigger_zone.finger_inside = 0;
     g_fire_zone.finger_inside = 0;
     g_joystick_zone.finger_inside = 0;
+    if (g_devices.empty()) return;
 
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
@@ -204,6 +207,105 @@ static void updateZones() {
 }
 
 // ─── Device scanning ────────────────────────────────────────────────
+
+// Detect physical touch device via `getevent -p` text output.
+// Avoids direct /dev/input/eventX open — Shizuku UserService process has no
+// SELinux permission for that, but can execute `getevent` which reads kernel
+// info on its own. Identical approach to v1.0.8 single-file uinput_inject.cpp.
+//
+// On success fills outPath/outMaxX/outMaxY and returns true.
+// Touch-device criterion matches checkDeviceIsTouch() exactly:
+// ABS_MT_SLOT + ABS_MT_POSITION_X + ABS_MT_POSITION_Y all required.
+static bool detectTouchDeviceViaGetevent(char* outPath, size_t pathSize,
+                                         int& outMaxX, int& outMaxY) {
+    FILE* fp = popen("/system/bin/getevent -p 2>&1", "r");
+    if (!fp) {
+        LOGE("detectTouchDevice: popen getevent failed");
+        return false;
+    }
+
+    char line[512];
+    char currentPath[256] = "";
+    bool hasSlot = false, hasX = false, hasY = false;
+    int maxX = 0, maxY = 0;
+    int deviceCount = 0;
+    bool found = false;
+
+    auto tryCommit = [&]() -> bool {
+        if (deviceCount > 0 && hasSlot && hasX && hasY) {
+            strncpy(outPath, currentPath, pathSize - 1);
+            outPath[pathSize - 1] = '\0';
+            outMaxX = maxX > 0 ? maxX : 0;
+            outMaxY = maxY > 0 ? maxY : 0;
+            LOGD("Detected touch device: %s abs=%dx%d", outPath, outMaxX, outMaxY);
+            return true;
+        }
+        return false;
+    };
+
+    while (fgets(line, sizeof(line), fp)) {
+        // New device section: "add device N: /dev/input/eventX"
+        if (strstr(line, "add device") && strstr(line, "/dev/input/event")) {
+            if (tryCommit()) { found = true; break; }
+
+            char* p = strstr(line, "/dev/input/event");
+            if (p) {
+                char* end = p;
+                while (*end && *end != '\n' && *end != '\r' && *end != ' ') end++;
+                size_t len = static_cast<size_t>(end - p);
+                if (len >= sizeof(currentPath)) len = sizeof(currentPath) - 1;
+                memcpy(currentPath, p, len);
+                currentPath[len] = '\0';
+            }
+            deviceCount++;
+            hasSlot = hasX = hasY = false;
+            maxX = maxY = 0;
+        }
+        // Skip our own previously-created virtual device
+        if (strstr(line, "name:") && strstr(line, "Aimbot")) {
+            hasSlot = hasX = hasY = false;
+            maxX = maxY = 0;
+        }
+        // ABS codes (hex): 002f=ABS_MT_SLOT(47), 0035=ABS_MT_POSITION_X(53),
+        // 0036=ABS_MT_POSITION_Y(54). Some Android versions emit symbolic names
+        // instead — accept both.
+        if (strstr(line, "002f") || strstr(line, "ABS_MT_SLOT")) hasSlot = true;
+        if (strstr(line, "0035") || strstr(line, "ABS_MT_POSITION_X")) {
+            hasX = true;
+            int val;
+            if (sscanf(line, "%*x%*[^m]min %*d, max %d", &val) == 1 && val > 0) maxX = val;
+        }
+        if (strstr(line, "0036") || strstr(line, "ABS_MT_POSITION_Y")) {
+            hasY = true;
+            int val;
+            if (sscanf(line, "%*x%*[^m]min %*d, max %d", &val) == 1 && val > 0) maxY = val;
+        }
+    }
+    if (!found) found = tryCommit();
+
+    pclose(fp);
+    return found;
+}
+
+// Open physical touch device and grab it for exclusive access. EVIOCGRAB makes
+// InputReader ignore events from this device, so virtual touches injected via
+// uinput aren't accompanied by physical-finger noise. Returns fd on success,
+// -1 on failure (logged). Identical to v1.0.8 single-file direct_reader.
+static int openAndGrabPhysicalDevice(const char* path) {
+    if (!path || path[0] == '\0') return -1;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        LOGE("openAndGrab: open %s failed errno=%d", path, errno);
+        return -1;
+    }
+    if (ioctl(fd, EVIOCGRAB, GRAB) < 0) {
+        LOGE("openAndGrab: EVIOCGRAB on %s failed errno=%d", path, errno);
+        close(fd);
+        return -1;
+    }
+    LOGD("openAndGrab: fd=%d EVIOCGRAB success on %s", fd, path);
+    return fd;
+}
 
 static bool checkDeviceIsTouch(int fd) {
     uint8_t* bits = nullptr;
@@ -321,9 +423,11 @@ static bool createUinputDevice(int screenX, int screenY, int sourceFd) {
 static void closeTouchLocked() {
     if (!g_initialized) return;
     for (auto& device : g_devices) {
-        ioctl(device.fd, EVIOCGRAB, UNGRAB);
-        close(device.fd);
-        device.fd = 0;
+        if (device.fd >= 0) {
+            ioctl(device.fd, EVIOCGRAB, UNGRAB);
+            close(device.fd);
+        }
+        device.fd = -1;
     }
     if (g_outputFd > 0) {
         ioctl(g_outputFd, UI_DEV_DESTROY);
@@ -340,7 +444,12 @@ static void closeTouchLocked() {
 
 static void* deviceReader(void* arg) {
     int devIdx = static_cast<int>(reinterpret_cast<long>(arg));
+    if (devIdx < 0 || devIdx >= static_cast<int>(g_devices.size())) return nullptr;
     Device& dev = g_devices[devIdx];
+    if (dev.fd < 0) {
+        LOGE("Reader[%d]: no fd (grab failed), exiting", devIdx);
+        return nullptr;
+    }
 
     int curSlot = 0;
     input_event batch[64];
@@ -414,43 +523,42 @@ bool touch_init(int screenW, int screenH) {
     g_screen_w = screenW;
     g_screen_h = screenH;
 
-    DIR* dir = opendir("/dev/input/");
-    if (!dir) { LOGE("open /dev/input failed"); return false; }
-
-    dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (!strstr(entry->d_name, "event")) continue;
-        char path[128];
-        snprintf(path, sizeof(path), "/dev/input/%s", entry->d_name);
-        int fd = open(path, O_RDWR);
-        if (fd < 0) continue;
-        if (!checkDeviceIsTouch(fd)) { close(fd); continue; }
-
-        Device device{};
-        if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0 &&
-            ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
-            device.fd = fd;
-            ioctl(fd, EVIOCGRAB, GRAB);
-            g_devices.push_back(device);
-            LOGD("touch device %s max=%d,%d", path, device.absX.maximum, device.absY.maximum);
-        } else {
-            close(fd);
-        }
+    // Detect physical touch device via getevent (no direct /dev/input access).
+    // Falls back to screen size if not detected — uinput injection still works,
+    // physical-finger tracking / zone detection just becomes unavailable.
+    int touchMaxX = screenW;
+    int touchMaxY = screenH;
+    char touchPath[256] = "";
+    if (detectTouchDeviceViaGetevent(touchPath, sizeof(touchPath), touchMaxX, touchMaxY)) {
+        LOGD("Using touch device ABS: %dx%d", touchMaxX, touchMaxY);
+    } else {
+        LOGD("No touch device detected, using screen size as ABS: %dx%d", touchMaxX, touchMaxY);
     }
-    closedir(dir);
 
-    if (g_devices.empty()) { LOGE("no touch device found"); return false; }
+    // Always seed a placeholder device entry. fd=-1 means "no real fd to grab
+    // or read from" — downstream code can still rely on g_devices[0] for
+    // finger/scale bookkeeping without empty checks.
+    Device device{};
+    device.fd = -1;
+    device.absX.maximum = touchMaxX;
+    device.absY.maximum = touchMaxY;
+    strncpy(device.path, touchPath, sizeof(device.path) - 1);
+    device.path[sizeof(device.path) - 1] = '\0';
 
-    int touchMaxX = g_devices[0].absX.maximum;
-    int touchMaxY = g_devices[0].absY.maximum;
-    if (!createUinputDevice(touchMaxX, touchMaxY, g_devices[0].fd)) {
+    // Try to grab physical device so InputReader stops forwarding its events.
+    // Failure here is non-fatal — uinput injection still works, just without
+    // physical-touch suppression (game may receive both real and virtual taps).
+    if (touchPath[0] != '\0') {
+        int fd = openAndGrabPhysicalDevice(touchPath);
+        if (fd >= 0) device.fd = fd;
+        else LOGE("touch_init: grab %s failed, physical touches not suppressed", touchPath);
+    }
+
+    g_devices.push_back(device);
+
+    if (!createUinputDevice(touchMaxX, touchMaxY, -1)) {
         closeTouchLocked();
         return false;
-    }
-
-    for (auto& device : g_devices) {
-        device.s2tx = static_cast<float>(touchMaxX) / std::max(1, device.absX.maximum);
-        device.s2ty = static_cast<float>(touchMaxY) / std::max(1, device.absY.maximum);
     }
 
     Vec2 logical = size;
