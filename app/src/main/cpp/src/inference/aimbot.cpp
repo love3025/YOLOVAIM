@@ -9,6 +9,9 @@
 #include "mediatek_engine.h"
 
 static std::unique_ptr<InferenceEngine> g_engine;
+static bool g_force_cpu = false;
+static int g_cpu_threads = 1;
+static int g_input_size = 256;
 
 //==============================================================================
 //  Init
@@ -26,6 +29,16 @@ Java_team_maodie_aimbot_inference_JniCallBack_init(JNIEnv* env, jobject, jstring
 
     if (InferenceEngine::isNcnnModel(path)) {
         g_engine = std::make_unique<NcnnEngine>();
+        g_engine->setForceCpu(g_force_cpu);
+        g_engine->setCpuThreads(g_cpu_threads);
+        g_engine->setInputSize(g_input_size, g_input_size);
+    } else if (g_force_cpu) {
+        // Force CPU: skip MTK NPU and LiteRT hardware delegates, use CPU only
+        LOGD("Force CPU enabled, skipping NPU/GPU, using CPU only");
+        g_engine = std::make_unique<LiteRtEngine>();
+        g_engine->setForceCpu(true);
+        g_engine->setCpuThreads(g_cpu_threads);
+        g_engine->setInputSize(g_input_size, g_input_size);
     } else {
         // Fallback chain: MTK NPU → LiteRT (QNN HTP → GPU → CPU)
         g_engine = std::make_unique<MtkEngine>();
@@ -36,6 +49,8 @@ Java_team_maodie_aimbot_inference_JniCallBack_init(JNIEnv* env, jobject, jstring
         LOGD("MTK NPU unavailable, falling back to LiteRT");
 
         g_engine = std::make_unique<LiteRtEngine>();
+        g_engine->setCpuThreads(g_cpu_threads);
+        g_engine->setInputSize(g_input_size, g_input_size);
     }
 
     bool ok = g_engine->init(path);
@@ -109,6 +124,7 @@ Java_team_maodie_aimbot_inference_JniCallBack_setConfidence(JNIEnv*, jobject, jf
 extern "C"
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_inference_JniCallBack_setForceCpu(JNIEnv*, jobject, jboolean useCpu) {
+    g_force_cpu = useCpu;
     if (g_engine) g_engine->setForceCpu(useCpu);
     LOGD("Force CPU: %s", useCpu ? "ON" : "OFF");
 }
@@ -116,6 +132,7 @@ Java_team_maodie_aimbot_inference_JniCallBack_setForceCpu(JNIEnv*, jobject, jboo
 extern "C"
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_inference_JniCallBack_setCpuThreads(JNIEnv*, jobject, jint threads) {
+    g_cpu_threads = threads;
     if (g_engine) g_engine->setCpuThreads(threads);
     LOGD("CPU threads: %d", threads);
 }
@@ -123,6 +140,7 @@ Java_team_maodie_aimbot_inference_JniCallBack_setCpuThreads(JNIEnv*, jobject, ji
 extern "C"
 JNIEXPORT void JNICALL
 Java_team_maodie_aimbot_inference_JniCallBack_setInputSize(JNIEnv*, jobject, jint width, jint height) {
+    g_input_size = (width > 0) ? width : height;
     if (g_engine) g_engine->setInputSize(width, height);
     LOGD("Input size: %dx%d", width, height);
 }
