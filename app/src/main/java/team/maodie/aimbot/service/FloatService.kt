@@ -100,7 +100,7 @@ class FloatService : Service() {
 
     // PID auto-aim state
     private var aimOffsetYRatio = 0f; private var aimSwayAmplitude = 0; private var aimPrediction = 0; private var triggerOffsetYRatio = 0f
-    private var kp = 0.30f; private var ki = 0.02f; private var kd = 0.08f
+    private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
     private val aimingState = AimingState()

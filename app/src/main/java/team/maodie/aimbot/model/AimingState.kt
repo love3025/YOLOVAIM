@@ -21,7 +21,11 @@ data class AimingState(
     var prevTargetX: Float = Float.NaN,
     var prevTargetY: Float = Float.NaN,
     var smoothVelX: Float = 0f,
-    var smoothVelY: Float = 0f
+    var smoothVelY: Float = 0f,
+    var derivFilteredX: Float = 0f,
+    var derivFilteredY: Float = 0f,
+    var prevFrameX: Float = 0f,
+    var prevFrameY: Float = 0f
 ) {
     fun updateVelocity(cx: Float, cy: Float) {
         if (!prevTargetX.isNaN()) {
@@ -40,6 +44,8 @@ data class AimingState(
         integralX = 0f; integralY = 0f
         prevTargetX = Float.NaN; prevTargetY = Float.NaN
         smoothVelX = 0f; smoothVelY = 0f
+        derivFilteredX = 0f; derivFilteredY = 0f
+        prevFrameX = 0f; prevFrameY = 0f
         swayTimer = (30..90).random(); swayPulse = 0; swayDir = 0f
     }
 }

@@ -20,9 +20,32 @@ class AimController(
     }
 
     // PID parameters
-    var kp = 0.30f
-    var ki = 0.02f
-    var kd = 0.08f
+    var kp = 0.07f
+    var ki = 0.001f
+    var kd = 0.05f
+
+    // Y-axis gain scaling (prevents vertical oscillation when Kp is high)
+    var kpYRatio = 0.6f
+    var kdYRatio = 0.85f
+
+    // Derivative EMA filter alpha (1.0 = no filter, 0.0 = freeze D term)
+    var derivFilterAlpha = 0.4f
+
+    // Integral separation threshold (in px) — disable Ki above this error magnitude
+    var integralSeparationThresh = 200f
+
+    // Integral clamp (anti-windup). Ki=0.001 is small enough that 100 is fine.
+    private val integralLimit = 100f
+
+    // Velocity damping: subtracts a fraction of the previous frame's move
+    // from the current output. This is the standard "rate feedback" used in
+    // motion control to brake approach velocity and prevent overshoot bounce
+    // on large aim movements. 0.0 = no damping, 0.5 = aggressive damping.
+    var velocityDamping = 0.35f
+
+    // Per-frame output clamp (px). Lower = smoother but slower. 1200 was
+    // 72000 px/s at 60fps — too aggressive, caused large-sweep overshoot.
+    var maxPerFrame = 600f
 
     // Aim settings
     var aimMode = 0 // 0=PID, 1=Bezier
@@ -191,6 +214,10 @@ class AimController(
             aimingState.prevErrorY = 0f
             aimingState.integralX = 0f
             aimingState.integralY = 0f
+            aimingState.derivFilteredX = 0f
+            aimingState.derivFilteredY = 0f
+            aimingState.prevFrameX = aimingState.centerX
+            aimingState.prevFrameY = aimingState.centerY
             touchClient()?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
             aimingState.pointerDown = true
             Log.d(TAG, "aim DOWN at (${aimingState.centerX}, ${aimingState.centerY}) target=($targetX, $targetY)")
@@ -202,26 +229,65 @@ class AimController(
                 Log.d(TAG, "aim converged error=($errorX, $errorY)")
                 return
             }
-            if (errorX * aimingState.prevErrorX <= 0) aimingState.integralX = 0f
-            if (errorY * aimingState.prevErrorY <= 0) aimingState.integralY = 0f
-            aimingState.integralX += errorX
-            aimingState.integralY += errorY
-            val integralLimit = 100f
-            aimingState.integralX = aimingState.integralX.coerceIn(-integralLimit, integralLimit)
-            aimingState.integralY = aimingState.integralY.coerceIn(-integralLimit, integralLimit)
-            val derivX = errorX - aimingState.prevErrorX
-            val derivY = errorY - aimingState.prevErrorY
-            var moveX = errorX * kp + aimingState.integralX * ki + derivX * kd
-            var moveY = errorY * kp + aimingState.integralY * ki + derivY * kd
-            if (aimSwayAmplitude > 0) moveY += computeSway()
+
+            // Integral separation: only accumulate Ki when error is in the controlled band.
+            // Above the threshold the Kp term already drives the response, accumulating
+            // integral would cause overshoot and the vertical-axis oscillation reported by users.
+            val sep = integralSeparationThresh
+            if (Math.abs(errorX) < sep) {
+                if (errorX * aimingState.prevErrorX <= 0) aimingState.integralX = 0f
+                aimingState.integralX += errorX
+                aimingState.integralX = aimingState.integralX.coerceIn(-integralLimit, integralLimit)
+            } else {
+                aimingState.integralX *= 0.5f
+            }
+            if (Math.abs(errorY) < sep) {
+                if (errorY * aimingState.prevErrorY <= 0) aimingState.integralY = 0f
+                aimingState.integralY += errorY
+                aimingState.integralY = aimingState.integralY.coerceIn(-integralLimit, integralLimit)
+            } else {
+                aimingState.integralY *= 0.5f
+            }
+
+            // EMA filter on derivative: detection box jitters frame-to-frame, and raw
+            // dError/dt amplifies that jitter into D-term spikes that drive oscillation.
+            val alpha = derivFilterAlpha
+            val rawDerivX = errorX - aimingState.prevErrorX
+            val rawDerivY = errorY - aimingState.prevErrorY
+            aimingState.derivFilteredX = alpha * rawDerivX + (1f - alpha) * aimingState.derivFilteredX
+            aimingState.derivFilteredY = alpha * rawDerivY + (1f - alpha) * aimingState.derivFilteredY
+
+            // Per-axis gain: Y axis gets reduced Kp/Kd to prevent vertical oscillation
+            // when Kp is high. The touch-injection pipeline and target Y motion both
+            // contribute more noise on the Y axis than X.
+            val kpY = kp * kpYRatio
+            val kdY = kd * kdYRatio
+
+            // Raw PID output
+            var rawX = errorX * kp + aimingState.integralX * ki + aimingState.derivFilteredX * kd
+            var rawY = errorY * kpY + aimingState.integralY * ki + aimingState.derivFilteredY * kdY
+            if (aimSwayAmplitude > 0) rawY += computeSway()
             aimingState.prevErrorX = errorX
             aimingState.prevErrorY = errorY
-            val maxPerFrame = 1200f
-            val moveDist = Math.sqrt((moveX * moveX + moveY * moveY).toDouble()).toFloat()
+
+            // Velocity damping (rate feedback): subtract a fraction of the previous
+            // frame's actual displacement. This is standard motion-control damping —
+            // it brakes the approach velocity as we get near the target and prevents
+            // the overshoot-bounce cycle on large aim sweeps. Works in addition to Kd.
+            val prevVelX = aimingState.centerX - aimingState.prevFrameX
+            val prevVelY = aimingState.centerY - aimingState.prevFrameY
+            rawX -= prevVelX * velocityDamping
+            rawY -= prevVelY * velocityDamping
+
+            val moveDist = Math.sqrt((rawX * rawX + rawY * rawY).toDouble()).toFloat()
+            var moveX = rawX
+            var moveY = rawY
             if (moveDist > maxPerFrame) {
-                moveX = moveX / moveDist * maxPerFrame
-                moveY = moveY / moveDist * maxPerFrame
+                moveX = rawX / moveDist * maxPerFrame
+                moveY = rawY / moveDist * maxPerFrame
             }
+            aimingState.prevFrameX = aimingState.centerX
+            aimingState.prevFrameY = aimingState.centerY
             aimingState.centerX += moveX
             aimingState.centerY += moveY
             if (applyDragSafety()) return

@@ -9,9 +9,9 @@ import team.maodie.aimbot.model.AreaConfig
 
 data class AppConfig(
     var aimbotEnabled: Boolean = false,
-    var speed: Float = 0.15f,
-    var ki: Float = 0.02f,
-    var kd: Float = 0.08f,
+    var speed: Float = 0.07f,
+    var ki: Float = 0.001f,
+    var kd: Float = 0.05f,
     var aimOffsetYRatio: Float = 0f,
     var aimSwayAmplitude: Int = 0,
     var aimPrediction: Int = 0,
@@ -73,9 +73,9 @@ object ConfigManager {
                     val obj = JSONObject(json)
                     config = AppConfig(
                         aimbotEnabled = obj.optBoolean("aimbotEnabled", false),
-                        speed = obj.optDouble("speed", 0.3).toFloat(),
-                        ki = obj.optDouble("ki", 0.02).toFloat(),
-                        kd = obj.optDouble("kd", 0.08).toFloat(),
+                        speed = obj.optDouble("speed", 0.07).toFloat(),
+                        ki = obj.optDouble("ki", 0.001).toFloat(),
+                        kd = obj.optDouble("kd", 0.05).toFloat(),
                         aimOffsetYRatio = obj.optDouble("aimOffsetYRatio", 0.0).toFloat(),
                         aimSwayAmplitude = obj.optInt("aimSwayAmplitude", 0),
                         aimPrediction = obj.optInt("aimPrediction", 0),
