@@ -41,6 +41,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerOffsetYRatioChanged: ((Float) -> Unit)? = null
     var onKiChanged: ((Float) -> Unit)? = null
     var onKdChanged: ((Float) -> Unit)? = null
+    var onKfChanged: ((Float) -> Unit)? = null
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
     var onAimTouchSize: ((Int) -> Unit)? = null
     var onAimHoldEnabled: ((Boolean) -> Unit)? = null
@@ -70,7 +71,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var aimbotEnabled = false; var speed = 0.07f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
     var aimOffsetYRatio = 0f; var aimSwayAmplitude = 0; var aimPrediction = 0
-    var ki = 0.001f; var kd = 0.05f
+    var ki = 0.001f; var kd = 0.05f; var kf = 0.05f
     var aimTouchDisplay = false; var aimTouchSize = 20
     var aimMode = 0; var bezierDuration = 30; var bezierControlOffset = 0.3f; var bezierRandomSpread = 0.1f
     var aimHoldEnabled = false
@@ -244,6 +245,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.1f, "%.3f") { ki = it; onKiChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
             contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.2f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(2)))
+            contentContainer.addView(buildSlider("Kf", kf, 0.0f, 0.2f, "%.2f") { kf = it; onKfChanged?.invoke(it) })
         } else {
             // Bezier controls
             contentContainer.addView(MaterialTextView(context).apply { text = "贝塞尔参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })

@@ -31,8 +31,12 @@ data class AimingState(
         if (!prevTargetX.isNaN()) {
             val rawVx = cx - prevTargetX
             val rawVy = cy - prevTargetY
-            smoothVelX = smoothVelX * 0.7f + rawVx * 0.3f
-            smoothVelY = smoothVelY * 0.7f + rawVy * 0.3f
+            // Dead zone: detection box jitters ±1-2px/frame even on stationary
+            // targets. Below threshold, treat as 0 so KF doesn't amplify jitter.
+            val cleanVx = if (Math.abs(rawVx) < 2f) 0f else rawVx
+            val cleanVy = if (Math.abs(rawVy) < 2f) 0f else rawVy
+            smoothVelX = smoothVelX * 0.7f + cleanVx * 0.3f
+            smoothVelY = smoothVelY * 0.7f + cleanVy * 0.3f
         }
         prevTargetX = cx; prevTargetY = cy
     }
