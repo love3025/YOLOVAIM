@@ -67,10 +67,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onConvergeThreshChanged: ((Int) -> Unit)? = null
     var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
 
-    var aimbotEnabled = false; var speed = 0.3f; var range = 300
+    var aimbotEnabled = false; var speed = 0.07f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
     var aimOffsetYRatio = 0f; var aimSwayAmplitude = 0; var aimPrediction = 0
-    var ki = 0.02f; var kd = 0.08f
+    var ki = 0.001f; var kd = 0.05f
     var aimTouchDisplay = false; var aimTouchSize = 20
     var aimMode = 0; var bezierDuration = 30; var bezierControlOffset = 0.3f; var bezierRandomSpread = 0.1f
     var aimHoldEnabled = false
@@ -239,11 +239,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             // PID controls
             contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
             contentContainer.addView(spacer(dp(4)))
-            contentContainer.addView(buildSlider("Kp", speed, 0.01f, 1.0f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+            contentContainer.addView(buildSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.50f, "%.2f") { ki = it; onKiChanged?.invoke(it) })
+            contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.1f, "%.3f") { ki = it; onKiChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Kd", kd, 0.00f, 1.00f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
+            contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.2f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
         } else {
             // Bezier controls
             contentContainer.addView(MaterialTextView(context).apply { text = "贝塞尔参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
@@ -485,6 +485,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         }
         val valueTv = MaterialTextView(context).apply { text = display(value); textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
         val slider = Slider(context).apply { valueFrom = min; valueTo = max; this.value = value.coerceIn(min, max); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            setLabelFormatter { display(it) }
             addOnChangeListener { _, v, fu -> if (fu) { onChange(v); valueTv.text = display(v) } } }
         return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
