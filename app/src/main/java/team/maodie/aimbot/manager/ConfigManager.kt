@@ -52,7 +52,8 @@ data class AppConfig(
     var autoStopEnabled: Boolean = false,
     var useCpuInference: Boolean = false,
     var cpuThreadCount: Int = 4,
-    var touchMethodIndex: Int = 0  // 0=Uinput, 1=InputManager
+    var touchMethodIndex: Int = 0,  // 0=Uinput, 1=InputManager
+    var kf: Float = 0.05f           // PID feedforward gain (F term, 0.01-0.20)
 )
 
 object ConfigManager {
@@ -116,7 +117,8 @@ object ConfigManager {
                         autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
                         useCpuInference = obj.optBoolean("useCpuInference", false),
                         cpuThreadCount = obj.optInt("cpuThreadCount", 4),
-                        touchMethodIndex = obj.optInt("touchMethodIndex", 0)
+                        touchMethodIndex = obj.optInt("touchMethodIndex", 0),
+                        kf = obj.optDouble("kf", 0.05).toFloat()
                     )
                 }
             }
@@ -175,6 +177,7 @@ object ConfigManager {
                     put("useCpuInference", config.useCpuInference)
                     put("cpuThreadCount", config.cpuThreadCount)
                     put("touchMethodIndex", config.touchMethodIndex)
+                    put("kf", config.kf.toDouble())
                 }
                 file.writeText(obj.toString(2))
             }

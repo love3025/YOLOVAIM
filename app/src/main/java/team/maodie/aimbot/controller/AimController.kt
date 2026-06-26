@@ -47,6 +47,13 @@ class AimController(
     // 72000 px/s at 60fps — too aggressive, caused large-sweep overshoot.
     var maxPerFrame = 600f
 
+    // Feedforward gain (F term). Compensates target velocity before the
+    // position error builds up, reducing lag on moving targets. 0.0 = pure PID.
+    // Y axis uses a reduced ratio to avoid amplifying vertical jitter.
+    var kf = 0.05f
+    private val kfYRatio = 0.7f
+    private val kfGain = 2.5f  // internal amplifier: maps slider kf=0.2 to effective 0.5 lead
+
     // Aim settings
     var aimMode = 0 // 0=PID, 1=Bezier
     var bezierDuration = 30
@@ -218,6 +225,10 @@ class AimController(
             aimingState.derivFilteredY = 0f
             aimingState.prevFrameX = aimingState.centerX
             aimingState.prevFrameY = aimingState.centerY
+            aimingState.prevTargetX = Float.NaN
+            aimingState.prevTargetY = Float.NaN
+            aimingState.smoothVelX = 0f
+            aimingState.smoothVelY = 0f
             touchClient()?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
             aimingState.pointerDown = true
             Log.d(TAG, "aim DOWN at (${aimingState.centerX}, ${aimingState.centerY}) target=($targetX, $targetY)")
@@ -266,6 +277,16 @@ class AimController(
             // Raw PID output
             var rawX = errorX * kp + aimingState.integralX * ki + aimingState.derivFilteredX * kd
             var rawY = errorY * kpY + aimingState.integralY * ki + aimingState.derivFilteredY * kdY
+
+            // Feedforward (F term): apply target velocity directly to output so the
+            // aim cursor leads a moving target instead of always chasing the lag.
+            // smoothVelX/Y is EMA-filtered in FloatService via AimingState.updateVelocity.
+            // kfGain amplifies the slider value so kf=0.2 produces ~60% lead (visible
+            // at typical 5-20 px/frame target speeds). Without it, kf * velocity is
+            // 1-2 px/frame and gets drowned out by Kp*error.
+            rawX += aimingState.smoothVelX * kf * kfGain
+            rawY += aimingState.smoothVelY * kf * kfGain * kfYRatio
+
             if (aimSwayAmplitude > 0) rawY += computeSway()
             aimingState.prevErrorX = errorX
             aimingState.prevErrorY = errorY

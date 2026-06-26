@@ -100,7 +100,7 @@ class FloatService : Service() {
 
     // PID auto-aim state
     private var aimOffsetYRatio = 0f; private var aimSwayAmplitude = 0; private var aimPrediction = 0; private var triggerOffsetYRatio = 0f
-    private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f
+    private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f; private var kf = 0.05f
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
     private val aimingState = AimingState()
@@ -210,6 +210,7 @@ class FloatService : Service() {
         aimController.kp = kp
         aimController.ki = ki
         aimController.kd = kd
+        aimController.kf = kf
         aimController.aimMode = aimMode
         aimController.bezierDuration = bezierDuration
         aimController.bezierControlOffset = bezierControlOffset
@@ -263,7 +264,7 @@ class FloatService : Service() {
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
-        ki = cfg.ki; kd = cfg.kd
+        ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
         aimMode = cfg.aimMode
         bezierDuration = cfg.bezierDuration
         bezierControlOffset = cfg.bezierControlOffset
@@ -694,7 +695,7 @@ class FloatService : Service() {
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
         guiPanel.aimPrediction = cfg.aimPrediction
         guiPanel.triggerOffsetYRatio = cfg.triggerOffsetYRatio
-        guiPanel.ki = cfg.ki; guiPanel.kd = cfg.kd
+        guiPanel.ki = cfg.ki; guiPanel.kd = cfg.kd; guiPanel.kf = cfg.kf
         guiPanel.aimMode = cfg.aimMode
         guiPanel.bezierDuration = cfg.bezierDuration
         guiPanel.bezierControlOffset = cfg.bezierControlOffset
@@ -752,6 +753,7 @@ class FloatService : Service() {
         guiPanel.onTriggerOffsetYRatioChanged = { triggerOffsetYRatio = it; triggerController.triggerOffsetYRatio = it; ConfigManager.updateConfig { triggerOffsetYRatio = it } }
         guiPanel.onKiChanged = { ki = it; guiPanel.ki = it; aimController.ki = it; ConfigManager.updateConfig { ki = it } }
         guiPanel.onKdChanged = { kd = it; guiPanel.kd = it; aimController.kd = it; ConfigManager.updateConfig { kd = it } }
+        guiPanel.onKfChanged = { kf = it; guiPanel.kf = it; aimController.kf = it; ConfigManager.updateConfig { kf = it } }
         guiPanel.onAimModeChanged = { aimMode = it; aimController.aimMode = it; ConfigManager.updateConfig { aimMode = it } }
         guiPanel.onBezierDurationChanged = { bezierDuration = it; aimController.bezierDuration = it; ConfigManager.updateConfig { bezierDuration = it } }
         guiPanel.onBezierControlOffsetChanged = { bezierControlOffset = it; aimController.bezierControlOffset = it; ConfigManager.updateConfig { bezierControlOffset = it } }
@@ -1004,6 +1006,7 @@ class FloatService : Service() {
                                 val classBoxRatio = aimController.classBoxAimRatios[target.classId] ?: aimController.boxAimRatio
                                 val aimX = tcx
                                 val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
+                                aimController.aimingState.updateVelocity(tcx, tcy)
                                 aimController.executeAiming(aimX, aimY, centerX, centerY)
                             }
                         }
