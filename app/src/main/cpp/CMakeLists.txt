@@ -136,3 +136,85 @@ target_link_libraries(aimbot
         android
         log)
 target_include_directories(aimbot PRIVATE ${NCNN_INCLUDE_DIR})
+
+# -----------------------------------------------------------------------------
+# AimSvc: vendored Shizuku starter + adb pairing (invisible to external detection)
+# -----------------------------------------------------------------------------
+# Spawned via "adb shell /data/local/tmp/libaimbot_svc.so --apk=<apk_path>" from the
+# host app. Process name is "aimbot_svc" (not "shizuku_server"). Runs as adb shell
+# (uid 2000), forks+execs app_process to run the Java service.
+# io.github.vvb2060.ndk:boringssl ships prebuilt static libs via prefab, but the
+# AAR does not include a *Config.cmake so find_package() fails. We import the .a
+# files directly from the Gradle transforms cache instead.
+if (DEFINED ENV{GRADLE_USER_HOME})
+    set(GRADLE_USER_HOME_DIR "$ENV{GRADLE_USER_HOME}")
+elseif (DEFINED ENV{USERPROFILE})
+    set(GRADLE_USER_HOME_DIR "$ENV{USERPROFILE}/.gradle")
+elseif (DEFINED ENV{HOME})
+    set(GRADLE_USER_HOME_DIR "$ENV{HOME}/.gradle")
+else()
+    set(GRADLE_USER_HOME_DIR "$ENV{HOME}/.gradle")
+endif()
+
+file(GLOB boringssl_module_dirs LIST_DIRECTORIES TRUE
+    "${GRADLE_USER_HOME_DIR}/caches/8.11.1/transforms/*/transformed/boringssl-*/prefab/modules")
+if (NOT boringssl_module_dirs)
+    message(FATAL_ERROR "boringssl prefab module dir not found under ${GRADLE_USER_HOME_DIR}/caches/8.11.1/transforms/")
+endif()
+list(GET boringssl_module_dirs 0 BORINGSSL_PREFAB_ROOT)
+
+add_library(crypto_static STATIC IMPORTED)
+set_target_properties(crypto_static PROPERTIES
+    IMPORTED_LOCATION "${BORINGSSL_PREFAB_ROOT}/crypto_static/libs/android.${ANDROID_ABI}/libcrypto_static.a")
+set(BORINGSSL_INCLUDE_DIR "${BORINGSSL_PREFAB_ROOT}/crypto_static/include" CACHE PATH "")
+
+add_library(ssl_static STATIC IMPORTED)
+set_target_properties(ssl_static PROPERTIES
+    IMPORTED_LOCATION "${BORINGSSL_PREFAB_ROOT}/ssl_static/libs/android.${ANDROID_ABI}/libssl_static.a")
+
+# libcxx: just import the .a — we don't import its include path because the
+# libcxx C++ wrappers for <stdint.h>/<stddef.h> use __has_include_next chains
+# that break against the NDK 27 toolchain include layout (the parent
+# ${SYSROOT}/usr/include/ is not "next" relative to c++/v1/, so the wrappers
+# never reach the C header that defines uint32_t / size_t). Linking libcxx.a
+# is enough — we get the C++ ABI symbols we need.
+file(GLOB libcxx_module_dirs LIST_DIRECTORIES TRUE
+    "${GRADLE_USER_HOME_DIR}/caches/8.11.1/transforms/*/transformed/libcxx-*/prefab/modules")
+if (NOT libcxx_module_dirs)
+    message(FATAL_ERROR "libcxx prefab module dir not found under ${GRADLE_USER_HOME_DIR}/caches/8.11.1/transforms/")
+endif()
+list(GET libcxx_module_dirs 0 LIBCXX_PREFAB_ROOT)
+
+add_library(cxx STATIC IMPORTED)
+set_target_properties(cxx PROPERTIES
+    IMPORTED_LOCATION "${LIBCXX_PREFAB_ROOT}/cxx/libs/android.${ANDROID_ABI}/libcxx.a")
+add_library(cxx::cxx ALIAS cxx)
+
+add_library(aimbot_svc_pair SHARED
+    src/svc/aimsvc_pair.cpp
+    src/svc/misc.cpp
+)
+target_include_directories(aimbot_svc_pair PRIVATE
+    "${BORINGSSL_INCLUDE_DIR}"
+    "${BORINGSSL_PREFAB_ROOT}/ssl_static/include")
+target_link_libraries(aimbot_svc_pair
+    crypto_static
+    ssl_static
+    android
+    log)
+
+add_executable(aimbot_svc_starter
+    src/svc/aimsvc_starter.cpp
+    src/svc/selinux.cpp
+    src/svc/cgroup.cpp
+    src/svc/android.cpp
+    src/svc/helper.cpp
+    src/svc/misc.cpp
+)
+target_include_directories(aimbot_svc_starter PRIVATE src/injection)
+target_link_libraries(aimbot_svc_starter
+    android
+    log)
+set_target_properties(aimbot_svc_starter PROPERTIES
+    OUTPUT_NAME "libaimbot_svc.so"
+)

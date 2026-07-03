@@ -12,6 +12,7 @@ static std::unique_ptr<InferenceEngine> g_engine;
 static bool g_force_cpu = false;
 static int g_cpu_threads = 1;
 static int g_input_size = 256;
+static int g_output_format = 0;
 
 //==============================================================================
 //  Init
@@ -32,6 +33,7 @@ Java_team_maodie_aimbot_inference_JniCallBack_init(JNIEnv* env, jobject, jstring
         g_engine->setForceCpu(g_force_cpu);
         g_engine->setCpuThreads(g_cpu_threads);
         g_engine->setInputSize(g_input_size, g_input_size);
+        g_engine->setOutputFormat(g_output_format);
     } else if (g_force_cpu) {
         // Force CPU: skip MTK NPU and LiteRT hardware delegates, use CPU only
         LOGD("Force CPU enabled, skipping NPU/GPU, using CPU only");
@@ -39,9 +41,11 @@ Java_team_maodie_aimbot_inference_JniCallBack_init(JNIEnv* env, jobject, jstring
         g_engine->setForceCpu(true);
         g_engine->setCpuThreads(g_cpu_threads);
         g_engine->setInputSize(g_input_size, g_input_size);
+        g_engine->setOutputFormat(g_output_format);
     } else {
         // Fallback chain: MTK NPU → LiteRT (QNN HTP → GPU → CPU)
         g_engine = std::make_unique<MtkEngine>();
+        g_engine->setOutputFormat(g_output_format);
         if (g_engine->init(path)) {
             env->ReleaseStringUTFChars(model_path, path);
             return JNI_TRUE;
@@ -51,6 +55,7 @@ Java_team_maodie_aimbot_inference_JniCallBack_init(JNIEnv* env, jobject, jstring
         g_engine = std::make_unique<LiteRtEngine>();
         g_engine->setCpuThreads(g_cpu_threads);
         g_engine->setInputSize(g_input_size, g_input_size);
+        g_engine->setOutputFormat(g_output_format);
     }
 
     bool ok = g_engine->init(path);
@@ -143,6 +148,14 @@ Java_team_maodie_aimbot_inference_JniCallBack_setInputSize(JNIEnv*, jobject, jin
     g_input_size = (width > 0) ? width : height;
     if (g_engine) g_engine->setInputSize(width, height);
     LOGD("Input size: %dx%d", width, height);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_team_maodie_aimbot_inference_JniCallBack_setOutputFormat(JNIEnv*, jobject, jint format) {
+    g_output_format = format;
+    if (g_engine) g_engine->setOutputFormat(format);
+    LOGD("Output format: %s", format == 1 ? "xyxy" : "cxcywh");
 }
 
 //==============================================================================

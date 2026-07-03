@@ -52,5 +52,8 @@ object JniCallBack {
 
     external fun setInputSize(width: Int, height: Int)
 
+    /** bbox output layout: 0 = cxcywh (Dawan / valorant / local NPU), 1 = xyxy (ultralytics / website export) */
+    external fun setOutputFormat(format: Int)
+
     external fun release()
 }

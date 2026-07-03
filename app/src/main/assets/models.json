@@ -55,6 +55,25 @@
       "classes": {"0": "body", "1": "head"}
     },
     {
+      "filename": "codm_256_v26s_int8.tflite",
+      "displayName": "CODM 256 V26s (INT8)",
+      "precision": "INT8",
+      "inputSize": 256,
+      "outputSize": 1344,
+      "description": "yolov26s",
+      "classes": {"0": "body", "1": "friendly"},
+      "outputFormat": "xyxy"
+    },
+    {
+      "filename": "best_raw_full_integer_quant.tflite",
+      "displayName": "CODM 256 V3 (INT8 全整型)",
+      "precision": "INT8",
+      "inputSize": 256,
+      "outputSize": 1344,
+      "description": "yolov26s",
+      "classes": {"0": "body", "1": "friendly"}
+    },
+    {
       "filename": "Dawan_0121_v11s_256_float32.tflite",
       "displayName": "大碗三角洲 256 (Float32)",
       "precision": "FLOAT32",
@@ -69,6 +88,15 @@
       "precision": "FLOAT32",
       "inputSize": 320,
       "outputSize": 2100,
+      "description": "yolov11s",
+      "classes": {"0": "body", "1": "head", "2": "friendly", "3": "item", "4": "infrared", "5": "range_body", "6": "range_head"}
+    },
+    {
+      "filename": "Dawan_0121_v11s_256_int8.tflite",
+      "displayName": "大碗三角洲 256 (INT8)",
+      "precision": "INT8",
+      "inputSize": 256,
+      "outputSize": 1344,
       "description": "yolov11s",
       "classes": {"0": "body", "1": "head", "2": "friendly", "3": "item", "4": "infrared", "5": "range_body", "6": "range_head"}
     }

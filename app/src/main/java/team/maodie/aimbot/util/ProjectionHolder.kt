@@ -19,7 +19,9 @@ object ProjectionHolder {
         val inputSize: Int,
         val outputSize: Int,
         val description: String,
-        val classes: Map<Int, String> = emptyMap()
+        val classes: Map<Int, String> = emptyMap(),
+        /** bbox output layout: "cxcywh" (default) or "xyxy" */
+        val outputFormat: String = "cxcywh"
     )
 
     var modelList: List<ModelEntry> = emptyList()

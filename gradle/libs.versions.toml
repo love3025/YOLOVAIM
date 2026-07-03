@@ -11,6 +11,15 @@ activity = "1.10.1"
 constraintlayout = "2.2.1"
 onnxruntime = "1.17.1"
 tflite = "2.14.0"
+shizukuApi = "13.1.5"
+hiddenApi = "4.4.0"
+parcelablelist = "2.0.1"
+gson = "2.13.1"
+hiddenapibypass = "6.1"
+bouncycastle = "1.80"
+conscrypt = "2.5.2"
+boringssl = "20250114"
+libcxx = "27.0.12077973"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -24,6 +33,18 @@ androidx-constraintlayout = { group = "androidx.constraintlayout", name = "const
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 tensorflow-lite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tflite" }
 tensorflow-lite-gpu = { group = "org.tensorflow", name = "tensorflow-lite-gpu", version.ref = "tflite" }
+shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizukuApi" }
+shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizukuApi" }
+rikka-hidden-compat = { group = "dev.rikka.hidden", name = "compat", version.ref = "hiddenApi" }
+rikka-hidden-stub = { group = "dev.rikka.hidden", name = "stub", version.ref = "hiddenApi" }
+rikka-parcelablelist = { group = "dev.rikka.rikkax.parcelablelist", name = "parcelablelist", version.ref = "parcelablelist" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+hiddenapibypass = { group = "org.lsposed.hiddenapibypass", name = "hiddenapibypass", version.ref = "hiddenapibypass" }
+bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncycastle" }
+conscrypt-android = { group = "org.conscrypt", name = "conscrypt-android", version.ref = "conscrypt" }
+boringssl = { group = "io.github.vvb2060.ndk", name = "boringssl", version.ref = "boringssl" }
+lsposed-libcxx = { group = "org.lsposed.libcxx", name = "libcxx", version.ref = "libcxx" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version = "2.9.0" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

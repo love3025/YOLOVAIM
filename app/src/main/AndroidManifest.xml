@@ -4,11 +4,24 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.VIRTUAL_INPUT_DEVICE" />
     <uses-permission android:name="android.permission.INJECT_EVENTS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <!-- Vendored AimSvc (embedded Shizuku) server-side permission; checked by the
+         adb-uid service process when a client attaches. Signature-level so only this
+         APK can satisfy it. -->
+    <permission
+        android:name="team.maodie.aimbot.permission.AIMBOT_API"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="team.maodie.aimbot.permission.AIMBOT_API" />
 
     <application
         android:allowBackup="true"
@@ -38,13 +51,18 @@
             android:enableOnBackInvokedCallback="true"
             android:exported="false" />
 
-        <!-- Shizuku provider -->
+        <!-- Vendored AimSvc provider. The AimSvc server (running under adb shell)
+             delivers its binder into this provider via call("sendBinder", ...).
+             The provider authority is .aimbot_svc (not .shizuku) so external apps
+             cannot enumerate it. -->
         <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
+            android:name="team.maodie.aimbot.svc.client.AimSvcProvider"
+            android:authorities="${applicationId}.aimbot_svc"
+            android:directBootAware="true"
             android:enabled="true"
             android:exported="true"
-            android:multiprocess="false" />
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <service
             android:name=".service.FloatService"
@@ -52,6 +70,17 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:enabled="true"
             android:exported="false" />
+
+        <!-- Foreground service that runs mDNS discovery + SPAKE2 pairing flow for
+             the embedded AimSvc. Started from Settings UI. -->
+        <service
+            android:name="team.maodie.aimbot.svc.PairingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="adb_pairing" />
+        </service>
 
         <!-- Qualcomm QNN HTP DSP -->
         <uses-native-library android:name="libcdsprpc.so" android:required="false" />

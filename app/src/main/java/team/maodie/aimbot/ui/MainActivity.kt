@@ -31,6 +31,7 @@ import org.json.JSONObject
 import team.maodie.aimbot.manager.ConfigManager
 import team.maodie.aimbot.inference.JniCallBack
 import team.maodie.aimbot.model.TouchMethod
+import team.maodie.aimbot.svc.AimSvcHolder
 import team.maodie.aimbot.util.ProjectionHolder
 import team.maodie.aimbot.service.FloatService
 import team.maodie.aimbot.R
@@ -56,7 +57,8 @@ class MainActivity : AppCompatActivity() {
         val inputSize: Int,
         val outputSize: Int,
         val description: String,
-        val classes: Map<Int, String> = emptyMap()
+        val classes: Map<Int, String> = emptyMap(),
+        val outputFormat: String = "cxcywh"
     )
 
     private var modelList: List<ModelInfo> = emptyList()
@@ -114,7 +116,7 @@ class MainActivity : AppCompatActivity() {
             ProjectionHolder.resultCode = result.resultCode
             ProjectionHolder.resultData = data
             ProjectionHolder.modelList = modelList.map { m ->
-                ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description, m.classes)
+                ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description, m.classes, m.outputFormat)
             }
             ProjectionHolder.selectedModelIndex = selectedModelIndex
             ProjectionHolder.selectedTouchMethod = selectedTouchMethod
@@ -158,6 +160,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ConfigManager.init(this)
+        AimSvcHolder.bootstrap(this)
         selectedTouchMethod = TouchMethod.entries[ConfigManager.getConfig().touchMethodIndex.coerceIn(0, TouchMethod.entries.size - 1)]
         loadModelsFromJson()
         val cfgModelIndex = ConfigManager.getConfig().modelIndex
@@ -1051,7 +1054,8 @@ class MainActivity : AppCompatActivity() {
                     inputSize = model.getInt("inputSize"),
                     outputSize = model.getInt("outputSize"),
                     description = model.getString("description"),
-                    classes = classesMap
+                    classes = classesMap,
+                    outputFormat = model.optString("outputFormat", "cxcywh")
                 )
             }
 
@@ -1093,6 +1097,8 @@ class MainActivity : AppCompatActivity() {
             val cfg = ConfigManager.getConfig()
             JniCallBack.setForceCpu(cfg.useCpuInference)
             JniCallBack.setCpuThreads(cfg.cpuThreadCount)
+            val modelEntry = modelList.find { it.filename == filename }
+            JniCallBack.setOutputFormat(if (modelEntry?.outputFormat == "xyxy") 1 else 0)
             val success = JniCallBack.init(modelFile.absolutePath)
             if (success) {
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()
@@ -1168,6 +1174,7 @@ class MainActivity : AppCompatActivity() {
             val cfg2 = ConfigManager.getConfig()
             JniCallBack.setForceCpu(cfg2.useCpuInference)
             JniCallBack.setCpuThreads(cfg2.cpuThreadCount)
+            JniCallBack.setOutputFormat(if (defaultModel.outputFormat == "xyxy") 1 else 0)
             val ok = JniCallBack.init(modelFile.absolutePath)
             if (ok) {
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()

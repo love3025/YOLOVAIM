@@ -2,12 +2,14 @@ package team.maodie.aimbot.service
 
 import android.content.Context
 import android.util.Log
+import team.maodie.aimbot.injector.EmbeddedShizukuInjectorClient
 import team.maodie.aimbot.injector.InjectorCallback
 import team.maodie.aimbot.injector.InputManagerInjectorClient
 import team.maodie.aimbot.injector.RootInjectorClient
 import team.maodie.aimbot.injector.ShizukuInjectorClient
 import team.maodie.aimbot.injector.TouchInjectorInterface
 import team.maodie.aimbot.model.TouchMethod
+import team.maodie.aimbot.svc.AimSvcHolder
 import team.maodie.aimbot.util.ProjectionHolder
 
 class TouchService(private val context: Context) : TouchInjectorInterface {
@@ -69,6 +71,18 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     }
 
     private fun connectUinput(callback: InjectorCallback) {
+        // 1. 内嵌 AimSvc（无线调试路径）—— 优先
+        if (AimSvcHolder.state is AimSvcHolder.State.Running) {
+            try {
+                val embedded = EmbeddedShizukuInjectorClient(context)
+                embedded.connect(callbackFor(embedded, callback, "Embedded AimSvc"))
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "Embedded AimSvc init failed, fallback: ${e.message}")
+            }
+        }
+
+        // 2. Root
         try {
             val rootClient = RootInjectorClient(context)
             rootClient.connect(object : InjectorCallback {
@@ -84,6 +98,7 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
                 }
                 override fun onError(msg: String) {
                     Log.d(TAG, "Root not available ($msg), trying Shizuku...")
+                    // 3. 外部 Shizuku
                     try {
                         val shizukuClient = ShizukuInjectorClient(context)
                         shizukuClient.connect(object : InjectorCallback {
@@ -100,7 +115,7 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
                             override fun onError(msg2: String) {
                                 Log.e(TAG, "Shizuku also failed: $msg2")
                                 updateState(ConnectionState.ERROR)
-                                callback.onError("Both root and Shizuku failed")
+                                callback.onError("All touch methods failed")
                             }
                         })
                     } catch (e: Exception) {
@@ -113,6 +128,28 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
         } catch (e: Exception) {
             Log.e(TAG, "Root init failed: ${e.message}")
             callback.onError("Root init failed: ${e.message}")
+        }
+    }
+
+    private fun callbackFor(
+        client: TouchInjectorInterface,
+        outer: InjectorCallback,
+        label: String
+    ): InjectorCallback = object : InjectorCallback {
+        override fun onConnected() {
+            delegate = client
+            updateState(ConnectionState.CONNECTED)
+            outer.onConnected()
+        }
+        override fun onDisconnected() {
+            delegate = null
+            updateState(ConnectionState.DISCONNECTED)
+            outer.onDisconnected()
+        }
+        override fun onError(msg: String) {
+            Log.e(TAG, "$label failed: $msg")
+            updateState(ConnectionState.ERROR)
+            outer.onError(msg)
         }
     }
 

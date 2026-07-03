@@ -102,6 +102,8 @@ class InferenceManager(
             Log.d(TAG, "loadModel: useCpuInference=$useCpu, threads=${cfg.cpuThreadCount}")
             JniCallBack.setForceCpu(useCpu)
             JniCallBack.setCpuThreads(cfg.cpuThreadCount)
+            val entry = ProjectionHolder.modelList.find { it.filename == filename }
+            JniCallBack.setOutputFormat(if (entry?.outputFormat == "xyxy") 1 else 0)
             if (JniCallBack.init(modelFile.absolutePath)) {
                 val backend = JniCallBack.getBackend()
                 Log.d(TAG, "模型切换成功: $filename, 后端=$backend")

@@ -131,14 +131,15 @@ bool LiteRtEngine::init(const char* model_path) {
             int dim2 = TfLiteTensorDim(input_tensor, 2);
             if (ndim >= 4) {
                 int dim3 = TfLiteTensorDim(input_tensor, 3);
+                // NHWC: [1, H, W, C=3]; NCHW: [1, C=3, H, W]
                 if (dim3 == 3 && dim1 != 3) {
                     m_input_nhwc = true;
                     m_input_height = dim1;
                     m_input_width = dim2;
                 } else {
                     m_input_nhwc = false;
-                    m_input_height = dim1;
-                    m_input_width = dim2;
+                    m_input_height = dim2;
+                    m_input_width = dim3;
                 }
             } else {
                 m_input_nhwc = false;
@@ -218,14 +219,28 @@ std::vector<Detection> LiteRtEngine::detect(
         float input_scale = qp_input.scale;
         int input_zero_point = qp_input.zero_point;
 
-        for (int y = 0; y < H; ++y) {
-            int baseRow = srcY_lut[y] * rowStride;
-            for (int x = 0; x < W; ++x) {
-                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
-                int idx = (y * W + x) * 3;
-                data[idx + 0] = (int8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
-                data[idx + 1] = (int8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
-                data[idx + 2] = (int8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+        if (m_input_nhwc) {
+            for (int y = 0; y < H; ++y) {
+                int baseRow = srcY_lut[y] * rowStride;
+                for (int x = 0; x < W; ++x) {
+                    int srcIdx = baseRow + srcX_lut[x] * pixelStride;
+                    int idx = (y * W + x) * 3;
+                    data[idx + 0] = (int8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
+                    data[idx + 1] = (int8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
+                    data[idx + 2] = (int8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+                }
+            }
+        } else {
+            int planeSize = H * W;
+            for (int y = 0; y < H; ++y) {
+                int baseRow = srcY_lut[y] * rowStride;
+                for (int x = 0; x < W; ++x) {
+                    int srcIdx = baseRow + srcX_lut[x] * pixelStride;
+                    int hwIdx = y * W + x;
+                    data[0 * planeSize + hwIdx] = (int8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
+                    data[1 * planeSize + hwIdx] = (int8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
+                    data[2 * planeSize + hwIdx] = (int8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+                }
             }
         }
     } else if (input_type == kTfLiteUInt8) {
@@ -233,26 +248,54 @@ std::vector<Detection> LiteRtEngine::detect(
         float input_scale = qp_input.scale;
         int input_zero_point = qp_input.zero_point;
 
-        for (int y = 0; y < H; ++y) {
-            int baseRow = srcY_lut[y] * rowStride;
-            for (int x = 0; x < W; ++x) {
-                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
-                int idx = (y * W + x) * 3;
-                data[idx + 0] = (uint8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
-                data[idx + 1] = (uint8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
-                data[idx + 2] = (uint8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+        if (m_input_nhwc) {
+            for (int y = 0; y < H; ++y) {
+                int baseRow = srcY_lut[y] * rowStride;
+                for (int x = 0; x < W; ++x) {
+                    int srcIdx = baseRow + srcX_lut[x] * pixelStride;
+                    int idx = (y * W + x) * 3;
+                    data[idx + 0] = (uint8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
+                    data[idx + 1] = (uint8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
+                    data[idx + 2] = (uint8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+                }
+            }
+        } else {
+            int planeSize = H * W;
+            for (int y = 0; y < H; ++y) {
+                int baseRow = srcY_lut[y] * rowStride;
+                for (int x = 0; x < W; ++x) {
+                    int srcIdx = baseRow + srcX_lut[x] * pixelStride;
+                    int hwIdx = y * W + x;
+                    data[0 * planeSize + hwIdx] = (uint8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
+                    data[1 * planeSize + hwIdx] = (uint8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
+                    data[2 * planeSize + hwIdx] = (uint8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+                }
             }
         }
     } else {
         float* data = static_cast<float*>(input_data);
-        for (int y = 0; y < H; ++y) {
-            int baseRow = srcY_lut[y] * rowStride;
-            for (int x = 0; x < W; ++x) {
-                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
-                int idx = (y * W + x) * 3;
-                data[idx + 0] = src[srcIdx + 0] * inv255;
-                data[idx + 1] = src[srcIdx + 1] * inv255;
-                data[idx + 2] = src[srcIdx + 2] * inv255;
+        if (m_input_nhwc) {
+            for (int y = 0; y < H; ++y) {
+                int baseRow = srcY_lut[y] * rowStride;
+                for (int x = 0; x < W; ++x) {
+                    int srcIdx = baseRow + srcX_lut[x] * pixelStride;
+                    int idx = (y * W + x) * 3;
+                    data[idx + 0] = src[srcIdx + 0] * inv255;
+                    data[idx + 1] = src[srcIdx + 1] * inv255;
+                    data[idx + 2] = src[srcIdx + 2] * inv255;
+                }
+            }
+        } else {
+            int planeSize = H * W;
+            for (int y = 0; y < H; ++y) {
+                int baseRow = srcY_lut[y] * rowStride;
+                for (int x = 0; x < W; ++x) {
+                    int srcIdx = baseRow + srcX_lut[x] * pixelStride;
+                    int hwIdx = y * W + x;
+                    data[0 * planeSize + hwIdx] = src[srcIdx + 0] * inv255;
+                    data[1 * planeSize + hwIdx] = src[srcIdx + 1] * inv255;
+                    data[2 * planeSize + hwIdx] = src[srcIdx + 2] * inv255;
+                }
             }
         }
     }
@@ -281,7 +324,7 @@ std::vector<Detection> LiteRtEngine::detect(
     void* output_data = const_cast<void*>(TfLiteTensorData(output_tensor));
     TfLiteQuantizationParams qp_output = TfLiteTensorQuantizationParams(output_tensor);
 
-    // Auto-detect bbox format
+    // Auto-detect bbox format (only used for cxcywh path)
     auto normalizeIfNeeded = [this](float cx, float cy, float bw, float bh,
                                      float& ncx, float& ncy, float& nbw, float& nbh) {
         if (cx > 1.5f || cy > 1.5f) {
@@ -299,16 +342,26 @@ std::vector<Detection> LiteRtEngine::detect(
         int out_zp = qp_output.zero_point;
 
         for (int i = 0; i < m_num_outputs; ++i) {
-            float cx_raw = (data[i] - out_zp) * out_scale;
-            float cy_raw = (data[m_num_outputs + i] - out_zp) * out_scale;
-            float bw_raw = (data[2 * m_num_outputs + i] - out_zp) * out_scale;
-            float bh_raw = (data[3 * m_num_outputs + i] - out_zp) * out_scale;
-            float cx, cy, bw, bh;
-            normalizeIfNeeded(cx_raw, cy_raw, bw_raw, bh_raw, cx, cy, bw, bh);
+            float v0 = (data[i] - out_zp) * out_scale;
+            float v1 = (data[m_num_outputs + i] - out_zp) * out_scale;
+            float v2 = (data[2 * m_num_outputs + i] - out_zp) * out_scale;
+            float v3 = (data[3 * m_num_outputs + i] - out_zp) * out_scale;
+
+            float x1, y1, x2, y2;
+            if (m_output_format == 1) {
+                // xyxy: use channels directly
+                x1 = v0; y1 = v1; x2 = v2; y2 = v3;
+            } else {
+                // cxcywh: auto-detect pixel vs normalized space
+                float cx, cy, bw, bh;
+                normalizeIfNeeded(v0, v1, v2, v3, cx, cy, bw, bh);
+                float hw = bw * 0.5f, hh = bh * 0.5f;
+                x1 = cx - hw; y1 = cy - hh;
+                x2 = cx + hw; y2 = cy + hh;
+            }
 
             float score;
             int classId = 0;
-
             if (m_num_classes <= 1) {
                 score = (data[4 * m_num_outputs + i] - out_zp) * out_scale;
             } else {
@@ -323,15 +376,16 @@ std::vector<Detection> LiteRtEngine::detect(
             }
 
             if (score < m_conf_thresh) continue;
-            if (bw <= 0 || bh <= 0) continue;
-            if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
+            float w = x2 - x1, h = y2 - y1;
+            if (w <= 0 || h <= 0) continue;
+            if (x1 < 0 || x1 > 1 || y1 < 0 || y1 > 1) continue;
+            if (x2 < 0 || x2 > 1 || y2 < 0 || y2 > 1) continue;
 
-            float hw = bw * 0.5f, hh = bh * 0.5f;
             detections.push_back({
-                (offsetX + (cx - hw) * regionWidth) * invW,
-                (offsetY + (cy - hh) * regionHeight) * invH,
-                (offsetX + (cx + hw) * regionWidth) * invW,
-                (offsetY + (cy + hh) * regionHeight) * invH,
+                (offsetX + x1 * regionWidth) * invW,
+                (offsetY + y1 * regionHeight) * invH,
+                (offsetX + x2 * regionWidth) * invW,
+                (offsetY + y2 * regionHeight) * invH,
                 score,
                 (float)classId
             });
@@ -340,16 +394,24 @@ std::vector<Detection> LiteRtEngine::detect(
         float* data = static_cast<float*>(output_data);
 
         for (int i = 0; i < m_num_outputs; ++i) {
-            float cx_raw = data[i];
-            float cy_raw = data[m_num_outputs + i];
-            float bw_raw = data[2 * m_num_outputs + i];
-            float bh_raw = data[3 * m_num_outputs + i];
-            float cx, cy, bw, bh;
-            normalizeIfNeeded(cx_raw, cy_raw, bw_raw, bh_raw, cx, cy, bw, bh);
+            float v0 = data[i];
+            float v1 = data[m_num_outputs + i];
+            float v2 = data[2 * m_num_outputs + i];
+            float v3 = data[3 * m_num_outputs + i];
+
+            float x1, y1, x2, y2;
+            if (m_output_format == 1) {
+                x1 = v0; y1 = v1; x2 = v2; y2 = v3;
+            } else {
+                float cx, cy, bw, bh;
+                normalizeIfNeeded(v0, v1, v2, v3, cx, cy, bw, bh);
+                float hw = bw * 0.5f, hh = bh * 0.5f;
+                x1 = cx - hw; y1 = cy - hh;
+                x2 = cx + hw; y2 = cy + hh;
+            }
 
             float score;
             int classId = 0;
-
             if (m_num_classes <= 1) {
                 score = data[4 * m_num_outputs + i];
             } else {
@@ -364,15 +426,16 @@ std::vector<Detection> LiteRtEngine::detect(
             }
 
             if (score < m_conf_thresh) continue;
-            if (bw <= 0 || bh <= 0) continue;
-            if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
+            float w = x2 - x1, h = y2 - y1;
+            if (w <= 0 || h <= 0) continue;
+            if (x1 < 0 || x1 > 1 || y1 < 0 || y1 > 1) continue;
+            if (x2 < 0 || x2 > 1 || y2 < 0 || y2 > 1) continue;
 
-            float hw = bw * 0.5f, hh = bh * 0.5f;
             detections.push_back({
-                (offsetX + (cx - hw) * regionWidth) * invW,
-                (offsetY + (cy - hh) * regionHeight) * invH,
-                (offsetX + (cx + hw) * regionWidth) * invW,
-                (offsetY + (cy + hh) * regionHeight) * invH,
+                (offsetX + x1 * regionWidth) * invW,
+                (offsetY + y1 * regionHeight) * invH,
+                (offsetX + x2 * regionWidth) * invW,
+                (offsetY + y2 * regionHeight) * invH,
                 score,
                 (float)classId
             });

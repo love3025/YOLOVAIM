@@ -28,6 +28,7 @@ public:
     }
     virtual void setForceCpu(bool force) { m_force_cpu = force; }
     virtual void setCpuThreads(int threads) { m_cpu_threads = threads; }
+    virtual void setOutputFormat(int format) { m_output_format = format; }
 
     static bool isNcnnModel(const char* model_path) {
         std::string path(model_path);
@@ -43,4 +44,7 @@ protected:
     float m_conf_thresh = 0.25f;
     bool m_force_cpu = false;
     int m_cpu_threads = 4;
+    // Output bbox layout: 0 = cxcywh (engine default for Dawan/valorant/local NPU),
+    // 1 = xyxy (used by website-converted models — ultralytics default export).
+    int m_output_format = 0;
 };

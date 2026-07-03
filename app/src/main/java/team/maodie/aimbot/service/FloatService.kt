@@ -624,6 +624,7 @@ class FloatService : Service() {
             val entry = ProjectionHolder.modelList.find { it.filename == filename }
             if (entry != null) {
                 JniCallBack.setInputSize(entry.inputSize, entry.inputSize)
+                JniCallBack.setOutputFormat(if (entry.outputFormat == "xyxy") 1 else 0)
             }
             if (JniCallBack.init(modelFile.absolutePath)) {
                 val backend = JniCallBack.getBackend()

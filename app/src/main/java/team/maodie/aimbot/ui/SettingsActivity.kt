@@ -1,14 +1,20 @@
 package team.maodie.aimbot.ui
 
 import android.app.ActivityManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -19,6 +25,8 @@ import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.slider.Slider
 import team.maodie.aimbot.manager.ConfigManager
 import team.maodie.aimbot.inference.JniCallBack
+import team.maodie.aimbot.svc.AimSvcHolder
+import team.maodie.aimbot.svc.PairingForegroundService
 import team.maodie.aimbot.util.ProjectionHolder
 import team.maodie.aimbot.service.FloatService
 
@@ -102,6 +110,48 @@ class SettingsActivity : AppCompatActivity() {
                 reloadModelIfServiceRunning()
             }
         }
+
+        // === 无线调试 section ===
+        content.addView(createSectionHeader("无线调试"))
+        val svcStatusRow = createServiceStatusRow()
+        content.addView(svcStatusRow.row)
+        val startStopRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val pairBtn = createActionButton("开始配对")
+        val startBtn = createActionButton("启动内嵌服务")
+        val stopBtn = createActionButton("停止内嵌服务")
+        val clearBtn = createActionButton("清空配对")
+        startStopRow.addView(pairBtn)
+        startStopRow.addView(startBtn)
+        startStopRow.addView(stopBtn)
+        startStopRow.addView(clearBtn)
+        content.addView(startStopRow)
+
+        AimSvcHolder.bootstrap(this)
+        renderSvcButtons(AimSvcHolder.state, pairBtn, startBtn, stopBtn, clearBtn)
+        AimSvcHolder.setListener { state -> runOnUiThread {
+            svcStatusRow.value.text = formatState(state)
+            renderSvcButtons(state, pairBtn, startBtn, stopBtn, clearBtn)
+        }}
+
+        pairBtn.setOnClickListener { showPairDialog() }
+        startBtn.setOnClickListener { AimSvcHolder.startAsync(this) }
+        stopBtn.setOnClickListener { AimSvcHolder.stopAsync(this) }
+        clearBtn.setOnClickListener {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("清空配对信息？")
+                .setMessage("清空后下次使用需要重新配对。")
+                .setPositiveButton("清空") { _, _ -> AimSvcHolder.clearPairing(this) }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        registerReceiver(svcBroadcastReceiver, IntentFilter().apply {
+            addAction(PairingForegroundService.BROADCAST_SUCCESS)
+            addAction(PairingForegroundService.BROADCAST_FAILURE)
+        }, Context.RECEIVER_NOT_EXPORTED)
 
         scrollView.addView(content)
         root.addView(scrollView)
@@ -255,5 +305,152 @@ class SettingsActivity : AppCompatActivity() {
                 cpuSwitch.isChecked = false
             }
             .show()
+    }
+
+    private data class SvcStatusRow(val row: LinearLayout, val label: TextView, val value: TextView)
+
+    private fun createServiceStatusRow(): SvcStatusRow {
+        val label = TextView(this).apply {
+            text = "内嵌服务状态"
+            textSize = 16f
+            setTextColor(MD3_ON_SURFACE)
+        }
+        val value = TextView(this).apply {
+            text = formatState(AimSvcHolder.state)
+            textSize = 14f
+            setTextColor(MD3_ON_SURFACE_VARIANT)
+        }
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        textCol.addView(label)
+        textCol.addView(value)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        row.addView(textCol)
+        return SvcStatusRow(row, label, value)
+    }
+
+    private fun createActionButton(text: String): Button = Button(this).apply {
+        this.text = text
+        textSize = 13f
+        setPadding(dp(8), dp(6), dp(8), dp(6))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(dp(4), 0, dp(4), 0) }
+    }
+
+    private fun renderSvcButtons(
+        state: AimSvcHolder.State,
+        pairBtn: Button,
+        startBtn: Button,
+        stopBtn: Button,
+        clearBtn: Button
+    ) {
+        when (state) {
+            is AimSvcHolder.State.NotPaired -> {
+                pairBtn.visibility = View.VISIBLE
+                startBtn.visibility = View.GONE
+                stopBtn.visibility = View.GONE
+                clearBtn.visibility = View.GONE
+            }
+            is AimSvcHolder.State.Paired -> {
+                pairBtn.visibility = View.GONE
+                startBtn.visibility = View.VISIBLE
+                stopBtn.visibility = View.GONE
+                clearBtn.visibility = View.VISIBLE
+            }
+            is AimSvcHolder.State.Running -> {
+                pairBtn.visibility = View.GONE
+                startBtn.visibility = View.GONE
+                stopBtn.visibility = View.VISIBLE
+                clearBtn.visibility = View.VISIBLE
+            }
+            is AimSvcHolder.State.Error -> {
+                pairBtn.visibility = View.VISIBLE
+                startBtn.visibility = View.VISIBLE
+                stopBtn.visibility = View.VISIBLE
+                clearBtn.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun formatState(state: AimSvcHolder.State): String = when (state) {
+        is AimSvcHolder.State.NotPaired -> "未配对"
+        is AimSvcHolder.State.Paired -> "已配对 (${state.host}:${state.port})"
+        is AimSvcHolder.State.Running -> "运行中${state.pid?.let { " (pid=$it)" } ?: ""}"
+        is AimSvcHolder.State.Error -> "错误：${state.message}"
+    }
+
+    private fun showPairDialog() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("不支持")
+                .setMessage("无线调试需要 Android 11+")
+                .setPositiveButton("好", null)
+                .show()
+            return
+        }
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            hint = "6 位配对码"
+            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("无线调试配对")
+            .setMessage("手机开\"开发者选项 → 无线调试\"，输入界面上的 6 位配对码。")
+            .setView(input)
+            .setPositiveButton("开始配对") { _, _ ->
+                val code = input.text.toString().trim()
+                if (code.length == 6) {
+                    val intent = Intent(this, PairingForegroundService::class.java).apply {
+                        action = PairingForegroundService.ACTION_START
+                        putExtra(PairingForegroundService.EXTRA_PAIR_CODE, code)
+                    }
+                    startForegroundService(intent)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private val svcBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                PairingForegroundService.BROADCAST_SUCCESS -> {
+                    val host = intent.getStringExtra(PairingForegroundService.EXTRA_HOST) ?: "127.0.0.1"
+                    val port = intent.getIntExtra(PairingForegroundService.EXTRA_PORT, 0)
+                    MaterialAlertDialogBuilder(this@SettingsActivity)
+                        .setTitle("配对成功")
+                        .setMessage("已配对 $host:$port，可点击\"启动内嵌服务\"")
+                        .setPositiveButton("好", null)
+                        .show()
+                }
+                PairingForegroundService.BROADCAST_FAILURE -> {
+                    val msg = intent.getStringExtra(PairingForegroundService.EXTRA_ERROR) ?: "未知错误"
+                    MaterialAlertDialogBuilder(this@SettingsActivity)
+                        .setTitle("配对失败")
+                        .setMessage(msg)
+                        .setPositiveButton("好", null)
+                        .show()
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(svcBroadcastReceiver) }
+        AimSvcHolder.setListener(null)
+        super.onDestroy()
     }
 }

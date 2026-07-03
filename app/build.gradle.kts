@@ -48,6 +48,13 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+        resources {
+            excludes += setOf(
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/LICENSE.md",
+                "META-INF/LICENSE-notice.md"
+            )
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -79,8 +86,23 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    // External Shizuku (used when the device has Shizuku app installed; the existing
+    // ShizukuInjectorClient path).  This is a runtime fallback, not the primary path.
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+    // Vendored AimSvc server runtime — hidden API access, parcelable list, gson, etc.
+    implementation(libs.rikka.hidden.compat)
+    compileOnly(libs.rikka.hidden.stub)
+    implementation(libs.rikka.parcelablelist)
+    implementation(libs.gson)
+    implementation(libs.hiddenapibypass)
+    // AdbPairing protocol deps (boringssl for SPAKE2, bouncycastle for AdbKey x509, conscrypt for TLS)
+    implementation(libs.bouncycastle.bcpkix)
+    implementation(libs.conscrypt.android)
+    // Native deps for libaimbot_svc.so + libaimbot_svc_pair.so
+    implementation(libs.boringssl)
+    implementation(libs.lsposed.libcxx)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
