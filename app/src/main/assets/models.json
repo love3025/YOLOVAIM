@@ -71,6 +71,24 @@
       "outputSize": 2100,
       "description": "yolov11s",
       "classes": {"0": "body", "1": "head", "2": "friendly", "3": "item", "4": "infrared", "5": "range_body", "6": "range_head"}
+    },
+    {
+      "filename": "CODM_256_dynamic_range_quant.tflite",
+      "displayName": "CODM 256 v26s",
+      "precision": "INT8",
+      "inputSize": 256,
+      "outputSize": 1344,
+      "description": "yolov26s",
+      "classes": {"0": "body", "1": "friendly"}
+    },
+    {
+      "filename": "CODM_256_float16.tflite",
+      "displayName": "CODM 256 v26s (FP16)",
+      "precision": "FLOAT16",
+      "inputSize": 256,
+      "outputSize": 1344,
+      "description": "yolov26s",
+      "classes": {"0": "body", "1": "friendly"}
     }
   ]
 }

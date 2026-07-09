@@ -9,9 +9,10 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import team.maodie.aimbot.model.TouchMethod
 
-class RootInjectorClient(private val context: Context) : TouchInjectorInterface {
+open class RootInjectorClient(private val context: Context) : TouchInjectorInterface {
     companion object {
         private const val TAG = "RootInjector"
+        private const val LAT_TAG = "AimbotLatency"
         private const val CONNECT_TIMEOUT_MS = 10000L
     }
 
@@ -99,10 +100,17 @@ class RootInjectorClient(private val context: Context) : TouchInjectorInterface 
     private fun execCmd(cmd: String): String? {
         synchronized(cmdLock) {
             if (!connected) return null
+            val t0 = System.nanoTime()
             try {
                 daemonStdin!!.write("$cmd\n".toByteArray())
                 daemonStdin!!.flush()
-                return daemonReader?.readLine()
+                val resp = daemonReader?.readLine()
+                val dtMs = (System.nanoTime() - t0) / 1e6
+                // Log slow commands. Daemon IPC is usually <1ms; >1ms indicates daemon is behind.
+                if (dtMs > 0.5) {
+                    Log.d(LAT_TAG, String.format(java.util.Locale.US, "RootIPC %s = %.2fms", cmd.split(" ").firstOrNull() ?: cmd, dtMs))
+                }
+                return resp
             } catch (e: Exception) {
                 Log.e(TAG, "execCmd error: ${e.message}")
                 connected = false
@@ -115,6 +123,9 @@ class RootInjectorClient(private val context: Context) : TouchInjectorInterface 
         val resp = execCmd(cmd)
         return resp?.startsWith("OK") == true
     }
+
+    protected fun sendOk(cmd: String): Boolean = execOk(cmd)
+    protected fun sendCmd(cmd: String): String? = execCmd(cmd)
 
     override fun tap(x: Int, y: Int) {
         execOk("DOWN $x $y")
@@ -203,6 +214,9 @@ class RootInjectorClient(private val context: Context) : TouchInjectorInterface 
     override fun initRemote(): Boolean {
         return execOk("OPEN_UINPUT")
     }
+
+    protected open fun openUinput(): Boolean = execOk("OPEN_UINPUT")
+    protected open fun openRealPanel(): Boolean = execOk("OPEN_REAL_PANEL")
 
     override fun setResolution(screenW: Int, screenH: Int, devW: Int, devH: Int) {
         execOk("SET_RESOLUTION $screenW $screenH")

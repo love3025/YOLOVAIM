@@ -87,6 +87,10 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     qnn_options.skel_library_dir = m_native_lib_dir;
     qnn_options.cache_dir = "/data/data/team.maodie.aimbot/cache/qnn";
     qnn_options.model_token = "yolov8n_htp_v1";
+    // Tell QNN this is a latency-critical real-time workload: vote for the
+    // highest HTP performance mode at init so DSP scheduling doesn't throttle us
+    // when the game or other system services contend for NPU resources.
+    qnn_options.htp_options.performance_mode = kHtpBurst;
 
     m_delegate = TfLiteQnnDelegateCreate(&qnn_options);
     if (m_delegate) {

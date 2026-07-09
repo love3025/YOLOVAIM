@@ -81,6 +81,7 @@ std::vector<Detection> NcnnEngine::detect(
     const unsigned char* src_ptr = src + offsetY * rowStride + offsetX * pixelStride;
 
     ncnn::Mat in;
+    long long tPreStart = getTimeUs();
     try {
         in = ncnn::Mat::from_pixels_resize(
             src_ptr, pixel_type,
@@ -97,6 +98,7 @@ std::vector<Detection> NcnnEngine::detect(
     const float mean_vals[3] = {0.f, 0.f, 0.f};
     const float norm_vals[3] = {1/255.f, 1/255.f, 1/255.f};
     in.substract_mean_normalize(mean_vals, norm_vals);
+    long long tPreEnd = getTimeUs();
 
     long long t1 = getTimeUs();
 
@@ -129,6 +131,7 @@ std::vector<Detection> NcnnEngine::detect(
     float invH = 1.0f / screenHeight;
 
     std::vector<Detection> detections;
+    long long tPostStart = getTimeUs();
 
     // Check format: official YOLOv8 (2D, w > 64) vs legacy
     const int reg_max_1 = 16;
@@ -143,6 +146,15 @@ std::vector<Detection> NcnnEngine::detect(
     LOGD("NCNN Raw: %zu, After NMS: %zu", detections.size(), detections.size());
 
     auto finalDetections = nms(detections, 0.45f);
+    long long tPostEnd = getTimeUs();
+
+    long long tTotal = tPostEnd - tPreStart;
+    LOGLAT("NCNN | pre=%.2fms infer=%.2fms post=%.2fms total=%.2fms raw=%zu nms=%zu",
+           (tPreEnd - tPreStart) / 1e3,
+           (t2 - t1) / 1e3,
+           (tPostEnd - tPostStart) / 1e3,
+           tTotal / 1e3,
+           detections.size(), finalDetections.size());
     return finalDetections;
 }
 

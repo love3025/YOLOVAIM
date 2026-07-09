@@ -24,9 +24,11 @@
 #define LOG_TAG "TouchCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "AimbotLatency", __VA_ARGS__)
 #else
 #define LOGD(...) do { fprintf(stderr, "D/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #define LOGE(...) do { fprintf(stderr, "E/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#define LOGLAT(...) do { fprintf(stderr, "D/AimbotLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #endif
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -85,6 +87,13 @@ static bool g_initialized = false;
 static int g_screen_w = 0, g_screen_h = 0;
 static bool g_landscape = true;
 
+// Physical-panel pressure / contact-size ranges, cloned from the real device.
+// 0 means the panel doesn't report that axis → we skip it (reporting a value
+// on an unadvertised axis would itself look fake).
+static int g_pressure_max = 0;
+static int g_touch_major_max = 0;
+static int g_width_major_max = 0;
+
 // Reader threads
 static std::vector<pthread_t> g_reader_threads;
 static volatile bool g_running = false;
@@ -95,6 +104,12 @@ static Zone g_fire_zone;
 static Zone g_joystick_zone;
 
 // ─── Helpers ─────────────────────────────────────────────────────────
+
+static inline long long touchTimeUs() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    return tv.tv_sec * 1000000LL + tv.tv_usec;
+}
 
 static void genRandomString(char* str, int len) {
     srand(static_cast<unsigned>(time(nullptr)) + len);
@@ -118,6 +133,11 @@ static void pushEvent(int& count, unsigned short type, unsigned short code, int 
 static bool pointInZone(const Zone& z, int sx, int sy) {
     return z.l < z.r && z.t < z.b &&
            sx >= z.l && sx <= z.r && sy >= z.t && sy <= z.b;
+}
+
+static int randInRange(int lo, int hi) {
+    if (hi <= lo) return lo;
+    return lo + rand() % (hi - lo + 1);
 }
 
 // Screen → portrait touch coords (rotation + scale)
@@ -151,8 +171,18 @@ static void upload() {
                     pushEvent(count, EV_ABS, ABS_MT_TRACKING_ID, finger.id);
                 pushEvent(count, EV_ABS, ABS_MT_POSITION_X, static_cast<int>(finger.pos.x));
                 pushEvent(count, EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(finger.pos.y));
-                pushEvent(count, EV_ABS, ABS_X, static_cast<int>(finger.pos.x));
-                pushEvent(count, EV_ABS, ABS_Y, static_cast<int>(finger.pos.y));
+                // Real fingers report pressure / contact area every frame within a
+                // small slice of the panel's reported max (raw ADC, NOT 50-90% of
+                // max which would be abnormal). Only emit axes the panel advertises.
+                if (g_pressure_max > 0)
+                    pushEvent(count, EV_ABS, ABS_MT_PRESSURE,
+                              randInRange(g_pressure_max / 333, g_pressure_max / 40));
+                if (g_touch_major_max > 0)
+                    pushEvent(count, EV_ABS, ABS_MT_TOUCH_MAJOR,
+                              randInRange(g_touch_major_max / 12, g_touch_major_max / 4));
+                if (g_width_major_max > 0)
+                    pushEvent(count, EV_ABS, ABS_MT_WIDTH_MAJOR,
+                              randInRange(g_width_major_max / 12, g_width_major_max / 4));
                 g_uploadedFingerDown[di][fi] = true;
             } else if (wasUploaded) {
                 pushEvent(count, EV_ABS, ABS_MT_SLOT, slot);
@@ -169,7 +199,14 @@ static void upload() {
     pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeFingerCount == 4 ? 1 : 0);
     pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeFingerCount >= 5 ? 1 : 0);
     pushEvent(count, EV_SYN, SYN_REPORT, 0);
-    write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
+    long long tWriteStart = touchTimeUs();
+    int wr = write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
+    long long tWriteEnd = touchTimeUs();
+    if (wr < 0) {
+        LOGE("upload: write failed errno=%d", errno);
+    } else {
+        LOGLAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+    }
 }
 
 // ─── Zone detection ─────────────────────────────────────────────────
@@ -343,68 +380,164 @@ static bool createUinputDevice(int screenX, int screenY, int sourceFd) {
         return false;
     }
 
-    char randomName[16]{};
-    genRandomString(randomName, sizeof(randomName));
-    strncpy(uiDev.name, randomName, UINPUT_MAX_NAME_SIZE);
-    uiDev.id.bustype = 0;
-    uiDev.id.vendor = rand() % 10 + 5;
-    uiDev.id.product = rand() % 10 + 5;
-    uiDev.id.version = rand() % 10 + 5;
+    // ── Device identity: clone from the real panel when we have its fd ──
+    // A cloned bustype/vendor/product/name makes /proc/bus/input/devices and
+    // InputDevice enumeration match a genuine touchscreen. Without a source fd
+    // we fall back to plausible values (BUS_I2C is the common touch bus) rather
+    // than the illegal bustype=0 a bare uinput device would otherwise expose.
+    input_id realId{};
+    bool haveRealId = (sourceFd >= 0 && ioctl(sourceFd, EVIOCGID, &realId) == 0);
 
-    ioctl(g_outputFd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+    char realName[UINPUT_MAX_NAME_SIZE]{};
+    bool haveRealName = (sourceFd >= 0 &&
+                         ioctl(sourceFd, EVIOCGNAME(sizeof(realName) - 1), realName) > 0 &&
+                         realName[0] != '\0');
+
+    if (haveRealName) {
+        strncpy(uiDev.name, realName, UINPUT_MAX_NAME_SIZE - 1);
+    } else {
+        char randomName[16]{};
+        genRandomString(randomName, sizeof(randomName));
+        strncpy(uiDev.name, randomName, UINPUT_MAX_NAME_SIZE - 1);
+    }
+
+    if (haveRealId) {
+        uiDev.id = realId;
+    } else {
+        uiDev.id.bustype = BUS_I2C;
+        uiDev.id.vendor = rand() % 10 + 5;
+        uiDev.id.product = rand() % 10 + 5;
+        uiDev.id.version = rand() % 10 + 5;
+    }
+
+    // Clone input device properties (INPUT_PROP_DIRECT, INPUT_PROP_POINTER, ...)
+    // from the real panel. Different vendors set different prop combinations —
+    // a OnePlus panel is INPUT_PROP_DIRECT alone, some Samsung panels also set
+    // INPUT_PROP_POINTER, etc. Falling back to INPUT_PROP_DIRECT if the clone
+    // fails keeps the device at least minimally registerable.
+    bool clonedProps = false;
+    if (sourceFd >= 0) {
+        uint8_t propBits[64]{};
+        ssize_t propRes = ioctl(sourceFd, EVIOCGPROP(sizeof(propBits)), propBits);
+        if (propRes > 0) {
+            int propCount = static_cast<int>(propRes) < static_cast<int>(sizeof(propBits))
+                                ? static_cast<int>(propRes)
+                                : static_cast<int>(sizeof(propBits));
+            for (int j = 0; j < propCount; ++j) {
+                for (int k = 0; k < 8; ++k) {
+                    int code = j * 8 + k;
+                    if (propBits[j] & (1 << k)) {
+                        ioctl(g_outputFd, UI_SET_PROPBIT, code);
+                    }
+                }
+            }
+            clonedProps = true;
+        }
+    }
+    if (!clonedProps) {
+        ioctl(g_outputFd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+    }
+
     ioctl(g_outputFd, UI_SET_EVBIT, EV_ABS);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_X);
-    ioctl(g_outputFd, UI_SET_ABSBIT, ABS_Y);
+    ioctl(g_outputFd, UI_SET_EVBIT, EV_SYN);
+    ioctl(g_outputFd, UI_SET_EVBIT, EV_KEY);
+
+    // Mandatory axes for our multitouch injection. Note: we intentionally do NOT
+    // register ABS_X/ABS_Y — real panels (including this device's "touchpanel")
+    // report coordinates via ABS_MT_POSITION_X/Y only. A ghost ABS_X/Y axis is
+    // a strong uinput tell. SLOT/POSITION ranges are overridden to the panel's
+    // actual coordinate extent below.
     ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_SLOT);
     ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
     ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
     ioctl(g_outputFd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
-    ioctl(g_outputFd, UI_SET_EVBIT, EV_SYN);
-    ioctl(g_outputFd, UI_SET_EVBIT, EV_KEY);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_DOUBLETAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_TRIPLETAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_QUADTAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_QUINTTAP);
-    ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOUCH);
 
     char randomPhys[16]{};
     genRandomString(randomPhys, sizeof(randomPhys));
     ioctl(g_outputFd, UI_SET_PHYS, randomPhys);
 
-    input_id id{};
-    if (ioctl(sourceFd, EVIOCGID, &id) == 0) uiDev.id = id;
+    // ── Clone every ABS axis (incl. pressure / touch major / width) from the
+    // real panel, preserving each axis's min/max/fuzz/flat. This adds the
+    // pressure and contact-area capability bits a genuine touchscreen has. ──
+    g_pressure_max = g_touch_major_max = g_width_major_max = 0;
+    if (sourceFd >= 0) {
+        uint8_t* absBits = nullptr;
+        ssize_t absSize = 0;
+        int absRes = 0;
+        while (true) {
+            absRes = ioctl(sourceFd, EVIOCGBIT(EV_ABS, absSize), absBits);
+            if (absRes < absSize) break;
+            absSize = absRes + 16;
+            absBits = static_cast<uint8_t*>(realloc(absBits, absSize * 2));
+        }
+        for (int j = 0; j < absRes; ++j) {
+            for (int k = 0; k < 8; ++k) {
+                int code = j * 8 + k;
+                if (!(absBits[j] & (1 << k))) continue;
+                input_absinfo ai{};
+                if (ioctl(sourceFd, EVIOCGABS(code), &ai) != 0) continue;
+                ioctl(g_outputFd, UI_SET_ABSBIT, code);
+                uiDev.absmin[code] = ai.minimum;
+                uiDev.absmax[code] = ai.maximum;
+                uiDev.absfuzz[code] = ai.fuzz;
+                uiDev.absflat[code] = ai.flat;
+                if (code == ABS_MT_PRESSURE)    g_pressure_max = ai.maximum;
+                if (code == ABS_MT_TOUCH_MAJOR) g_touch_major_max = ai.maximum;
+                if (code == ABS_MT_WIDTH_MAJOR) g_width_major_max = ai.maximum;
+            }
+        }
+        free(absBits);
+    }
 
+    // Clone the real panel's KEY capabilities (button set) verbatim. We do NOT
+    // hardcode any BTN_TOOL_* bits — doing so would diverge from the real panel
+    // (which is a strong uinput tell). Fall back to the minimum required
+    // multitouch set (BTN_TOUCH + BTN_TOOL_FINGER) if no source fd is available.
     uint8_t* bits = nullptr;
     ssize_t bitsSize = 0;
     int res = 0;
-    while (true) {
-        res = ioctl(sourceFd, EVIOCGBIT(EV_KEY, bitsSize), bits);
-        if (res < bitsSize) break;
-        bitsSize = res + 16;
-        bits = static_cast<uint8_t*>(realloc(bits, bitsSize * 2));
-    }
-    for (int j = 0; j < res; ++j) {
-        for (int k = 0; k < 8; ++k) {
-            int code = j * 8 + k;
-            if (bits[j] & (1 << k)) {
-                if (code == BTN_TOUCH || code == BTN_TOOL_FINGER) continue;
-                ioctl(g_outputFd, UI_SET_KEYBIT, code);
+    bool clonedKeys = false;
+    if (sourceFd >= 0) {
+        while (true) {
+            res = ioctl(sourceFd, EVIOCGBIT(EV_KEY, bitsSize), bits);
+            if (res < bitsSize) break;
+            bitsSize = res + 16;
+            bits = static_cast<uint8_t*>(realloc(bits, bitsSize * 2));
+        }
+        for (int j = 0; j < res; ++j) {
+            for (int k = 0; k < 8; ++k) {
+                int code = j * 8 + k;
+                if (bits[j] & (1 << k)) {
+                    ioctl(g_outputFd, UI_SET_KEYBIT, code);
+                }
             }
         }
+        clonedKeys = res > 0;
     }
     free(bits);
+    if (!clonedKeys) {
+        ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOUCH);
+        ioctl(g_outputFd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
+    }
 
-    uiDev.absmin[ABS_MT_SLOT] = 0;
-    uiDev.absmax[ABS_MT_SLOT] = maxE * maxF - 1;
+    // Override ranges for axes we drive. The ABS-bit loop above already copied
+    // min/max from the real panel for every axis (including SLOT, POSITION_X/Y,
+    // PRESSURE, TOUCH_MAJOR). We only re-pin:
+    //   - POSITION_X/Y to the panel's actual coordinate extent (screenX/Y from
+    //     getevent — the cloned values already match, this is a safety net for
+    //     getevent failures).
+    //   - TRACKING_ID to 65535 so we never run out of IDs internally.
+    // ABS_MT_SLOT is left as the real panel reported it (Pixel/older panels
+    // declare 5 slots, OnePlus/Samsung declare 10). Fall back to 9 only when no
+    // real-panel data was available.
+    if (uiDev.absmax[ABS_MT_SLOT] == 0) {
+        uiDev.absmin[ABS_MT_SLOT] = 0;
+        uiDev.absmax[ABS_MT_SLOT] = maxF - 1;
+    }
     uiDev.absmin[ABS_MT_POSITION_X] = 0;
     uiDev.absmax[ABS_MT_POSITION_X] = screenX;
     uiDev.absmin[ABS_MT_POSITION_Y] = 0;
     uiDev.absmax[ABS_MT_POSITION_Y] = screenY;
-    uiDev.absmin[ABS_X] = 0;
-    uiDev.absmax[ABS_X] = screenX;
-    uiDev.absmin[ABS_Y] = 0;
-    uiDev.absmax[ABS_Y] = screenY;
     uiDev.absmin[ABS_MT_TRACKING_ID] = 0;
     uiDev.absmax[ABS_MT_TRACKING_ID] = 65535;
     write(g_outputFd, &uiDev, sizeof(uiDev));
@@ -415,6 +548,9 @@ static bool createUinputDevice(int screenX, int screenY, int sourceFd) {
         g_outputFd = 0;
         return false;
     }
+    LOGD("uinput created: name='%s' bus=0x%x vid=0x%x pid=0x%x pressure=%d major=%d",
+         uiDev.name, uiDev.id.bustype, uiDev.id.vendor, uiDev.id.product,
+         g_pressure_max, g_touch_major_max);
     return true;
 }
 
@@ -556,7 +692,21 @@ bool touch_init(int screenW, int screenH) {
 
     g_devices.push_back(device);
 
-    if (!createUinputDevice(touchMaxX, touchMaxY, -1)) {
+    // Clone identity + ABS/KEY capabilities from the real panel (device.fd) so
+    // the virtual device mimics the physical touchscreen. If grab failed we open
+    // a temporary read-only fd solely to clone from; -1 keeps the fallback path.
+    int cloneFd = device.fd;
+    bool cloneFdTemporary = false;
+    if (cloneFd < 0 && touchPath[0] != '\0') {
+        cloneFd = open(touchPath, O_RDONLY);
+        cloneFdTemporary = (cloneFd >= 0);
+    }
+
+    bool created = createUinputDevice(touchMaxX, touchMaxY, cloneFd);
+
+    if (cloneFdTemporary) close(cloneFd);
+
+    if (!created) {
         closeTouchLocked();
         return false;
     }

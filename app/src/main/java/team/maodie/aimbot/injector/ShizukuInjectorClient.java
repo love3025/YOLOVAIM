@@ -18,12 +18,37 @@ import team.maodie.aimbot.service.RemoteInjectorService;
 
 public class ShizukuInjectorClient implements TouchInjectorInterface {
     private static final String TAG = "ShizukuInjector";
+    private static final String LAT_TAG = "AimbotLatency";
     private static final long CONNECT_TIMEOUT_MS = 10000;
 
     private final Context context;
     private volatile boolean connected = false;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private IRemoteInjector remoteService;
+    private InjectorCallback pendingCallback;
+    private static final int SHIZUKU_PERMISSION_REQUEST_CODE = 0x4D49;
+    private final Shizuku.OnRequestPermissionResultListener permissionListener =
+        new Shizuku.OnRequestPermissionResultListener() {
+            @Override
+            public void onRequestPermissionResult(int requestCode, int grantResult) {
+                if (requestCode != SHIZUKU_PERMISSION_REQUEST_CODE) return;
+                Shizuku.removeRequestPermissionResultListener(this);
+                if (grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    Log.d(TAG, "Shizuku permission granted via request, retrying connect");
+                    if (pendingCallback != null) {
+                        InjectorCallback cb = pendingCallback;
+                        pendingCallback = null;
+                        connect(cb);
+                    }
+                } else {
+                    Log.e(TAG, "Shizuku permission denied by user");
+                    if (pendingCallback != null) {
+                        pendingCallback.onError("Shizuku permission denied");
+                        pendingCallback = null;
+                    }
+                }
+            }
+        };
 
     public ShizukuInjectorClient(Context context) {
         this.context = context;
@@ -45,8 +70,17 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
         }
 
         if (permResult != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "Shizuku permission not granted: " + permResult);
-            callback.onError("Shizuku permission not granted");
+            Log.w(TAG, "Shizuku permission not granted: " + permResult + ", requesting...");
+            pendingCallback = callback;
+            try {
+                Shizuku.addRequestPermissionResultListener(permissionListener);
+                Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST_CODE);
+            } catch (Exception e) {
+                Log.e(TAG, "requestPermission failed: " + e.getMessage());
+                Shizuku.removeRequestPermissionResultListener(permissionListener);
+                pendingCallback = null;
+                callback.onError("Shizuku permission request failed: " + e.getMessage());
+            }
             return;
         }
 
@@ -110,7 +144,9 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
     public void tap(int x, int y) {
         if (remoteService != null) {
             try {
+                long t0 = System.nanoTime();
                 remoteService.tap(x, y);
+                logIfSlow("tap", t0);
             } catch (Exception e) {
                 Log.e(TAG, "tap error: " + e.getMessage());
             }
@@ -121,19 +157,38 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
 
     public void swipe(int x1, int y1, int x2, int y2, int durationMs) {
         if (remoteService != null) {
-            try { remoteService.swipe(x1, y1, x2, y2, durationMs); } catch (Exception e) { Log.e(TAG, "swipe: " + e.getMessage()); }
+            try {
+                long t0 = System.nanoTime();
+                remoteService.swipe(x1, y1, x2, y2, durationMs);
+                logIfSlow("swipe", t0);
+            } catch (Exception e) { Log.e(TAG, "swipe: " + e.getMessage()); }
         }
     }
 
     public void moveTo(int x, int y) {
         if (remoteService != null) {
-            try { remoteService.moveTo(x, y); } catch (Exception e) { Log.e(TAG, "moveTo: " + e.getMessage()); }
+            try {
+                long t0 = System.nanoTime();
+                remoteService.moveTo(x, y);
+                logIfSlow("moveTo", t0);
+            } catch (Exception e) { Log.e(TAG, "moveTo: " + e.getMessage()); }
         }
     }
 
     public void lift() {
         if (remoteService != null) {
-            try { remoteService.lift(); } catch (Exception e) { Log.e(TAG, "lift: " + e.getMessage()); }
+            try {
+                long t0 = System.nanoTime();
+                remoteService.lift();
+                logIfSlow("lift", t0);
+            } catch (Exception e) { Log.e(TAG, "lift: " + e.getMessage()); }
+        }
+    }
+
+    private static void logIfSlow(String op, long t0Ns) {
+        double dtMs = (System.nanoTime() - t0Ns) / 1e6;
+        if (dtMs > 0.5) {
+            Log.d(LAT_TAG, String.format(java.util.Locale.US, "ShizukuIPC %s = %.2fms", op, dtMs));
         }
     }
 

@@ -13,6 +13,11 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 
+// Per-stage latency log. Use only with `us` and `count` arguments so the format
+// matches the Kotlin side ("AimbotLatency") for easy grep.
+#define LAT_TAG "AimbotLatency"
+#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, LAT_TAG, __VA_ARGS__)
+
 struct Detection {
     float x1, y1, x2, y2, score, classId;
 };

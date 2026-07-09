@@ -433,7 +433,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "显示截取范围"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = showCaptureRange; setOnCheckedChangeListener { _, c -> showCaptureRange = c; onShowCaptureRangeChanged?.invoke(c) } })
         })
-        contentContainer.addView(buildSliderInt("截取范围", range, 50, 800, "px") { range = it; onRangeChanged?.invoke(it) })
+        contentContainer.addView(buildSliderInt("截取范围", range, 48, 800, "px", stepSize = 16f) { range = it; onRangeChanged?.invoke(it) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -453,7 +453,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "输入测试"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = false; setOnCheckedChangeListener { _, c -> if (c) { onTestCircle?.invoke(); isChecked = false } } })
         })
-        contentContainer.addView(MaterialTextView(context).apply { text = "在屏幕中心画一个圆"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "在屏幕左 1/4 区域慢速画一个圆"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(LinearLayout(context).apply {
@@ -497,10 +497,15 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(slider) }
     }
 
-    private fun buildSliderInt(label: String, value: Int, min: Int, max: Int, suffix: String, onChange: (Int) -> Unit): LinearLayout {
+    private fun buildSliderInt(label: String, value: Int, min: Int, max: Int, suffix: String, stepSize: Float = 1f, onChange: (Int) -> Unit): LinearLayout {
         val valueTv = MaterialTextView(context).apply { text = "$value$suffix"; textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
-        val slider = Slider(context).apply { valueFrom = min.toFloat(); valueTo = max.toFloat(); if (max - min < 10) stepSize = 1f; this.value = value.toFloat().coerceIn(min.toFloat(), max.toFloat()); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
-            addOnChangeListener { _, v, fu -> if (fu) { val iv = v.toInt(); onChange(iv); valueTv.text = "$iv$suffix" } } }
+        val slider = Slider(context).apply {
+            valueFrom = min.toFloat(); valueTo = max.toFloat()
+            this.stepSize = if (max - min < 10) 1f else stepSize
+            this.value = (value.toFloat() / this.stepSize).toInt() * this.stepSize
+            trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+            addOnChangeListener { _, v, fu -> if (fu) { val iv = v.toInt(); onChange(iv); valueTv.text = "$iv$suffix" } }
+        }
         return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 addView(MaterialTextView(context).apply { text = label; textSize = 11f; setTextColor(clOnSurfaceVariant); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })

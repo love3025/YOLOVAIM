@@ -271,7 +271,7 @@ class FloatService : Service() {
         bezierRandomSpread = cfg.bezierRandomSpread
         convergeThresh = cfg.convergeThresh.toFloat()
         touchDisplayEnabled = cfg.aimTouchDisplay
-        cachedRangePx = cfg.range.coerceIn(50, 800)
+        cachedRangePx = ((cfg.range.coerceIn(48, 800) + 8) / 16) * 16
         aimbotOn.set(cfg.aimbotEnabled)
         aimClasses = cfg.aimClasses.toMutableSet()
         priorityClass = cfg.priorityClass
@@ -821,17 +821,20 @@ class FloatService : Service() {
         guiPanel.onTestCircle = {
             mainHandler.post {
                 Thread {
-                    val cx = screenWidth / 2; val cy = screenHeight / 2
-                    val radius = 200; val steps = 72
-                    val aspect = screenWidth.toFloat() / screenHeight.toFloat()
-                    touchService.swipe(cx, cy, cx, cy, 0)
+                    val cx = screenWidth / 4
+                    val cy = screenHeight / 2
+                    val radius = 200
+                    val steps = 96
+                    val startX = cx + radius
+                    val startY = cy
+                    touchService.swipe(startX, startY, startX, startY, 0)
                     Thread.sleep(50)
                     for (i in 1 until steps) {
                         val angle = (i * 360.0 / steps) * Math.PI / 180.0
-                        val x = (cx + radius * aspect * Math.cos(angle)).toInt()
+                        val x = (cx + radius * Math.cos(angle)).toInt()
                         val y = (cy + radius * Math.sin(angle)).toInt()
                         touchService.moveTo(x, y)
-                        Thread.sleep(20)
+                        Thread.sleep(50)
                     }
                     touchService.lift()
                 }.start()
@@ -962,64 +965,69 @@ class FloatService : Service() {
 
                     val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
 
-                    if (result != null) {
-                        val count = result.size / 6
-                        if (count > 0) {
-                            val cid = result[0].toInt()
-                            val sc = result[1]
-                            val className = currentClasses[cid] ?: "unknown"
-                            Log.d(TAG, "detect: count=$count, classId=$cid ($className) score=${"%.3f".format(sc)}")
-                        }
-                        var detCount = 0; var i = 0
-                        while (i < count && detCount < detectionBuffer.size) {
-                            val cid = result[i * 6].toInt()
-                            val rect = RectF(result[i*6+2]*captureW, result[i*6+3]*captureH, result[i*6+4]*captureW, result[i*6+5]*captureH)
-                            detectionBuffer[detCount] = DetectionInfo(rect, cid, currentClasses[cid] ?: "cls$cid")
-                            detCount++; i++
-                        }
-                        lastDetections = detectionBuffer.take(detCount)
-                        hasDetects.set(detCount > 0)
-                        mainHandler.post { overlayView.updateDetections(lastDetections) }
-
-                        if (autoSaveDataset && detCount > 0 && hwBuf != null) {
-                            saveDatasetFrame(hwBuf, result, count)
-                        }
-
-                        // 按住激发: 物理手指按在触发区时才能自瞄
+                    // 按住激发: 物理手指按在触发区时才能自瞄（提到外层，使 lift 条件也能读到）
                         val holdToAimActive = if (aimHoldEnabled) touchService.isFingerInTriggerZone() else true
 
-                        // Filter detections by aimClasses
-                        val aimDets = if (aimClasses.isEmpty()) lastDetections
-                            else lastDetections.filter { it.classId in aimClasses }
-
-                        if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
-                            val target = aimController.selectTarget(aimDets, centerX, centerY)
-                            if (target != null) {
-                                val tcx = target.rect.centerX(); val tcy = target.rect.centerY()
-                                var boxH = 0f; var minD = Float.MAX_VALUE
-                                for (det in aimDets) {
-                                    val r = det.rect
-                                    val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
-                                    if (d < minD) { minD = d; boxH = r.height() }
-                                }
-                                val classOffset = aimController.classAimOffsets[target.classId] ?: aimController.aimOffsetYRatio
-                                val classBoxRatio = aimController.classBoxAimRatios[target.classId] ?: aimController.boxAimRatio
-                                val aimX = tcx
-                                val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
-                                aimController.aimingState.updateVelocity(tcx, tcy)
-                                aimController.executeAiming(aimX, aimY, centerX, centerY)
+                        if (result != null) {
+                            val count = result.size / 6
+                            if (count > 0) {
+                                val cid = result[0].toInt()
+                                val sc = result[1]
+                                val className = currentClasses[cid] ?: "unknown"
+                                Log.d(TAG, "detect: count=$count, classId=$cid ($className) score=${"%.3f".format(sc)}")
                             }
+                            var detCount = 0; var i = 0
+                            while (i < count && detCount < detectionBuffer.size) {
+                                val cid = result[i * 6].toInt()
+                                val rect = RectF(result[i*6+2]*captureW, result[i*6+3]*captureH, result[i*6+4]*captureW, result[i*6+5]*captureH)
+                                detectionBuffer[detCount] = DetectionInfo(rect, cid, currentClasses[cid] ?: "cls$cid")
+                                detCount++; i++
+                            }
+                            lastDetections = detectionBuffer.take(detCount)
+                            hasDetects.set(detCount > 0)
+                            mainHandler.post { overlayView.updateDetections(lastDetections) }
+
+                            if (autoSaveDataset && detCount > 0 && hwBuf != null) {
+                                saveDatasetFrame(hwBuf, result, count)
+                            }
+
+                            // Filter detections by aimClasses
+                            val aimDets = if (aimClasses.isEmpty()) lastDetections
+                                else lastDetections.filter { it.classId in aimClasses }
+
+                            if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
+                                val target = aimController.selectTarget(aimDets, centerX, centerY)
+                                if (target != null) {
+                                    val tcx = target.rect.centerX(); val tcy = target.rect.centerY()
+                                    var boxH = 0f; var minD = Float.MAX_VALUE
+                                    for (det in aimDets) {
+                                        val r = det.rect
+                                        val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
+                                        if (d < minD) { minD = d; boxH = r.height() }
+                                    }
+                                    val classOffset = aimController.classAimOffsets[target.classId] ?: aimController.aimOffsetYRatio
+                                    val classBoxRatio = aimController.classBoxAimRatios[target.classId] ?: aimController.boxAimRatio
+                                    val aimX = tcx
+                                    val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
+                                    aimController.aimingState.updateVelocity(tcx, tcy)
+                                    aimController.executeAiming(aimX, aimY, centerX, centerY)
+                                }
+                            }
+                        } else {
+                            hasDetects.set(false); lastDetections = emptyList()
+                            mainHandler.post { overlayView.updateDetections(lastDetections) }
                         }
-                    } else if (aimController.aimingState.pointerDown) {
-                        aimController.lift()
-                    }
 
-                    // detection-based trigger: center in any detection box (filtered by aimClasses)
-                    triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get())
-                    // 压枪：每帧更新扳机状态（支持手动开火 + 自动扳机）
-                    aimController.triggerHeld = touchService.isFingerInFireZone() || triggerController.triggerFired
+                        // 抬起条件：按下虚拟触摸但瞄准条件任一不满足都应释放（修了按住激发中途松手后触摸点卡住的 bug）
+                        if (aimController.aimingState.pointerDown &&
+                            (!aimbotOn.get() || !hasDetects.get() || !holdToAimActive)) {
+                            aimController.lift()
+                        }
 
-                    if (result == null) { hasDetects.set(false); lastDetections = emptyList(); mainHandler.post { overlayView.updateDetections(lastDetections) } }
+                        // detection-based trigger: center in any detection box (filtered by aimClasses)
+                        triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get())
+                        // 压枪：每帧更新扳机状态（支持手动开火 + 自动扳机）
+                        aimController.triggerHeld = touchService.isFingerInFireZone() || triggerController.triggerFired
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
                 finally { hwBuf?.close(); image.close() }
             }
