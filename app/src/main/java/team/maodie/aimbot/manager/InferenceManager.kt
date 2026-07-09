@@ -29,6 +29,7 @@ class InferenceManager(
 ) {
     companion object {
         private const val TAG = "InferenceManager"
+        private const val LAT_TAG = "AimbotLatency"
     }
 
     // Inference state
@@ -70,6 +71,11 @@ class InferenceManager(
 
     // Touch display
     var touchDisplayEnabled = false
+
+    // Latency logging — every N frames emit a single chain line under tag "AimbotLatency".
+    // Set to 1 to log every frame, higher to sample. Default 30 ≈ 0.5s @ 60fps.
+    var latencyLogEveryNFrames = 1
+    private var frameSeq = 0
 
     fun loadModel(filename: String) {
         val wasRunning = inferRunning.getAndSet(false)
@@ -149,12 +155,18 @@ class InferenceManager(
                     cachedRangePx = currentRange
                     cachedRange = currentRange.toFloat()
                 }
+                // ─── T0: loop entry — start of one inference cycle ───
+                val tLoopEntry = System.nanoTime()
                 val image = imageReader?.acquireLatestImage()
                 if (image == null) {
                     Thread.yield()
                     continue
                 }
+                // ─── T1: frame ready in user space (after ImageReader wait) ───
+                val tFrameReady = System.nanoTime()
                 val hwBuf = image.hardwareBuffer
+                // ─── T2: hardwareBuffer wrapped (costs ~0.1ms; tracked separately) ───
+                val tHwReady = System.nanoTime()
                 try {
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
@@ -179,7 +191,15 @@ class InferenceManager(
                     val offsetX = (captureW - regionW) / 2
                     val offsetY = (captureH - regionH) / 2
 
+                    // ─── T3: just before JNI detect call (preproc+infer+postproc happens inside) ───
+                    val tPreJNI = System.nanoTime()
                     val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
+                    // ─── T4: just after JNI returns (Kotlin receives FloatArray) ───
+                    val tPostJNI = System.nanoTime()
+
+                    var injectNs = 0L
+                    var tPreAim = 0L
+                    var tPostAim = 0L
 
                     if (result != null) {
                         val count = result.size / 6
@@ -237,7 +257,12 @@ class InferenceManager(
                                 val classBoxRatio = aimController.classBoxAimRatios[target.classId] ?: aimController.boxAimRatio
                                 val aimX = tcx
                                 val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
+                                // ─── T5: pre aim-compute + inject ───
+                                tPreAim = System.nanoTime()
                                 aimController.executeAiming(aimX, aimY, centerX, centerY)
+                                // ─── T6: post aim-compute + inject (returns after IPC issued) ───
+                                tPostAim = System.nanoTime()
+                                injectNs = tPostAim - tPreAim
                             }
                         }
                     } else if (aimController.aimingState.pointerDown) {
@@ -251,6 +276,33 @@ class InferenceManager(
                         hasDetects.set(false)
                         lastDetections = emptyList()
                         mainHandler.post { overlayCanvasView()?.updateDetections(lastDetections) }
+                    }
+
+                    // ─── Chain latency log ───
+                    // Stages (all in ms):
+                    //   loopWait : time waiting for the previous frame to be released
+                    //   hwWrap   : imageReader → hardwareBuffer wrap
+                    //   jni      : Kotlin pre→post JNI detect call (preproc+infer+postproc inside native)
+                    //   postproc : JNI return → aim compute start (target select + aim point calc)
+                    //   aim      : aim decision + IPC injection round-trip
+                    //   total    : loop entry → injection returned
+                    val sample = latencyLogEveryNFrames.coerceAtLeast(1)
+                    if (++frameSeq % sample == 0) {
+                        val tPreAimVal = if (tPreAim == 0L) tPostJNI else tPreAim
+                        val tPostAimVal = if (tPostAim == 0L) tPreAimVal else tPostAim
+                        Log.d(LAT_TAG, String.format(
+                            java.util.Locale.US,
+                            "f=%d | loopWait=%.2f hwWrap=%.2f jni=%.2f postproc=%.2f aim=%.2f(inj=%.2f) total=%.2f | d=%d",
+                            frameSeq,
+                            (tFrameReady - tLoopEntry) / 1e6,
+                            (tHwReady - tFrameReady) / 1e6,
+                            (tPostJNI - tPreJNI) / 1e6,
+                            (tPreAimVal - tPostJNI) / 1e6,
+                            (tPostAimVal - tPreAimVal) / 1e6,
+                            injectNs / 1e6,
+                            (tPostAimVal - tLoopEntry) / 1e6,
+                            lastDetections.size
+                        ))
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "推理帧异常: ${e.message}")

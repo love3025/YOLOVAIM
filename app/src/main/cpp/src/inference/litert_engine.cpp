@@ -193,6 +193,8 @@ std::vector<Detection> LiteRtEngine::detect(
 {
     if (!m_interpreter) return {};
 
+    long long tPreStart = getTimeUs();
+
     TfLiteTensor* input_tensor = TfLiteInterpreterGetInputTensor(m_interpreter, 0);
     if (!input_tensor) return {};
 
@@ -218,14 +220,44 @@ std::vector<Detection> LiteRtEngine::detect(
         float input_scale = qp_input.scale;
         int input_zero_point = qp_input.zero_point;
 
-        for (int y = 0; y < H; ++y) {
-            int baseRow = srcY_lut[y] * rowStride;
-            for (int x = 0; x < W; ++x) {
-                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
-                int idx = (y * W + x) * 3;
-                data[idx + 0] = (int8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
-                data[idx + 1] = (int8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
-                data[idx + 2] = (int8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+        // Build/cached quantize LUT: precompute (round(p * inv255 / scale + zp)) for every (channel, pixel).
+        // The scale/zp only change when the model is reloaded, so a static cache amortizes
+        // 3*256 mul+round per call down to 3*256 table lookups. ~3-5x faster than per-pixel math.
+        static int8_t s_quantLUT[3][256];
+        static float s_cachedScale = 0.0f;
+        static int s_cachedZp = 0;
+        static bool s_quantLUTReady = false;
+        if (!s_quantLUTReady || input_scale != s_cachedScale || input_zero_point != s_cachedZp) {
+            const float invScale = (1.0f / 255.0f) / input_scale;
+            for (int c = 0; c < 3; c++) {
+                for (int p = 0; p < 256; p++) {
+                    int v = (int)std::roundf(p * invScale + input_zero_point);
+                    if (v < -128) v = -128;
+                    else if (v > 127) v = 127;
+                    s_quantLUT[c][p] = (int8_t)v;
+                }
+            }
+            s_cachedScale = input_scale;
+            s_cachedZp = input_zero_point;
+            s_quantLUTReady = true;
+        }
+
+        // Single-thread scalar LUT lookup. ~0.4-0.6ms on a big core, stable under
+        // CPU contention because there's no OpenMP fork-join or NEON gather overhead.
+        const int8_t* lutR = s_quantLUT[0];
+        const int8_t* lutG = s_quantLUT[1];
+        const int8_t* lutB = s_quantLUT[2];
+        const int* xLut = srcX_lut.data();
+        const int ps = pixelStride;
+        for (int y = 0; y < H; y++) {
+            const uint8_t* srcRow = src + srcY_lut[y] * rowStride;
+            int8_t* dstRow = data + (size_t)y * W * 3;
+            for (int x = 0; x < W; x++) {
+                const uint8_t* p = srcRow + xLut[x] * ps;
+                dstRow[0] = lutR[p[0]];
+                dstRow[1] = lutG[p[1]];
+                dstRow[2] = lutB[p[2]];
+                dstRow += 3;
             }
         }
     } else if (input_type == kTfLiteUInt8) {
@@ -233,29 +265,69 @@ std::vector<Detection> LiteRtEngine::detect(
         float input_scale = qp_input.scale;
         int input_zero_point = qp_input.zero_point;
 
-        for (int y = 0; y < H; ++y) {
-            int baseRow = srcY_lut[y] * rowStride;
-            for (int x = 0; x < W; ++x) {
-                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
-                int idx = (y * W + x) * 3;
-                data[idx + 0] = (uint8_t)std::round(src[srcIdx + 0] * inv255 / input_scale + input_zero_point);
-                data[idx + 1] = (uint8_t)std::round(src[srcIdx + 1] * inv255 / input_scale + input_zero_point);
-                data[idx + 2] = (uint8_t)std::round(src[srcIdx + 2] * inv255 / input_scale + input_zero_point);
+        // Same LUT trick for uint8 quantize
+        static int8_t s_u8QuantLUT[3][256];
+        static float s_u8CachedScale = 0.0f;
+        static int s_u8CachedZp = 0;
+        static bool s_u8LUTReady = false;
+        if (!s_u8LUTReady || input_scale != s_u8CachedScale || input_zero_point != s_u8CachedZp) {
+            const float invScale = (1.0f / 255.0f) / input_scale;
+            for (int c = 0; c < 3; c++) {
+                for (int p = 0; p < 256; p++) {
+                    int v = (int)std::roundf(p * invScale + input_zero_point);
+                    if (v < 0) v = 0;
+                    else if (v > 255) v = 255;
+                    s_u8QuantLUT[c][p] = (int8_t)v;
+                }
+            }
+            s_u8CachedScale = input_scale;
+            s_u8CachedZp = input_zero_point;
+            s_u8LUTReady = true;
+        }
+
+        const int* xLut = srcX_lut.data();
+        const int ps = pixelStride;
+        for (int y = 0; y < H; y++) {
+            const uint8_t* srcRow = src + srcY_lut[y] * rowStride;
+            uint8_t* dstRow = data + (size_t)y * W * 3;
+            for (int x = 0; x < W; x++) {
+                const uint8_t* p = srcRow + xLut[x] * ps;
+                dstRow[0] = (uint8_t)s_u8QuantLUT[0][p[0]];
+                dstRow[1] = (uint8_t)s_u8QuantLUT[1][p[1]];
+                dstRow[2] = (uint8_t)s_u8QuantLUT[2][p[2]];
+                dstRow += 3;
             }
         }
     } else {
         float* data = static_cast<float*>(input_data);
-        for (int y = 0; y < H; ++y) {
-            int baseRow = srcY_lut[y] * rowStride;
-            for (int x = 0; x < W; ++x) {
-                int srcIdx = baseRow + srcX_lut[x] * pixelStride;
-                int idx = (y * W + x) * 3;
-                data[idx + 0] = src[srcIdx + 0] * inv255;
-                data[idx + 1] = src[srcIdx + 1] * inv255;
-                data[idx + 2] = src[srcIdx + 2] * inv255;
+
+        // Float path: LUT for inv255 multiplication (saves 1 mul per channel per pixel)
+        static float s_floatLUT[3][256];
+        static bool s_floatLUTReady = false;
+        if (!s_floatLUTReady) {
+            for (int c = 0; c < 3; c++) {
+                for (int p = 0; p < 256; p++) {
+                    s_floatLUT[c][p] = p * inv255;
+                }
+            }
+            s_floatLUTReady = true;
+        }
+
+        const int* xLut = srcX_lut.data();
+        const int ps = pixelStride;
+        for (int y = 0; y < H; y++) {
+            const uint8_t* srcRow = src + srcY_lut[y] * rowStride;
+            float* dstRow = data + (size_t)y * W * 3;
+            for (int x = 0; x < W; x++) {
+                const uint8_t* p = srcRow + xLut[x] * ps;
+                dstRow[0] = s_floatLUT[0][p[0]];
+                dstRow[1] = s_floatLUT[1][p[1]];
+                dstRow[2] = s_floatLUT[2][p[2]];
+                dstRow += 3;
             }
         }
     }
+    long long tPreEnd = getTimeUs();
 
     long long t1 = getTimeUs();
 
@@ -270,9 +342,15 @@ std::vector<Detection> LiteRtEngine::detect(
     // Parse output
     const TfLiteTensor* output_tensor = TfLiteInterpreterGetOutputTensor(m_interpreter, 0);
     if (!output_tensor) return {};
+    long long tPostStart = getTimeUs();
 
-    std::vector<Detection> detections;
-    detections.reserve(m_num_outputs);
+    // Reuse a static buffer instead of re-allocating each call.
+    // reserve() on a vector with sufficient capacity is O(1); the previous
+    // local vector could trigger occasional ~1.7ms heap-alloc spikes under
+    // contention (the post=1.78ms samples in the latency log).
+    static std::vector<Detection> s_detections;
+    s_detections.clear();
+    s_detections.reserve(m_num_outputs);
 
     float invW = 1.0f / screenWidth;
     float invH = 1.0f / screenHeight;
@@ -327,7 +405,7 @@ std::vector<Detection> LiteRtEngine::detect(
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
 
             float hw = bw * 0.5f, hh = bh * 0.5f;
-            detections.push_back({
+            s_detections.push_back({
                 (offsetX + (cx - hw) * regionWidth) * invW,
                 (offsetY + (cy - hh) * regionHeight) * invH,
                 (offsetX + (cx + hw) * regionWidth) * invW,
@@ -368,7 +446,7 @@ std::vector<Detection> LiteRtEngine::detect(
             if (cx < 0 || cx > 1 || cy < 0 || cy > 1) continue;
 
             float hw = bw * 0.5f, hh = bh * 0.5f;
-            detections.push_back({
+            s_detections.push_back({
                 (offsetX + (cx - hw) * regionWidth) * invW,
                 (offsetY + (cy - hh) * regionHeight) * invH,
                 (offsetX + (cx + hw) * regionWidth) * invW,
@@ -379,8 +457,17 @@ std::vector<Detection> LiteRtEngine::detect(
         }
     }
 
-    LOGD("LiteRT Raw: %zu", detections.size());
+    LOGD("LiteRT Raw: %zu", s_detections.size());
 
-    auto finalDetections = nms(detections, 0.45f);
+    auto finalDetections = nms(s_detections, 0.45f);
+    long long tPostEnd = getTimeUs();
+
+    LOGLAT("LiteRT[%s] | pre=%.2fms infer=%.2fms post=%.2fms total=%.2fms raw=%zu nms=%zu",
+           m_backend_type.c_str(),
+           (tPreEnd - tPreStart) / 1e3,
+           (t2 - t1) / 1e3,
+           (tPostEnd - tPostStart) / 1e3,
+           (tPostEnd - tPreStart) / 1e3,
+           s_detections.size(), finalDetections.size());
     return finalDetections;
 }

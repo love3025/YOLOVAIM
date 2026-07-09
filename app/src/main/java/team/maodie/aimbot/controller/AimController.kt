@@ -16,6 +16,7 @@ class AimController(
 ) {
     companion object {
         private const val TAG = "AimController"
+        private const val LAT_TAG = "AimbotLatency"
         private const val AREA_INDEX_AIM = 2
     }
 
@@ -83,6 +84,7 @@ class AimController(
     private val bezierMover = BezierMover()
 
     fun selectTarget(dets: List<DetectionInfo>, cx: Float, cy: Float): DetectionInfo? {
+        val t0 = System.nanoTime()
         val lock = aimingState.lockedTarget
         if (lock != null) {
             val lockCx = lock.centerX()
@@ -130,10 +132,13 @@ class AimController(
             val bcy = bestDet.rect.centerY()
             aimingState.lockedTarget = RectF(bcx, bcy, bcx, bcy)
         }
+        val dtMs = (System.nanoTime() - t0) / 1e6
+        if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "selectTarget=%.2fms candidates=%d", dtMs, dets.size))
         return bestDet
     }
 
     fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+        val t0 = System.nanoTime()
         // 压枪：按住扳机时持续下压目标位置
         var adjustedTargetY = targetY
         if (recoilEnabled) {
@@ -149,6 +154,8 @@ class AimController(
         } else {
             executeAimingPid(targetX, adjustedTargetY, cx, cy)
         }
+        val dtMs = (System.nanoTime() - t0) / 1e6
+        if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "executeAiming=%.2fms mode=%d", dtMs, aimMode))
     }
 
     private fun executeAimingBezier(targetX: Float, targetY: Float, cx: Float, cy: Float) {
@@ -177,9 +184,8 @@ class AimController(
             bezierMover.start(now, now + duration)
         } else {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
-                touchClient()?.lift()
-                aimingState.pointerDown = false
-                aimingState.lockedTarget = null
+                // 收敛后保持按住，检测框消失时由 InferenceManager 负责 lift
+                bezierMover.cancel()
                 return
             }
 
@@ -234,10 +240,7 @@ class AimController(
             Log.d(TAG, "aim DOWN at (${aimingState.centerX}, ${aimingState.centerY}) target=($targetX, $targetY)")
         } else {
             if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
-                touchClient()?.lift()
-                aimingState.pointerDown = false
-                aimingState.lockedTarget = null
-                Log.d(TAG, "aim converged error=($errorX, $errorY)")
+                // 收敛后保持按住，检测框消失时由 InferenceManager 负责 lift
                 return
             }
 
