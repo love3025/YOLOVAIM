@@ -27,6 +27,11 @@ public:
     std::string getBackendType() const override { return m_backend_type; }
     bool isInitialized() const override { return m_initialized; }
 
+    // Per-model QNN HTP cache token. Each model should get a unique token
+    // (typically its basename) so QNN HTP graph cache lives in its own file
+    // and warm-up compiles survive across cold launches.
+    void setQnnModelToken(const char* token);
+
 private:
     // GPU delegate builder (universal, stays here)
     TfLiteDelegate* buildGpuDelegate();
@@ -41,4 +46,5 @@ private:
     TfLiteDelegate* m_delegate = nullptr;
     std::string m_backend_type = "LiteRT";
     bool m_initialized = false;
+    std::string m_qnn_model_token;  // held by-value so m_qnn_engine can borrow .c_str()
 };

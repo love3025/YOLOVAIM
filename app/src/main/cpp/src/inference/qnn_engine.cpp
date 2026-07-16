@@ -86,7 +86,10 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     qnn_options.backend_type = kHtpBackend;
     qnn_options.skel_library_dir = m_native_lib_dir;
     qnn_options.cache_dir = "/data/data/team.maodie.aimbot/cache/qnn";
-    qnn_options.model_token = "yolov8n_htp_v1";
+    // Per-model token isolates the QNN HTP graph cache: cache_dir/<token>_<fingerprint>.bin.
+    // Each model gets its own token (driven by its basename in aimbot.cpp),
+    // so warm-up compiles once and every subsequent load is a fingerprint-skip.
+    qnn_options.model_token = m_model_token ? m_model_token : "yolov8n_htp_v1";
     // Tell QNN this is a latency-critical real-time workload: vote for the
     // highest HTP performance mode at init so DSP scheduling doesn't throttle us
     // when the game or other system services contend for NPU resources.

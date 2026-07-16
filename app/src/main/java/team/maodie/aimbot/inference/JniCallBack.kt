@@ -31,6 +31,19 @@ object JniCallBack {
 
     external fun init(modelPath: String): Boolean
 
+    /**
+     * Pre-compile a TFLite model on QNN HTP without running inference.
+     *
+     * Creates and releases a throwaway LiteRtEngine so QNN's HTP graph cache file
+     * gets written (or hit if it already exists) before the user opens the app's
+     * main view. Safe to call concurrently across models from a background
+     * ExecutorService — QNN serializes per-device internally.
+     *
+     * Returns true if init() succeeded (= cache file is on disk for next load).
+     * Returns false on load error; caller should treat as best-effort.
+     */
+    external fun prewarmQnn(modelPath: String): Boolean
+
     // 传入图像数据，返回坐标数组 [id, score, x1, y1, x2, y2, ...]
     // regionWidth/regionHeight: 要检测的区域大小（像素）
     // screenWidth/screenHeight: 原始屏幕尺寸，用于坐标转换
@@ -53,4 +66,12 @@ object JniCallBack {
     external fun setInputSize(width: Int, height: Int)
 
     external fun release()
+
+    /**
+     * Returns the per-stage timings (ms) of the most recent [detect] call as
+     * a `float[3]` of `[preprocessMs, inferMs, postprocessMs]`, or `null` when
+     * no engine is loaded. Underlying values come from the native engine and
+     * are only meaningful after at least one [detect] has completed.
+     */
+    external fun getInferTimings(): FloatArray?
 }

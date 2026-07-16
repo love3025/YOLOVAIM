@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sin
+import kotlin.math.min
 import team.maodie.aimbot.controller.AimController
 import team.maodie.aimbot.controller.TriggerController
 import team.maodie.aimbot.manager.InferenceManager
@@ -110,6 +111,17 @@ class FloatService : Service() {
     private var bezierDuration = 30; private var bezierControlOffset = 0.3f; private var bezierRandomSpread = 0.1f
     private val bezierMover = BezierMover()
     private var convergeThresh = 10f
+    private var aimFov = 50
+    private var showFov = false
+    private var dynamicFov = false
+    private var fovZoomDelay = 0
+    private var showInferInfo = false
+
+    // EMA-smoothed fps derived from each frame's full inference budget
+    // (preproc + invoke + postproc). EMA keeps the displayed number from
+    // bouncing on single-frame stalls while still tracking real changes
+    // within ~5 frames.
+    private var inferFps = 0f
 
     // Hold-to-fire (按住激发) state — uses trigger slot, separate from aim slot
 
@@ -201,6 +213,12 @@ class FloatService : Service() {
             dp = { dp(it) }
         )
 
+        // Wire inference-info overlay through OverlayManager.setInferInfo so
+        // the user gets a real TextView instead of Canvas.drawText inside the
+        // full-screen overlay (which can be clipped by status-bar insets).
+        // InferenceManager marshals the callback to the main thread for us.
+        inferenceManager.onInferInfoUpdate = { text -> overlayManager.setInferInfo(text) }
+
         // Load config to controllers
         loadConfigToControllers()
     }
@@ -216,6 +234,9 @@ class FloatService : Service() {
         aimController.bezierControlOffset = bezierControlOffset
         aimController.bezierRandomSpread = bezierRandomSpread
         aimController.convergeThresh = convergeThresh
+        aimController.aimFov = aimFov
+        aimController.dynamicFov = dynamicFov
+        aimController.fovZoomDelay = fovZoomDelay
         aimController.aimOffsetYRatio = aimOffsetYRatio
         aimController.aimSwayAmplitude = aimSwayAmplitude
         aimController.aimPrediction = aimPrediction
@@ -270,6 +291,11 @@ class FloatService : Service() {
         bezierControlOffset = cfg.bezierControlOffset
         bezierRandomSpread = cfg.bezierRandomSpread
         convergeThresh = cfg.convergeThresh.toFloat()
+        aimFov = cfg.aimFov.coerceIn(20, (min(screenWidth, screenHeight) / 2).coerceAtLeast(20))
+        showFov = cfg.showFov
+        dynamicFov = cfg.dynamicFov
+        fovZoomDelay = cfg.fovZoomDelay.coerceIn(0, 100)
+        showInferInfo = cfg.showInferInfo
         touchDisplayEnabled = cfg.aimTouchDisplay
         cachedRangePx = ((cfg.range.coerceIn(48, 800) + 8) / 16) * 16
         aimbotOn.set(cfg.aimbotEnabled)
@@ -387,6 +413,10 @@ class FloatService : Service() {
         try { if (triggerOverlayAdded) { wm.removeView(triggerOverlay); triggerOverlayAdded = false } } catch (_: Exception) {}
         try { if (touchDisplayAdded) { wm.removeView(touchDisplayView); touchDisplayAdded = false } } catch (_: Exception) {}
         try { if (areaSettingsAdded) { wm.removeView(areaSettingsView); areaSettingsAdded = false } } catch (_: Exception) {}
+        // OverlayManager also owns the inference-info TextView. Without this
+        // the line outlives the service — clear it here so a MainActivity
+        // "Stop FloatService" actually drops every overlay window.
+        try { overlayManager.cleanup() } catch (_: Exception) {}
     }
 
     private fun setupBall() {
@@ -406,9 +436,29 @@ class FloatService : Service() {
         overlayView.showCaptureRange = cfg.showCaptureRange
         overlayView.showDetectionBox = cfg.showDetectionBox
         overlayView.showCenterDot = cfg.showCenterDot
+        overlayView.showFov = cfg.showFov
+        overlayView.fovRadius = cfg.aimFov
         overlayView.rangeRadius = cfg.range.coerceIn(50, 800)
-        overlayParams = makeParams(MATCH_PARENT, MATCH_PARENT, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS)
+        // Pin the overlay's draw frame to the MediaProjection capture dimensions.
+        // setupImageReader() runs before setupOverlay() in onStartCommand, so
+        // captureW/H already hold the current screen size here.
+        overlayView.setGeometry(captureW, captureH)
+        // Explicit (0,0) + physical screen size — without these, WindowManager
+        // may reposition the overlay window when other overlay windows (e.g.
+        // the GUI panel with FLAG_NOT_TOUCH_MODAL) become interactive, which
+        // visibly shifts the center dot / capture range / detection rectangles
+        // upward relative to the screen midpoint.
+        overlayParams = makeParams(screenWidth, screenHeight, WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0; y = 0
+        }
         wm.addView(overlayView, overlayParams); overlayAdded = true
+
+        // Create the inference-info TextView overlay up front. It stays GONE
+        // until the user toggles "显示推理信息" — showing it can race with
+        // WindowManager if the user opens the panel and flips the toggle
+        // before the loop hits its first frame.
+        overlayManager.setupInferInfoView()
     }
 
     private fun initTouchInjector() {
@@ -600,9 +650,10 @@ class FloatService : Service() {
         JniCallBack.release()
         val modelFile = java.io.File(applicationContext.filesDir, filename)
         try {
-            val qnnCache = java.io.File(applicationContext.cacheDir, "qnn")
-            if (qnnCache.exists()) qnnCache.deleteRecursively()
-            qnnCache.mkdirs()
+            // Don't wipe the QNN cache here — prewarm in LoginActivity already
+            // populated it; wiping would defeat that pass and force each
+            // model switch to recompile the HTP graph from scratch.
+            java.io.File(applicationContext.cacheDir, "qnn").mkdirs()
             if (!modelFile.exists()) {
                 modelFile.parentFile?.mkdirs()
                 assets.open(filename).use { i -> java.io.FileOutputStream(modelFile).use { o -> i.copyTo(o) } }
@@ -668,6 +719,12 @@ class FloatService : Service() {
             guiPanel.classBoxAimRatios = classBoxAimRatios.toMutableMap()
             guiPanel.classTriggerOffsets = classTriggerOffsets.toMutableMap()
             guiPanel.triggerClasses = triggerClasses.toMutableSet()
+            guiPanel.maxFov = (min(screenWidth, screenHeight) / 2).coerceAtLeast(20)
+            guiPanel.aimFov = aimFov.coerceIn(20, guiPanel.maxFov)
+            guiPanel.showFov = showFov
+            guiPanel.dynamicFov = dynamicFov
+            guiPanel.fovZoomDelay = fovZoomDelay
+            guiPanel.showInferInfo = showInferInfo
             guiPanel.buildUI()
             guiPanel.visibility = View.VISIBLE; guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
             guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start(); guiVisible = true; return
@@ -701,6 +758,12 @@ class FloatService : Service() {
         guiPanel.bezierControlOffset = cfg.bezierControlOffset
         guiPanel.bezierRandomSpread = cfg.bezierRandomSpread
         guiPanel.convergeThresh = cfg.convergeThresh
+        guiPanel.maxFov = (min(screenWidth, screenHeight) / 2).coerceAtLeast(20)
+        guiPanel.aimFov = cfg.aimFov.coerceIn(20, guiPanel.maxFov)
+        guiPanel.showFov = cfg.showFov
+        guiPanel.dynamicFov = cfg.dynamicFov
+        guiPanel.fovZoomDelay = cfg.fovZoomDelay.coerceIn(0, 100)
+        guiPanel.showInferInfo = cfg.showInferInfo
         guiPanel.aimTouchDisplay = cfg.aimTouchDisplay
         guiPanel.aimTouchSize = 20
         guiPanel.modelRunning = modelRunning
@@ -714,7 +777,12 @@ class FloatService : Service() {
         guiPanel.modelIndex = ProjectionHolder.selectedModelIndex
         guiPanel.onModelSelected = { idx ->
             val e = ProjectionHolder.modelList.getOrNull(idx)
-            if (e != null) { ProjectionHolder.notifyModelIndexChanged(idx); lastModelIndex = idx; loadModel(e.filename) }
+            if (e != null) {
+                ProjectionHolder.notifyModelIndexChanged(idx)
+                ConfigManager.updateConfig { modelIndex = idx }
+                lastModelIndex = idx
+                loadModel(e.filename)
+            }
         }
         guiPanel.classMap = currentClasses
         guiPanel.aimClasses = aimClasses.toMutableSet()
@@ -759,6 +827,49 @@ class FloatService : Service() {
         guiPanel.onBezierControlOffsetChanged = { bezierControlOffset = it; aimController.bezierControlOffset = it; ConfigManager.updateConfig { bezierControlOffset = it } }
         guiPanel.onBezierRandomSpreadChanged = { bezierRandomSpread = it; aimController.bezierRandomSpread = it; ConfigManager.updateConfig { bezierRandomSpread = it } }
         guiPanel.onConvergeThreshChanged = { convergeThresh = it.toFloat(); aimController.convergeThresh = it.toFloat(); ConfigManager.updateConfig { convergeThresh = it } }
+        guiPanel.onAimbotFovChanged = { px ->
+            val maxFov = (min(screenWidth, screenHeight) / 2).coerceAtLeast(20)
+            val v = px.coerceIn(20, maxFov)
+            aimFov = v
+            aimController.aimFov = v
+            overlayView.fovRadius = v
+            overlayView.postInvalidate()
+            ConfigManager.updateConfig { aimFov = v }
+        }
+        guiPanel.onShowFovChanged = { on ->
+            showFov = on
+            overlayView.showFov = on
+            overlayView.postInvalidate()
+            ConfigManager.updateConfig { showFov = on }
+        }
+        guiPanel.onDynamicFovChanged = { on ->
+            dynamicFov = on
+            aimController.dynamicFov = on
+            if (on) aimController.resetDynamicFov()
+            overlayView.fovRadius = aimController.effectiveFov
+            overlayView.postInvalidate()
+            ConfigManager.updateConfig { dynamicFov = on }
+        }
+        guiPanel.onFovZoomDelayChanged = { ms ->
+            val v = ms.coerceIn(0, 100)
+            fovZoomDelay = v
+            aimController.fovZoomDelay = v
+            ConfigManager.updateConfig { fovZoomDelay = v }
+        }
+        guiPanel.onShowInferInfoChanged = { on ->
+            showInferInfo = on
+            // Clear stale text immediately when the user turns it off; the
+            // inference loop won't post again once the toggle is off, and a
+            // lazy clear would leave the previous frame's stats frozen on
+            // screen.
+            if (!on) overlayManager.setInferInfo("")
+            // Reset the EMA so the first sample after a re-enable is shown
+            // verbatim instead of being averaged with a stale value from
+            // before the toggle was flipped (models can warm up enough that
+            // the new fps is wildly different from the old one).
+            if (on) inferFps = 0f
+            ConfigManager.updateConfig { showInferInfo = on }
+        }
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
@@ -965,6 +1076,43 @@ class FloatService : Service() {
 
                     val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
 
+                    // Per-stage inference-info overlay. Only fetched + posted
+                    // when the user toggled "显示推理信息" on — when off, this
+                    // entire block is a boolean read, so the inference loop
+                    // pays nothing for the toggle being disabled (no extra JNI
+                    // calls, no String formatting, no MainThread post).
+                    if (showInferInfo) {
+                        val count = if (result != null) result.size / 6 else 0
+                        val timings = JniCallBack.getInferTimings()
+                        val pre = timings?.getOrNull(0) ?: 0f
+                        val inferMs = timings?.getOrNull(1) ?: 0f
+                        val post = timings?.getOrNull(2) ?: 0f
+                        // fps = how many inferences COULD complete per second
+                        // at the current per-frame budget, not the actual
+                        // capture rate (which may be throttled by the
+                        // ImageReader / projection capture pipeline). Clamp
+                        // to a sane upper bound — on fast QNN HTP runs the
+                        // per-frame time can dip below 1ms and produce a
+                        // multi-thousand-fps number that just looks like noise.
+                        val totalMs = pre + inferMs + post
+                        val currentFps = if (totalMs > 0.001f) {
+                            (1000f / totalMs).coerceAtMost(999.9f)
+                        } else 999.9f
+                        // EMA smoothing (alpha=0.3): ~5 frames to settle to
+                        // within 10% of a step change. Field is reset to 0 by
+                        // the toggle callback so the first displayed value
+                        // after a re-enable is the fresh sample, not a stale
+                        // average from hours ago.
+                        inferFps = if (inferFps == 0f) currentFps
+                                   else (0.7f * inferFps + 0.3f * currentFps)
+                        val text = String.format(
+                            java.util.Locale.US,
+                            "推理 %.1ffps · 预处理 %.2fms · 后处理 %.2fms · 检测 %d",
+                            inferFps, pre, post, count
+                        )
+                        mainHandler.post { overlayManager.setInferInfo(text) }
+                    }
+
                     // 按住激发: 物理手指按在触发区时才能自瞄（提到外层，使 lift 条件也能读到）
                         val holdToAimActive = if (aimHoldEnabled) touchService.isFingerInTriggerZone() else true
 
@@ -995,24 +1143,31 @@ class FloatService : Service() {
                             val aimDets = if (aimClasses.isEmpty()) lastDetections
                                 else lastDetections.filter { it.classId in aimClasses }
 
-                            if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
-                                val target = aimController.selectTarget(aimDets, centerX, centerY)
-                                if (target != null) {
-                                    val tcx = target.rect.centerX(); val tcy = target.rect.centerY()
+                            val target: DetectionInfo? = if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
+                                val t = aimController.selectTarget(aimDets, centerX, centerY)
+                                if (t != null) {
+                                    val tcx = t.rect.centerX(); val tcy = t.rect.centerY()
                                     var boxH = 0f; var minD = Float.MAX_VALUE
                                     for (det in aimDets) {
                                         val r = det.rect
                                         val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
                                         if (d < minD) { minD = d; boxH = r.height() }
                                     }
-                                    val classOffset = aimController.classAimOffsets[target.classId] ?: aimController.aimOffsetYRatio
-                                    val classBoxRatio = aimController.classBoxAimRatios[target.classId] ?: aimController.boxAimRatio
+                                    val classOffset = aimController.classAimOffsets[t.classId] ?: aimController.aimOffsetYRatio
+                                    val classBoxRatio = aimController.classBoxAimRatios[t.classId] ?: aimController.boxAimRatio
                                     val aimX = tcx
                                     val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
                                     aimController.aimingState.updateVelocity(tcx, tcy)
                                     aimController.executeAiming(aimX, aimY, centerX, centerY)
                                 }
-                            }
+                                t
+                            } else null
+
+                            // Dynamic FOV ticks every inference frame regardless of
+                            // aimbot state — so the FOV can expand back to normal
+                            // even after the target is lost or aimbot is toggled off.
+                            aimController.updateDynamicFov(target, System.currentTimeMillis())
+                            overlayView.fovRadius = aimController.effectiveFov
                         } else {
                             hasDetects.set(false); lastDetections = emptyList()
                             mainHandler.post { overlayView.updateDetections(lastDetections) }
@@ -1063,9 +1218,13 @@ class FloatService : Service() {
         if (overlayAdded) {
             (overlayView.layoutParams as? WindowManager.LayoutParams)?.let { p ->
                 p.width = screenWidth; p.height = screenHeight
+                p.gravity = Gravity.TOP or Gravity.START
+                p.x = 0; p.y = 0
                 p.flags = p.flags or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 wm.updateViewLayout(overlayView, p)
             }
+            // Re-anchor the draw frame to the (possibly new) capture dimensions.
+            overlayView.setGeometry(screenWidth, screenHeight)
         }
         if (guiAdded && guiVisible) {
             wm.removeView(guiPanel); guiAdded = false; showGui()

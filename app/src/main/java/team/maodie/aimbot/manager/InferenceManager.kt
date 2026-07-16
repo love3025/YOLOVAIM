@@ -77,15 +77,24 @@ class InferenceManager(
     var latencyLogEveryNFrames = 1
     private var frameSeq = 0
 
+    /**
+     * Invoked on the main thread when the inference-info overlay should be
+     * updated with the latest preprocessed/infer/postprocess breakdown +
+     * detection count. Empty text clears/hides the overlay. FloatService
+     * wires this to [OverlayManager.setInferInfo].
+     */
+    var onInferInfoUpdate: ((String) -> Unit)? = null
+
     fun loadModel(filename: String) {
         val wasRunning = inferRunning.getAndSet(false)
         try { executor.submit { }.get() } catch (_: Exception) {}
         JniCallBack.release()
         val modelFile = File(service.applicationContext.filesDir, filename)
         try {
-            val qnnCache = File(service.applicationContext.cacheDir, "qnn")
-            if (qnnCache.exists()) qnnCache.deleteRecursively()
-            qnnCache.mkdirs()
+            // Leave the QNN cache in place — prewarm in LoginActivity already
+            // populated it. Wiping here would force every model switch to
+            // re-compile the HTP graph from scratch.
+            File(service.applicationContext.cacheDir, "qnn").mkdirs()
             if (!modelFile.exists()) {
                 // Create parent directories if needed (for ncnn/ subdirectory)
                 modelFile.parentFile?.mkdirs()
@@ -196,6 +205,27 @@ class InferenceManager(
                     val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
                     // ─── T4: just after JNI returns (Kotlin receives FloatArray) ───
                     val tPostJNI = System.nanoTime()
+
+                    val count = result?.size?.div(6) ?: 0
+                    // Per-stage breakdown is only fetched when the overlay toggle
+                    // is on. When off, the overlay stays cleared (FloatService
+                    // handles the disable transition so the inference loop keeps
+                    // no per-frame MainHandler post on the hot path).
+                    if (ConfigManager.getConfig().showInferInfo) {
+                        val timings = JniCallBack.getInferTimings()
+                        val pre = timings?.getOrNull(0) ?: 0f
+                        val infer = timings?.getOrNull(1) ?: 0f
+                        val post = timings?.getOrNull(2) ?: 0f
+                        val infoText = String.format(
+                            java.util.Locale.US,
+                            "推理 %.2fms · 预处理 %.2f · 后处理 %.2f · 检测 %d",
+                            infer, pre, post, count
+                        )
+                        if ((frameSeq % 60) == 0) {
+                            Log.i(TAG, "showInferInfo on: timings=$timings text='$infoText' cbSet=${onInferInfoUpdate != null}")
+                        }
+                        mainHandler.post { onInferInfoUpdate?.invoke(infoText) }
+                    }
 
                     var injectNs = 0L
                     var tPreAim = 0L

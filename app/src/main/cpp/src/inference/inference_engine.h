@@ -29,6 +29,17 @@ public:
     virtual void setForceCpu(bool force) { m_force_cpu = force; }
     virtual void setCpuThreads(int threads) { m_cpu_threads = threads; }
 
+    // Per-stage timings of the most recent detect() call, in milliseconds.
+    // Engines populate these at the end of detect(); the JNI bridge exposes
+    // them via getInferTimings() so the UI can show a debug overlay. Default
+    // impl returns the most recent values from the base class fields if any
+    // subclass forgets to override.
+    virtual void getLastTimingsMs(float& pre, float& infer, float& post) const {
+        pre = m_last_pre_ms;
+        infer = m_last_infer_ms;
+        post = m_last_post_ms;
+    }
+
     static bool isNcnnModel(const char* model_path) {
         std::string path(model_path);
         return path.size() >= 6 && path.substr(path.size() - 6) == ".param";
@@ -43,4 +54,7 @@ protected:
     float m_conf_thresh = 0.25f;
     bool m_force_cpu = false;
     int m_cpu_threads = 4;
+    float m_last_pre_ms = 0.0f;
+    float m_last_infer_ms = 0.0f;
+    float m_last_post_ms = 0.0f;
 };

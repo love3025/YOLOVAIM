@@ -155,6 +155,9 @@ std::vector<Detection> NcnnEngine::detect(
            (tPostEnd - tPostStart) / 1e3,
            tTotal / 1e3,
            detections.size(), finalDetections.size());
+    m_last_pre_ms = (float)((tPreEnd - tPreStart) / 1e3);
+    m_last_infer_ms = (float)((t2 - t1) / 1e3);
+    m_last_post_ms = (float)((tPostEnd - tPostStart) / 1e3);
     return finalDetections;
 }
 

@@ -29,3 +29,9 @@ app/build/
 *.zip
 *副本*.cpp
 *backup*
+
+# License tool — 整个目录不进 git（含密钥 + 算码/解码脚本 + 混淆源码）
+license-tool/
+
+# License native 闭源源码目录（编译产物 .so 已提交到 jniLibs/，源码本身不公开）
+license-ndk-src/
