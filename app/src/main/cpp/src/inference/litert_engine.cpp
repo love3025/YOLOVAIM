@@ -25,7 +25,6 @@ void LiteRtEngine::deleteDelegate() {
         } else if (m_backend_type == "GPU") {
             TfLiteGpuDelegateV2Delete(m_delegate);
         }
-        // Neuron delegate delete - TODO
         m_delegate = nullptr;
     }
 }
@@ -37,6 +36,10 @@ LiteRtEngine::LiteRtEngine() = default;
 
 LiteRtEngine::~LiteRtEngine() {
     release();
+}
+
+void LiteRtEngine::setQnnModelToken(const char* token) {
+    m_qnn_model_token = token ? token : "";
 }
 
 bool LiteRtEngine::init(const char* model_path) {
@@ -59,6 +62,12 @@ bool LiteRtEngine::init(const char* model_path) {
 
     std::vector<DelegateTrial> trials;
     if (!m_force_cpu) {
+        // Hand the per-model token to QnnEngine before any buildDelegate() call,
+        // so the cache file is uniquely named and warm-up work survives across
+        // cold launches (fingerprint match skips HTP graph compile on reuse).
+        if (!m_qnn_model_token.empty()) {
+            m_qnn_engine.setModelToken(m_qnn_model_token.c_str());
+        }
         // Platform-specific NPU delegates
         trials.push_back({[this]{ return m_qnn_engine.buildDelegate(); }, "QNN HTP"});
         // trials.push_back({[this]{ return m_neuron_engine.buildDelegate(); }, "Neuron"});  // TODO
@@ -98,22 +107,24 @@ bool LiteRtEngine::init(const char* model_path) {
         }
     }
 
-    if (!interpreter_created) {
-        m_delegate = nullptr;
-        m_backend_type = "CPU";
-        LOGD("Falling back to CPU");
-        TfLiteInterpreterOptions* cpu_opts = TfLiteInterpreterOptionsCreate();
-        TfLiteInterpreterOptionsSetNumThreads(cpu_opts, m_cpu_threads);
-        m_interpreter = TfLiteInterpreterCreate(m_model, cpu_opts);
-        TfLiteInterpreterOptionsDelete(cpu_opts);
+if (!interpreter_created) {
+    m_delegate = nullptr;
+    m_backend_type = "CPU";
+    LOGD("Falling back to built-in CPU kernel (XNNPACK-accelerated)");
 
-        if (!m_interpreter) {
-            LOGE("Failed to create interpreter with CPU");
-            TfLiteModelDelete(m_model);
-            m_model = nullptr;
-            return false;
-        }
+    TfLiteInterpreterOptions* cpu_opts = TfLiteInterpreterOptionsCreate();
+    TfLiteInterpreterOptionsSetNumThreads(cpu_opts, m_cpu_threads);
+
+    m_interpreter = TfLiteInterpreterCreate(m_model, cpu_opts);
+    TfLiteInterpreterOptionsDelete(cpu_opts);
+
+    if (!m_interpreter) {
+        LOGE("Failed to create CPU interpreter");
+        TfLiteModelDelete(m_model);
+        m_model = nullptr;
+        return false;
     }
+}
 
     if (TfLiteInterpreterAllocateTensors(m_interpreter) != kTfLiteOk) {
         LOGE("Failed to allocate tensors");
@@ -469,5 +480,8 @@ std::vector<Detection> LiteRtEngine::detect(
            (tPostEnd - tPostStart) / 1e3,
            (tPostEnd - tPreStart) / 1e3,
            s_detections.size(), finalDetections.size());
+    m_last_pre_ms = (float)((tPreEnd - tPreStart) / 1e3);
+    m_last_infer_ms = (float)((t2 - t1) / 1e3);
+    m_last_post_ms = (float)((tPostEnd - tPostStart) / 1e3);
     return finalDetections;
 }

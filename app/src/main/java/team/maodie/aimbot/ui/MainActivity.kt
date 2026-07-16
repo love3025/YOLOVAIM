@@ -29,6 +29,8 @@ import com.google.android.material.card.MaterialCardView
 import rikka.shizuku.Shizuku
 import org.json.JSONObject
 import team.maodie.aimbot.manager.ConfigManager
+import team.maodie.aimbot.manager.LicenseManager
+import team.maodie.aimbot.manager.LicenseManager.VerifyResult
 import team.maodie.aimbot.inference.JniCallBack
 import team.maodie.aimbot.model.TouchMethod
 import team.maodie.aimbot.util.ProjectionHolder
@@ -157,6 +159,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 授权 gate：每次启动都重新解码并校验过期，不信任 SharedPreferences 缓存
+        // 这样即使攻击者从 AndroidManifest 里删掉 LoginActivity、或直接 launch MainActivity，都会被拦住
+        when (val r = LicenseManager.verifySaved(this)) {
+            is VerifyResult.Success -> { /* pass */ }
+            is VerifyResult.Failure -> {
+                redirectToLoginOrCrash("授权验证失败：${r.error}")
+                return
+            }
+        }
+
         ConfigManager.init(this)
         selectedTouchMethod = TouchMethod.entries[ConfigManager.getConfig().touchMethodIndex.coerceIn(0, TouchMethod.entries.size - 1)]
         loadModelsFromJson()
@@ -220,7 +233,7 @@ class MainActivity : AppCompatActivity() {
         val dialog = MaterialAlertDialogBuilder(this)
             .setView(dialogView)
             .setCancelable(false)
-            .setPositiveButton("同意 (${30})", null)
+            .setPositiveButton("同意 (${15})", null)
             .setNegativeButton("退出") { _, _ -> finish() }
             .create()
 
@@ -241,7 +254,7 @@ class MainActivity : AppCompatActivity() {
             // 30 秒倒计时
             val handler = android.os.Handler(mainLooper)
             val countdownRunnable = object : Runnable {
-                var remaining = 30
+                var remaining = 15
                 override fun run() {
                     remaining--
                     if (remaining > 0) {
@@ -444,7 +457,7 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(MD3_ON_SURFACE_VARIANT)
                 })
                 addView(TextView(context).apply {
-                    text = "1.2.0"
+                    text = "1.2.1"
                     textSize = 14f
                     setTextColor(MD3_ON_SURFACE)
                     typeface = Typeface.DEFAULT_BOLD
@@ -699,6 +712,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int): Int = (v * displayDensity).toInt()
+
+    /**
+     * 授权失败 → 跳 LoginActivity。
+     * 如果连 LoginActivity 都启不起来（manifest 里被删 / disabled），
+     * 直接 Toast 报错 + finishAffinity + System.exit(1) 闪退，不让用户停留在无授权的 MainActivity。
+     */
+    private fun redirectToLoginOrCrash(reason: String) {
+        try {
+            val intent = Intent(this, LoginActivity::class.java).apply {
+                putExtra(LoginActivity.EXTRA_REASON, reason)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            }
+            startActivity(intent)
+            finish()
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "授权异常且无法跳转验证界面，请重启 app",
+                Toast.LENGTH_LONG
+            ).show()
+            finishAffinity()
+            System.exit(1)
+        }
+    }
 
     private fun onFabClick() {
         if (aimbotState != AimbotState.STANDBY) {
@@ -1065,11 +1102,12 @@ class MainActivity : AppCompatActivity() {
     private fun loadModel(filename: String) {
         val modelFile = File(filesDir, filename)
         try {
-            val qnnCache = File(cacheDir, "qnn")
-            if (qnnCache.exists()) {
-                qnnCache.deleteRecursively()
-            }
-            qnnCache.mkdirs()
+            // Don't wipe the QNN cache here — that wipes out everything the
+            // LoginActivity prewarmer just wrote. Each model lives in its own
+            // <token>_<fingerprint>.bin file under cache/qnn/, so loading a
+            // second model just adds (or fingerprint-hits) one file. The
+            // prewarm pass is what keeps model switching instant.
+            File(cacheDir, "qnn").mkdirs()
             if (!modelFile.exists()) {
                 modelFile.parentFile?.mkdirs()
                 assets.open(filename).use { input ->
@@ -1137,11 +1175,10 @@ class MainActivity : AppCompatActivity() {
         if (modelList.isEmpty()) return
 
         try {
-            val qnnCache = File(cacheDir, "qnn")
-            if (qnnCache.exists()) {
-                qnnCache.deleteRecursively()
-            }
-            qnnCache.mkdirs()
+            // Don't wipe QNN cache here — prewarm in LoginActivity already
+            // produced a cache file for every model. Wiping would force a
+            // full QNN HTP recompile on each app launch.
+            File(cacheDir, "qnn").mkdirs()
             val idx = selectedModelIndex.coerceIn(0, modelList.size - 1)
             val defaultModel = modelList[idx]
             val modelFile = File(filesDir, defaultModel.filename)

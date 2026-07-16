@@ -8,6 +8,8 @@ import team.maodie.aimbot.injector.TouchInjectorInterface
 import team.maodie.aimbot.model.AreaConfig
 import team.maodie.aimbot.model.AimingState
 import team.maodie.aimbot.model.BezierMover
+import kotlin.math.max
+import kotlin.math.min
 
 class AimController(
     private val service: FloatService,
@@ -61,6 +63,9 @@ class AimController(
     var bezierControlOffset = 0.3f
     var bezierRandomSpread = 0.1f
     var convergeThresh = 10f
+    var aimFov = 50  // px — circle radius around crosshair; targets outside this are ignored
+    var dynamicFov = false  // shrink FOV onto target during aim to avoid retargeting
+    var fovZoomDelay = 0  // ms — hold time at shrunken FOV after target lost before expanding back
     var aimOffsetYRatio = 0f
     var aimSwayAmplitude = 0
     var aimPrediction = 0
@@ -83,29 +88,57 @@ class AimController(
     val aimingState = AimingState()
     private val bezierMover = BezierMover()
 
+    // Dynamic FOV state — `dynamicCurrentFov` is the actual radius used for
+    // target selection and rendered as the FOV circle; it ranges from
+    // `aimFov` (full circle when no target) down to `targetMaxDim + padding`
+    // while locked onto a target.
+    private var dynamicCurrentFov = 50f
+    private var lostTargetMs: Long = -1
+
+    val effectiveFov: Int
+        get() = dynamicCurrentFov.toInt().coerceIn(20, maxOf(aimFov, 20))
+
+    fun resetDynamicFov() {
+        dynamicCurrentFov = aimFov.toFloat()
+        lostTargetMs = -1
+    }
+
     fun selectTarget(dets: List<DetectionInfo>, cx: Float, cy: Float): DetectionInfo? {
         val t0 = System.nanoTime()
+        val fovSq = (effectiveFov * effectiveFov).toFloat()
+
+        fun inFov(bcx: Float, bcy: Float): Boolean {
+            val dx = bcx - cx; val dy = bcy - cy
+            return dx * dx + dy * dy <= fovSq
+        }
+
         val lock = aimingState.lockedTarget
         if (lock != null) {
-            val lockCx = lock.centerX()
-            val lockCy = lock.centerY()
-            var minDist = Float.MAX_VALUE
-            var bestDet: DetectionInfo? = null
-            for (det in dets) {
-                val r = det.rect
-                val bcx = (r.left + r.right) * 0.5f
-                val bcy = (r.top + r.bottom) * 0.5f
-                val d = (bcx - lockCx) * (bcx - lockCx) + (bcy - lockCy) * (bcy - lockCy)
-                if (d < minDist) {
-                    minDist = d
-                    bestDet = det
+            // Drop the lock if it has drifted outside the FOV circle — otherwise
+            // we keep aiming at a stale target after the user has rotated away.
+            if (!inFov(lock.centerX(), lock.centerY())) {
+                aimingState.lockedTarget = null
+            } else {
+                val lockCx = lock.centerX()
+                val lockCy = lock.centerY()
+                var minDist = Float.MAX_VALUE
+                var bestDet: DetectionInfo? = null
+                for (det in dets) {
+                    val r = det.rect
+                    val bcx = (r.left + r.right) * 0.5f
+                    val bcy = (r.top + r.bottom) * 0.5f
+                    val d = (bcx - lockCx) * (bcx - lockCx) + (bcy - lockCy) * (bcy - lockCy)
+                    if (d < minDist) {
+                        minDist = d
+                        bestDet = det
+                    }
                 }
+                if (minDist < 22500f && bestDet != null) {
+                    lock.set(bestDet.rect.centerX(), bestDet.rect.centerY(), bestDet.rect.centerX(), bestDet.rect.centerY())
+                    return bestDet
+                }
+                aimingState.lockedTarget = null
             }
-            if (minDist < 22500f && bestDet != null) {
-                lock.set(bestDet.rect.centerX(), bestDet.rect.centerY(), bestDet.rect.centerX(), bestDet.rect.centerY())
-                return bestDet
-            }
-            aimingState.lockedTarget = null
         }
 
         // Priority: if priorityClass is set and present, only consider that class
@@ -114,16 +147,18 @@ class AimController(
             if (prioritized.isNotEmpty()) prioritized else dets
         } else dets
 
-        // Pick closest to crosshair
+        // Pick closest to crosshair WITHIN FOV
         var bestDistSq = Float.MAX_VALUE
         var bestDet: DetectionInfo? = null
         for (det in candidates) {
             val r = det.rect
             val bcx = (r.left + r.right) * 0.5f
             val bcy = (r.top + r.bottom) * 0.5f
-            val d = (bcx - cx) * (bcx - cx) + (bcy - cy) * (bcy - cy)
-            if (d < bestDistSq) {
-                bestDistSq = d
+            val dx = bcx - cx; val dy = bcy - cy
+            val dSq = dx * dx + dy * dy
+            if (dSq > fovSq) continue
+            if (dSq < bestDistSq) {
+                bestDistSq = dSq
                 bestDet = det
             }
         }
@@ -135,6 +170,37 @@ class AimController(
         val dtMs = (System.nanoTime() - t0) / 1e6
         if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "selectTarget=%.2fms candidates=%d", dtMs, dets.size))
         return bestDet
+    }
+
+    // Drives dynamic FOV: shrinks toward (target.maxDim + pad) while locked on
+    // a target; stays shrunken for `fovZoomDelay` ms after target lost; expands
+    // back to `aimFov` if no target reappears within the grace window.
+    fun updateDynamicFov(target: DetectionInfo?, nowMs: Long) {
+        if (!dynamicFov) {
+            dynamicCurrentFov = aimFov.toFloat()
+            lostTargetMs = -1
+            return
+        }
+        val maxFov = aimFov.toFloat()
+        if (target != null) {
+            val r = target.rect
+            // FOV must contain the target. Use the larger of width/height plus
+            // a small padding so the box edge clears the circle, but never
+            // smaller than the slider minimum and never larger than aimFov.
+            val targetMax = max(r.width(), r.height())
+            val desiredMin = (targetMax + 8f).coerceIn(20f, maxFov)
+            // Smoothly shrink toward desiredMin — 6 px/frame is roughly 360 px/s
+            // at 60fps, fast enough to react before the aim crosses the target
+            // but slow enough to be visible to the user.
+            dynamicCurrentFov = max(desiredMin, dynamicCurrentFov - 6f).coerceAtMost(maxFov)
+            lostTargetMs = -1
+        } else {
+            if (lostTargetMs < 0) lostTargetMs = nowMs
+            val dt = nowMs - lostTargetMs
+            if (dt >= fovZoomDelay) {
+                dynamicCurrentFov = min(maxFov, dynamicCurrentFov + 6f)
+            }
+        }
     }
 
     fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {

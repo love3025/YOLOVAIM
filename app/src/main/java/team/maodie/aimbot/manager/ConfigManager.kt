@@ -31,6 +31,10 @@ data class AppConfig(
     var triggerShowArea: Boolean = false,
     var range: Int = 300,
     var showCaptureRange: Boolean = false,
+    var aimFov: Int = 50,
+    var showFov: Boolean = false,
+    var dynamicFov: Boolean = false,
+    var fovZoomDelay: Int = 0,
     var showDetectionBox: Boolean = false,
     var showCenterDot: Boolean = false,
     var areaSettingsEnabled: Boolean = false,
@@ -53,7 +57,8 @@ data class AppConfig(
     var useCpuInference: Boolean = false,
     var cpuThreadCount: Int = 4,
     var touchMethodIndex: Int = 0,  // 0=Uinput, 1=InputManager
-    var kf: Float = 0.05f           // PID feedforward gain (F term, 0.01-0.20)
+    var kf: Float = 0.05f,          // PID feedforward gain (F term, 0.01-0.20)
+    var showInferInfo: Boolean = false  // render preprocess/infer/postprocess time + det count at top of overlay
 )
 
 object ConfigManager {
@@ -96,6 +101,10 @@ object ConfigManager {
                         triggerShowArea = obj.optBoolean("triggerShowArea", false),
                         range = obj.optInt("range", 300),
                         showCaptureRange = obj.optBoolean("showCaptureRange", false),
+                        aimFov = obj.optInt("aimFov", 50),
+                        showFov = obj.optBoolean("showFov", false),
+                        dynamicFov = obj.optBoolean("dynamicFov", false),
+                        fovZoomDelay = obj.optInt("fovZoomDelay", 0),
                         showDetectionBox = obj.optBoolean("showDetectionBox", false),
                         showCenterDot = obj.optBoolean("showCenterDot", false),
                         areaSettingsEnabled = obj.optBoolean("areaSettingsEnabled", false),
@@ -118,7 +127,8 @@ object ConfigManager {
                         useCpuInference = obj.optBoolean("useCpuInference", false),
                         cpuThreadCount = obj.optInt("cpuThreadCount", 4),
                         touchMethodIndex = obj.optInt("touchMethodIndex", 0),
-                        kf = obj.optDouble("kf", 0.05).toFloat()
+                        kf = obj.optDouble("kf", 0.05).toFloat(),
+                        showInferInfo = obj.optBoolean("showInferInfo", false)
                     )
                 }
             }
@@ -155,6 +165,10 @@ object ConfigManager {
                     put("triggerShowArea", config.triggerShowArea)
                     put("range", config.range)
                     put("showCaptureRange", config.showCaptureRange)
+                    put("aimFov", config.aimFov)
+                    put("showFov", config.showFov)
+                    put("dynamicFov", config.dynamicFov)
+                    put("fovZoomDelay", config.fovZoomDelay)
                     put("showDetectionBox", config.showDetectionBox)
                     put("showCenterDot", config.showCenterDot)
                     put("areaSettingsEnabled", config.areaSettingsEnabled)
@@ -178,6 +192,7 @@ object ConfigManager {
                     put("cpuThreadCount", config.cpuThreadCount)
                     put("touchMethodIndex", config.touchMethodIndex)
                     put("kf", config.kf.toDouble())
+                    put("showInferInfo", config.showInferInfo)
                 }
                 file.writeText(obj.toString(2))
             }

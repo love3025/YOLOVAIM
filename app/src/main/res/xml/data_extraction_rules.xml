@@ -1,19 +1,14 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Android 12+ Backup / Device Transfer 规则。
+
+   授权数据绝不能被云备份或设备迁移带走 — 否则 license_prefs.xml 会被恢复覆盖。
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="license_prefs.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="license_prefs.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

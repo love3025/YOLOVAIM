@@ -12,29 +12,28 @@ import team.maodie.aimbot.model.DetectionInfo
  */
 class OverlayCanvasView(context: Context) : View(context) {
 
+    // Explicit capture-space dimensions. Mirrors MediaProjection's coordinate
+    // frame. The center point and capture range are derived from these so the
+    // overlay stays anchored to the exact capture regardless of how the View's
+    // own measured size happens to map under window flags / status-bar shifts.
+    var captureWidth: Int = 0
+    var captureHeight: Int = 0
+
     var rangeRadius: Int = 300
     var detections: List<DetectionInfo> = emptyList()
     var aimbotEnabled: Boolean = false
     var showCaptureRange: Boolean = false
     var showDetectionBox: Boolean = false
     var showCenterDot: Boolean = false
+    var showFov: Boolean = false
+    var fovRadius: Int = 50
 
-    // Color palette per class
-    private val classColors = intArrayOf(
-        Color.parseColor("#00FF00"),  // 0 green
-        Color.parseColor("#FF0000"),  // 1 red
-        Color.parseColor("#0088FF"),  // 2 blue
-        Color.parseColor("#FFFF00"),  // 3 yellow
-        Color.parseColor("#FF00FF"),  // 4 magenta
-        Color.parseColor("#00FFFF"),  // 5 cyan
-        Color.parseColor("#FF8800"),  // 6 orange
-        Color.parseColor("#FF69B4"),  // 7 pink
-        Color.parseColor("#88FF88"),  // 8 light green
-        Color.parseColor("#AAAAFF"),  // 9 light blue
-    )
-
-    private fun colorForClass(classId: Int): Int =
-        classColors[classId % classColors.size]
+    fun setGeometry(w: Int, h: Int) {
+        if (captureWidth == w && captureHeight == h) return
+        captureWidth = w
+        captureHeight = h
+        invalidate()
+    }
 
     private val paintCorner = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -44,11 +43,7 @@ class OverlayCanvasView(context: Context) : View(context) {
     }
 
     private val paintBox = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 3f
-    }
-
-    private val paintBoxDim = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(0x99, 0xFF, 0xFF, 0xFF)
         style = Paint.Style.STROKE
         strokeWidth = 2f
     }
@@ -58,58 +53,29 @@ class OverlayCanvasView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
 
-    private val paintLabelBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-
-    private val paintLabel = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 32f
-        typeface = Typeface.DEFAULT_BOLD
-        setShadowLayer(2f, 1f, 1f, Color.BLACK)
+    private val paintFov = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(0xAA, 0xFF, 0xFF, 0xFF)
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
     }
 
     override fun onDraw(canvas: Canvas) {
         val dets = detections
 
         if (showCaptureRange) {
-            val cx = width / 2f
-            val cy = height / 2f
+            val cx = captureWidth / 2f
+            val cy = captureHeight / 2f
             val half = rangeRadius.toFloat()
             drawCornerBox(canvas, cx - half, cy - half, cx + half, cy + half)
             if (showCenterDot) canvas.drawCircle(cx, cy, 4f, paintCenter)
         }
 
+        if (showFov && fovRadius > 0) {
+            canvas.drawCircle(captureWidth / 2f, captureHeight / 2f, fovRadius.toFloat(), paintFov)
+        }
+
         if (showDetectionBox && dets.isNotEmpty()) {
-            val cx = width / 2f
-            val cy = height / 2f
-            val rangeSq = (rangeRadius * rangeRadius).toFloat()
-
-            for (det in dets) {
-                val rect = det.rect
-                val boxCx = (rect.left + rect.right) * 0.5f
-                val boxCy = (rect.top + rect.bottom) * 0.5f
-                val dx = boxCx - cx
-                val dy = boxCy - cy
-                val inRange = dx * dx + dy * dy <= rangeSq
-                val color = colorForClass(det.classId)
-
-                // Draw rect
-                val p = if (inRange) paintBox else paintBoxDim
-                p.color = if (inRange) color else (color and 0x88FFFFFF.toInt())
-                canvas.drawRect(rect, p)
-
-                // Draw class label above box
-                val label = det.className
-                val textW = paintLabel.measureText(label)
-                val textH = paintLabel.textSize
-                val pad = 4f
-                val lx = rect.left
-                val ly = rect.top - textH - pad * 2
-                paintLabelBg.color = color and 0xCC000000.toInt() or 0x00FFFFFF.toInt()
-                canvas.drawRect(lx, ly, lx + textW + pad * 2, ly + textH + pad * 2, paintLabelBg)
-                canvas.drawText(label, lx + pad, ly + textH + pad, paintLabel)
-            }
+            for (det in dets) canvas.drawRect(det.rect, paintBox)
         }
     }
 

@@ -472,6 +472,8 @@ std::vector<Detection> MtkEngine::detect(
 
     static const float inv255 = 1.0f / 255.0f;
 
+    long long tPreStart = getTimeUs();
+
     // 1. Write input to buffer
     void* input_ptr = nullptr;
     LiteRtStatus status = m_api.LockTensorBuffer(m_input_buffer, &input_ptr,
@@ -530,6 +532,7 @@ std::vector<Detection> MtkEngine::detect(
     }
 
     m_api.UnlockTensorBuffer(m_input_buffer);
+    long long tPreEnd = getTimeUs();
 
     // 2. Run inference
     long long t1 = getTimeUs();
@@ -714,5 +717,13 @@ std::vector<Detection> MtkEngine::detect(
     LOGD("MTK NPU Raw: %zu", detections.size());
 
     auto finalDetections = nms(detections, 0.45f);
+    long long tPostEnd = getTimeUs();
+
+    m_last_pre_ms = (float)((tPreEnd - tPreStart) / 1e3);
+    m_last_infer_ms = (float)((t2 - t1) / 1e3);
+    m_last_post_ms = (float)((tPostEnd - t2) / 1e3);
+    LOGLAT("MTK | pre=%.2fms infer=%.2fms post=%.2fms raw=%zu nms=%zu",
+           m_last_pre_ms, m_last_infer_ms, m_last_post_ms,
+           detections.size(), finalDetections.size());
     return finalDetections;
 }

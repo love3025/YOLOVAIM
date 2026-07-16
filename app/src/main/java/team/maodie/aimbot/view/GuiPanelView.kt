@@ -9,6 +9,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
+import kotlin.math.roundToInt
 import android.widget.ScrollView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
@@ -67,6 +68,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onRecoilStrengthChanged: ((Float) -> Unit)? = null
     var onConvergeThreshChanged: ((Int) -> Unit)? = null
     var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
+    var onAimbotFovChanged: ((Int) -> Unit)? = null
+    var onShowFovChanged: ((Boolean) -> Unit)? = null
+    var onDynamicFovChanged: ((Boolean) -> Unit)? = null
+    var onFovZoomDelayChanged: ((Int) -> Unit)? = null
+    var onShowInferInfoChanged: ((Boolean) -> Unit)? = null
 
     var aimbotEnabled = false; var speed = 0.07f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
@@ -76,6 +82,12 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var aimMode = 0; var bezierDuration = 30; var bezierControlOffset = 0.3f; var bezierRandomSpread = 0.1f
     var aimHoldEnabled = false
     var convergeThresh = 10
+    var aimFov = 50
+    var maxFov = 1000
+    var showFov = false
+    var dynamicFov = false
+    var fovZoomDelay = 0
+    var showInferInfo = false
     var showCaptureRange = false; var showDetectionBox = false; var showCenterDot = false
     var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
@@ -96,6 +108,9 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var autoStopEnabled = false
     private var navScrollView: ScrollView? = null
     private var savedNavScrollY = 0
+    // Container wrapping the dynamic-FOV slider + description; visibility is
+    // bound to the `dynamicFov` toggle so the controls disappear when disabled.
+    private var dynamicFovControls: LinearLayout? = null
 
     private val clPrimary = Color.parseColor("#1976D2")
     private val clOnPrimary = Color.WHITE; private val clSurface = Color.WHITE
@@ -207,12 +222,46 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "压枪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = recoilEnabled; setOnCheckedChangeListener { _, c -> recoilEnabled = c; onRecoilEnabledChanged?.invoke(c) } })
         })
-        contentContainer.addView(buildSlider("压枪强度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("压枪强度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
         contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键时持续下压"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(buildSliderInt("收敛阈值", convergeThresh, 0, 100, "px") { convergeThresh = it; onConvergeThreshChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("收敛阈值", convergeThresh.toFloat(), 0f, 100f, "0px") { v -> val iv = v.toInt(); convergeThresh = iv; onConvergeThreshChanged?.invoke(iv) })
         contentContainer.addView(MaterialTextView(context).apply { text = "误差小于此值时抬手"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        // FOV (Field of View) circle — only targets inside this radius are aimable
+        contentContainer.addView(buildStepperSlider("FOV 半径", aimFov.coerceIn(20, maxFov).toFloat(), 20f, maxFov.toFloat(), "0px") { v -> val iv = v.toInt(); aimFov = iv; onAimbotFovChanged?.invoke(iv) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "只瞄准屏幕中心 ${aimFov}px 范围内的目标"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4))
+            addView(MaterialTextView(context).apply { text = "显示 FOV 圆"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply {
+                isChecked = showFov
+                setOnCheckedChangeListener { _, c -> showFov = c; onShowFovChanged?.invoke(c) }
+            })
+        })
+        // Dynamic FOV: shrink FOV onto the locked target so another detection
+        // can't take over the aim; expand back to aimFov after target is lost.
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4))
+            addView(MaterialTextView(context).apply { text = "动态 FOV"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply {
+                isChecked = dynamicFov
+                setOnCheckedChangeListener { _, c ->
+                    dynamicFov = c
+                    dynamicFovControls?.visibility = if (c) View.VISIBLE else View.GONE
+                    onDynamicFovChanged?.invoke(c)
+                }
+            })
+        })
+        dynamicFovControls = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (dynamicFov) View.VISIBLE else View.GONE
+            addView(buildStepperSlider("缩放延迟", fovZoomDelay.toFloat(), 0f, 100f, "0ms") { v -> val iv = v.toInt(); fovZoomDelay = iv; onFovZoomDelayChanged?.invoke(iv) })
+            addView(MaterialTextView(context).apply { text = "目标丢失后保持当前 FOV 的时长"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        }
+        contentContainer.addView(dynamicFovControls)
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         // Mode toggle
@@ -240,13 +289,13 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             // PID controls
             contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
             contentContainer.addView(spacer(dp(4)))
-            contentContainer.addView(buildSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Ki", ki, 0.00f, 0.1f, "%.3f") { ki = it; onKiChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("Ki", ki, 0.00f, 0.1f, "%.3f") { ki = it; onKiChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Kd", kd, 0.00f, 0.2f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("Kd", kd, 0.00f, 0.2f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("Kf", kf, 0.0f, 0.2f, "%.2f") { kf = it; onKfChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("Kf", kf, 0.0f, 0.2f, "%.2f") { kf = it; onKfChanged?.invoke(it) })
         } else {
             // Bezier controls
             contentContainer.addView(MaterialTextView(context).apply { text = "贝塞尔参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
@@ -258,11 +307,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             }
             contentContainer.addView(curveView)
             contentContainer.addView(spacer(dp(4)))
-            contentContainer.addView(buildSliderInt("持续时间", bezierDuration, 5, 100, "ms") { bezierDuration = it; onBezierDurationChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("持续时间", bezierDuration.toFloat(), 5f, 100f, "0ms") { v -> val iv = v.toInt(); bezierDuration = iv; onBezierDurationChanged?.invoke(iv) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("曲线弯曲", bezierControlOffset, 0.05f, 0.50f, "%.2f") { bezierControlOffset = it; curveView.controlOffset = it; onBezierControlOffsetChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("曲线弯曲", bezierControlOffset, 0.05f, 0.50f, "%.2f") { bezierControlOffset = it; curveView.controlOffset = it; onBezierControlOffsetChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildSlider("随机幅度", bezierRandomSpread, 0f, 0.50f, "%.2f") { bezierRandomSpread = it; curveView.randomSpread = it; onBezierRandomSpreadChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("随机幅度", bezierRandomSpread, 0f, 0.50f, "%.2f") { bezierRandomSpread = it; curveView.randomSpread = it; onBezierRandomSpreadChanged?.invoke(it) })
         }
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
@@ -272,10 +321,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             contentContainer.addView(spacer(dp(4)))
             for ((id, name) in classMap.entries.sortedBy { it.key }) {
                 val offset = classAimOffsets[id] ?: 0f
-                contentContainer.addView(buildSlider(name, offset, -1.5f, 1.5f, "%.0f%%") { v -> classAimOffsets[id] = v; onClassAimOffsetChanged?.invoke(id, v) })
+                contentContainer.addView(buildStepperSlider(name, offset, -1.5f, 1.5f, "%.0f%%") { v -> classAimOffsets[id] = v; onClassAimOffsetChanged?.invoke(id, v) })
             }
         } else {
-            contentContainer.addView(buildSlider("Y偏移", aimOffsetYRatio, -1.5f, 1.5f, "%.0f%%") { aimOffsetYRatio = it; onAimOffsetYRatioChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("Y偏移", aimOffsetYRatio, -1.5f, 1.5f, "%.0f%%") { aimOffsetYRatio = it; onAimOffsetYRatioChanged?.invoke(it) })
         }
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
@@ -285,13 +334,13 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             contentContainer.addView(spacer(dp(4)))
             for ((id, name) in classMap.entries.sortedBy { it.key }) {
                 val ratio = classBoxAimRatios[id] ?: 0.5f
-                contentContainer.addView(buildSlider(name, ratio, 0f, 1f, "%.0f%%") { v -> classBoxAimRatios[id] = v; onClassBoxAimRatioChanged?.invoke(id, v) })
+                contentContainer.addView(buildStepperSlider(name, ratio, 0f, 1f, "%.0f%%") { v -> classBoxAimRatios[id] = v; onClassBoxAimRatioChanged?.invoke(id, v) })
             }
         } else {
-            contentContainer.addView(buildSlider("框内偏移 (1=最上 0=最下)", boxAimRatio, 0f, 1f, "%.0f%%") { boxAimRatio = it; onBoxAimRatioChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("框内偏移 (1=最上 0=最下)", boxAimRatio, 0f, 1f, "%.0f%%") { boxAimRatio = it; onBoxAimRatioChanged?.invoke(it) })
         }
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("摆动幅度", aimSwayAmplitude, 0, 2, "px") { aimSwayAmplitude = it; onAimSwayAmplitudeChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("摆动幅度", aimSwayAmplitude.toFloat(), 0f, 2f, "0px") { v -> val iv = v.toInt(); aimSwayAmplitude = iv; onAimSwayAmplitudeChanged?.invoke(iv) })
 
         // Class selection
         if (classMap.isNotEmpty()) {
@@ -348,15 +397,15 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = triggerEnabled; setOnCheckedChangeListener { _, c -> triggerEnabled = c; onTriggerEnabled?.invoke(c) } })
         })
         contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
-        contentContainer.addView(buildSliderInt("反应速度", triggerReactionSpeed, 10, 500, "ms") { triggerReactionSpeed = it; onTriggerReactionSpeed?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("反应速度", triggerReactionSpeed.toFloat(), 10f, 500f, "0ms") { v -> val iv = v.toInt(); triggerReactionSpeed = iv; onTriggerReactionSpeed?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("冷却时间", triggerCooldown, 10, 1000, "ms") { triggerCooldown = it; onTriggerCooldown?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("冷却时间", triggerCooldown.toFloat(), 10f, 1000f, "0ms") { v -> val iv = v.toInt(); triggerCooldown = iv; onTriggerCooldown?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("向上波动", triggerUpFluctuation, 0, 15, "ms") { triggerUpFluctuation = it; onTriggerUpFluctuation?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("向上波动", triggerUpFluctuation.toFloat(), 0f, 15f, "0ms") { v -> val iv = v.toInt(); triggerUpFluctuation = iv; onTriggerUpFluctuation?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("向下波动", triggerDownFluctuation, 0, 15, "ms") { triggerDownFluctuation = it; onTriggerDownFluctuation?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("向下波动", triggerDownFluctuation.toFloat(), 0f, 15f, "0ms") { v -> val iv = v.toInt(); triggerDownFluctuation = iv; onTriggerDownFluctuation?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSliderInt("触摸时间", triggerTouchDuration, 1, 50, "ms") { triggerTouchDuration = it; onTriggerTouchDuration?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("触摸时间", triggerTouchDuration.toFloat(), 1f, 50f, "0ms") { v -> val iv = v.toInt(); triggerTouchDuration = iv; onTriggerTouchDuration?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(2), 0, dp(2))
@@ -364,7 +413,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = autoStopEnabled; setOnCheckedChangeListener { _, c -> autoStopEnabled = c; onAutoStopEnabledChanged?.invoke(c) } })
         })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildSlider("Y偏移", triggerOffsetYRatio, -2f, 0f, "%.0f%%") { triggerOffsetYRatio = it; onTriggerOffsetYRatioChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("Y偏移", triggerOffsetYRatio, -2f, 0f, "%.0f%%") { triggerOffsetYRatio = it; onTriggerOffsetYRatioChanged?.invoke(it) })
         if (classMap.size > 1) {
             contentContainer.addView(spacer(dp(6)))
             contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
@@ -372,7 +421,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             contentContainer.addView(spacer(dp(4)))
             for ((id, name) in classMap.entries.sortedBy { it.key }) {
                 val offset = classTriggerOffsets[id] ?: 0f
-                contentContainer.addView(buildSlider(name, offset, -2f, 0f, "%.0f%%") { v -> classTriggerOffsets[id] = v; onClassTriggerOffsetChanged?.invoke(id, v) })
+                contentContainer.addView(buildStepperSlider(name, offset, -2f, 0f, "%.0f%%") { v -> classTriggerOffsets[id] = v; onClassTriggerOffsetChanged?.invoke(id, v) })
             }
         }
         if (classMap.isNotEmpty()) {
@@ -423,7 +472,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(spacer(dp(12)))
         contentContainer.addView(MaterialTextView(context).apply { text = "检测置信度"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
         contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
-        contentContainer.addView(buildSlider("阈值", confidence, 0.10f, 0.90f, "%.2f") { confidence = it; onConfidenceChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("阈值", confidence, 0.10f, 0.90f, "%.2f") { confidence = it; onConfidenceChanged?.invoke(it) })
         contentContainer.addView(MaterialTextView(context).apply { text = "低于此值的检测结果将被过滤"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
     }
 
@@ -433,7 +482,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "显示截取范围"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = showCaptureRange; setOnCheckedChangeListener { _, c -> showCaptureRange = c; onShowCaptureRangeChanged?.invoke(c) } })
         })
-        contentContainer.addView(buildSliderInt("截取范围", range, 48, 800, "px", stepSize = 16f) { range = it; onRangeChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("截取范围", range.toFloat(), 48f, 800f, "0px") { v -> val iv = v.toInt(); range = iv; onRangeChanged?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -478,39 +527,97 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = autoSaveDataset; setOnCheckedChangeListener { _, c -> autoSaveDataset = c; onAutoSaveDatasetChanged?.invoke(c) } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "检测到目标时自动截图+YOLO标注，保存到应用外部存储"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(MaterialTextView(context).apply { text = "显示推理信息"; textSize = 11f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+            addView(MaterialSwitch(context).apply { isChecked = showInferInfo; setOnCheckedChangeListener { _, c -> showInferInfo = c; onShowInferInfoChanged?.invoke(c) } })
+        })
+        contentContainer.addView(MaterialTextView(context).apply { text = "屏幕上方显示推理时长/预处理/后处理耗时及检测数"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
     }
 
-    private fun buildSlider(label: String, value: Float, min: Float, max: Float, fmt: String, onChange: (Float) -> Unit): LinearLayout {
-        fun display(v: Float) = when {
-            fmt == "0px" -> "${v.toInt()}px"
-            fmt.endsWith("%%") -> "${fmt.removeSuffix("%%").format(v * 100)}%"
-            else -> fmt.format(v)
+    private fun stepSizeForFmt(fmt: String): Float {
+        if (fmt.startsWith("0")) return 1f
+        val m = Regex("""\.(\d+)f""").find(fmt) ?: return 1f
+        val n = m.groupValues[1].toInt()
+        // 内部值 v 对应 display：普通走 v；百分比走 v*100，1% 显示差 = 0.01 内部差
+        val base = Math.pow(10.0, -n.toDouble()).toFloat()
+        return if (fmt.endsWith("%%")) base * 0.01f else base
+    }
+
+    private fun displayValue(v: Float, fmt: String): String = when {
+        fmt.startsWith("0") -> "${v.toInt()}${fmt.removePrefix("0")}"
+        fmt.endsWith("%%") -> "${fmt.removeSuffix("%%").format(v * 100)}%"
+        else -> fmt.format(v)
+    }
+
+    private fun buildStepperSlider(
+        label: String,
+        value: Float,
+        min: Float,
+        max: Float,
+        fmt: String,
+        onChange: (Float) -> Unit
+    ): LinearLayout = buildStepperSlider(label, value, min, max, fmt, 0f, onChange)
+
+    private fun buildStepperSlider(
+        label: String,
+        value: Float,
+        min: Float,
+        max: Float,
+        fmt: String,
+        explicitStep: Float,
+        onChange: (Float) -> Unit
+    ): LinearLayout {
+        val step = if (explicitStep > 0f) explicitStep else stepSizeForFmt(fmt)
+        val valueTv = MaterialTextView(context).apply {
+            text = displayValue(value, fmt); textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD
         }
-        val valueTv = MaterialTextView(context).apply { text = display(value); textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
-        val slider = Slider(context).apply { valueFrom = min; valueTo = max; this.value = value.coerceIn(min, max); trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
-            setLabelFormatter { display(it) }
-            addOnChangeListener { _, v, fu -> if (fu) { onChange(v); valueTv.text = display(v) } } }
-        return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
-            addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-                addView(MaterialTextView(context).apply { text = label; textSize = 11f; setTextColor(clOnSurfaceVariant); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
-                addView(valueTv) })
-            addView(slider) }
-    }
-
-    private fun buildSliderInt(label: String, value: Int, min: Int, max: Int, suffix: String, stepSize: Float = 1f, onChange: (Int) -> Unit): LinearLayout {
-        val valueTv = MaterialTextView(context).apply { text = "$value$suffix"; textSize = 12f; setTextColor(clPrimary); typeface = Typeface.DEFAULT_BOLD }
         val slider = Slider(context).apply {
-            valueFrom = min.toFloat(); valueTo = max.toFloat()
-            this.stepSize = if (max - min < 10) 1f else stepSize
-            this.value = (value.toFloat() / this.stepSize).toInt() * this.stepSize
-            trackHeight = dp(4); layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
-            addOnChangeListener { _, v, fu -> if (fu) { val iv = v.toInt(); onChange(iv); valueTv.text = "$iv$suffix" } }
+            valueFrom = min; valueTo = max
+            this.stepSize = step
+            this.value = ((value.coerceIn(min, max) / step).roundToInt() * step).coerceIn(min, max)
+            trackHeight = dp(4)
+            layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f)
+            isTickVisible = false
+            setLabelFormatter { displayValue(it, fmt) }
+            addOnChangeListener { _, v, fu -> if (fu) { valueTv.text = displayValue(v, fmt); onChange(v) } }
+        }
+        val bump = { delta: Float ->
+            val snapped = ((slider.value + delta) / step).roundToInt() * step
+            val clamped = snapped.coerceIn(min, max)
+            if (clamped != slider.value) {
+                slider.value = clamped
+                valueTv.text = displayValue(clamped, fmt)
+                onChange(clamped)
+            }
+        }
+        val btnStyle = android.R.attr.borderlessButtonStyle
+        val btnLp = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+        val minusBtn = MaterialButton(context, null, btnStyle).apply {
+            text = "−"; textSize = 18f; isAllCaps = false
+            insetTop = 0; insetBottom = 0; minWidth = 0; minimumWidth = 0
+            setPadding(dp(4), 0, dp(4), 0)
+            layoutParams = btnLp
+            setOnClickListener { bump(-step) }
+        }
+        val plusBtn = MaterialButton(context, null, btnStyle).apply {
+            text = "+"; textSize = 18f; isAllCaps = false
+            insetTop = 0; insetBottom = 0; minWidth = 0; minimumWidth = 0
+            setPadding(dp(4), 0, dp(4), 0)
+            layoutParams = btnLp
+            setOnClickListener { bump(step) }
         }
         return LinearLayout(context).apply { orientation = LinearLayout.VERTICAL
             addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 addView(MaterialTextView(context).apply { text = label; textSize = 11f; setTextColor(clOnSurfaceVariant); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
                 addView(valueTv) })
-            addView(slider) }
+            addView(LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(minusBtn)
+                addView(slider)
+                addView(plusBtn) })
+        }
     }
 
     private fun buildEmpty(name: String) {
