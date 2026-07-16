@@ -89,7 +89,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="1. 禁止对本软件进行二次修改（二改）后重新发布或分发。\n\n2. 禁止以任何形式对本软件或其衍生版本进行商业销售、收费分发或盈利性传播。\n\n3. 禁止将本软件打包、集成到任何付费产品或服务中。\n\n4. 禁止移除或修改本软件中的版权声明、许可证信息。\n\n5. 禁止利用本软件从事任何违反当地法律法规的活动。"
+        android:text="1. 禁止二次修改本软件 APK 安装文件后重新发布或分发。\n\n2. 禁止以任何形式对本软件或其衍生版本进行商业销售、收费分发或盈利性传播。\n\n3. 禁止将本软件打包、集成到任何付费产品或服务中。\n\n4. 禁止移除或修改本软件中的版权声明、许可证信息。\n\n5. 禁止利用本软件从事任何违反当地法律法规的活动。"
         android:textSize="14sp"
         android:textColor="?attr/colorOnSurface"
         android:layout_marginTop="8dp"
