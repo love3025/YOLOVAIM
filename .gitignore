@@ -35,3 +35,7 @@ license-tool/
 
 # License native 闭源源码目录（编译产物 .so 已提交到 jniLibs/，源码本身不公开）
 license-ndk-src/
+
+# Release signing — 密钥库和签名配置不能进 git
+app/release.jks
+app/signing.txt
