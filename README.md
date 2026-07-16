@@ -155,4 +155,4 @@ Android FPS 游戏 AI 瞄准辅助工具，基于 YOLOv8n 实时目标检测，�
 
 ## License
 
-MIT License - See [LICENSE](LICENSE)
+GNU GPL v3 - See [LICENSE](LICENSE)
