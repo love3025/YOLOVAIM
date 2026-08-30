@@ -55,8 +55,12 @@ jobs:
           echo "--- settings.gradle.kts ---"
           cat settings.gradle.kts
 
+      # 上游把 gradlew 提交成 100644，checkout 出来没有执行位。仓库里已经
+      # 用 update-index --chmod=+x 修了，这里再兜一次，免得别的分支上又踩到。
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Report APK
         if: success()

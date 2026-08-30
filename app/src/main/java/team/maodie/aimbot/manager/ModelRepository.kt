@@ -180,7 +180,7 @@ object ModelRepository {
     private fun probeTflite(file: File): Probe {
         var interpreter: Interpreter? = null
         return try {
-            interpreter = Interpreter(file, Interpreter.Options().apply { numThreads = 1 })
+            interpreter = Interpreter(file)
 
             val inTensor = interpreter.getInputTensor(0)
             val inShape = inTensor.shape()
@@ -189,9 +189,8 @@ object ModelRepository {
 
             val precision = when (inTensor.dataType()) {
                 DataType.UINT8, DataType.INT8 -> "INT8"
-                DataType.FLOAT16 -> "FLOAT16"
                 DataType.FLOAT32 -> "FLOAT32"
-                else -> inTensor.dataType().name
+                else -> inTensor.dataType().name   // FLOAT16 等按枚举名原样显示
             }
 
             val outShape = interpreter.getOutputTensor(0).shape()
