@@ -455,7 +455,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(MaterialTextView(context).apply { text = "模型选择"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
         contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(8)))
         if (modelNames.isEmpty()) {
-            contentContainer.addView(MaterialTextView(context).apply { text = "无可用模型"; textSize = 13f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(16), 0, dp(16)) })
+            contentContainer.addView(MaterialTextView(context).apply { text = "还没有导入模型，请回到主界面导入"; textSize = 13f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(16), 0, dp(16)) })
         } else {
             modelNames.forEachIndexed { idx, name ->
                 val selected = idx == modelIndex

@@ -27,17 +27,17 @@ import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputLayout
 import com.google.android.material.card.MaterialCardView
 import rikka.shizuku.Shizuku
-import org.json.JSONObject
 import team.maodie.aimbot.manager.ConfigManager
-import team.maodie.aimbot.manager.LicenseManager
-import team.maodie.aimbot.manager.LicenseManager.VerifyResult
+import team.maodie.aimbot.manager.ModelRepository
+import team.maodie.aimbot.manager.ModelRepository.ImportedModel
 import team.maodie.aimbot.inference.JniCallBack
 import team.maodie.aimbot.model.TouchMethod
 import team.maodie.aimbot.util.ProjectionHolder
 import team.maodie.aimbot.service.FloatService
 import team.maodie.aimbot.R
 import java.io.File
-import java.io.FileOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
@@ -51,17 +51,8 @@ class MainActivity : AppCompatActivity() {
         // 不要在打开app时恢复状态，app打开时应该是待机中
     }
 
-    data class ModelInfo(
-        val filename: String,
-        val displayName: String,
-        val precision: String,
-        val inputSize: Int,
-        val outputSize: Int,
-        val description: String,
-        val classes: Map<Int, String> = emptyMap()
-    )
-
-    private var modelList: List<ModelInfo> = emptyList()
+    // 模型列表直接用 ModelRepository 的条目，不再维护一份本地镜像结构
+    private var modelList: List<ImportedModel> = emptyList()
     private var selectedModelIndex = 0
     private var modelInfoCardView: LinearLayout? = null
     private var modelAutoComplete: MaterialAutoCompleteTextView? = null
@@ -115,10 +106,7 @@ class MainActivity : AppCompatActivity() {
         if (data != null) {
             ProjectionHolder.resultCode = result.resultCode
             ProjectionHolder.resultData = data
-            ProjectionHolder.modelList = modelList.map { m ->
-                ProjectionHolder.ModelEntry(m.filename, m.displayName, m.precision, m.inputSize, m.outputSize, m.description, m.classes)
-            }
-            ProjectionHolder.selectedModelIndex = selectedModelIndex
+            publishModelList()
             ProjectionHolder.selectedTouchMethod = selectedTouchMethod
             startForegroundService(Intent(this, FloatService::class.java))
         }
@@ -134,6 +122,15 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { ConfigManager.importFromUri(this, it) }
+    }
+
+    // 模型导入。用 OpenMultipleDocuments 是为了让 ncnn 用户能一次把
+    // .param 和 .bin 一起选中——分两次选也行，同名即可配对。
+    // .tflite / .param / .bin 都没有注册 MIME 类型，只能开 */* 让用户自己找。
+    private val modelImportLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) importModels(uris)
     }
 
     companion object {
@@ -160,19 +157,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 授权 gate：每次启动都重新解码并校验过期，不信任 SharedPreferences 缓存
-        // 这样即使攻击者从 AndroidManifest 里删掉 LoginActivity、或直接 launch MainActivity，都会被拦住
-        when (val r = LicenseManager.verifySaved(this)) {
-            is VerifyResult.Success -> { /* pass */ }
-            is VerifyResult.Failure -> {
-                redirectToLoginOrCrash("授权验证失败：${r.error}")
-                return
-            }
-        }
-
         ConfigManager.init(this)
+        ModelRepository.init(this)
         selectedTouchMethod = TouchMethod.entries[ConfigManager.getConfig().touchMethodIndex.coerceIn(0, TouchMethod.entries.size - 1)]
-        loadModelsFromJson()
+        loadModelsFromRepository()
         val cfgModelIndex = ConfigManager.getConfig().modelIndex
         if (cfgModelIndex !in 0 until modelList.size) {
             ConfigManager.updateConfig { modelIndex = 0 }
@@ -208,7 +196,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initAfterDisclaimer() {
-        android.os.Handler(mainLooper).postDelayed({ loadDefaultModel() }, 500)
+        android.os.Handler(mainLooper).postDelayed({
+            loadDefaultModel()
+            startPrewarmInBackground()
+        }, 500)
         android.os.Handler(mainLooper).postDelayed({
             if (::statusText.isInitialized) checkPermissionsOnStart()
         }, 1500)
@@ -551,24 +542,44 @@ class MainActivity : AppCompatActivity() {
             }
 
             addView(TextView(context).apply {
-                text = "选择模型"
+                text = "检测模型"
                 textSize = 16f
                 setTextColor(MD3_PRIMARY)
                 typeface = Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, dp(8))
             })
 
-            val displayNames = modelList.map { it.displayName }
-            if (displayNames.isEmpty()) {
+            // 导入按钮常驻，不管有没有模型都能再导
+            addView(MaterialButton(this@MainActivity).apply {
+                text = "导入模型"
+                isAllCaps = false
+                setOnClickListener { modelImportLauncher.launch(arrayOf("*/*")) }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            })
+
+            if (modelList.isEmpty()) {
+                addView(createSpacer(12))
                 addView(TextView(context).apply {
-                    text = "无可用模型"
-                    textSize = 14f
-                    setTextColor(Color.parseColor("#B3261E"))
+                    text = "还没有导入任何模型。\n\n" +
+                        "点上方按钮选择模型文件：\n" +
+                        "· TFLite —— 选中 .tflite 单个文件\n" +
+                        "· NCNN —— 同时选中 .param 和 .bin 两个文件\n\n" +
+                        "导入后可自行填写类别名称。本应用不内置任何模型，" +
+                        "检测什么完全取决于你导入的模型。"
+                    textSize = 13f
+                    setTextColor(MD3_ON_SURFACE_VARIANT)
+                    setLineSpacing(dp(2).toFloat(), 1f)
                 })
                 return@apply
             }
 
+            addView(createSpacer(12))
+
             // 从xml加载 MD3 外露下拉菜单
+            val displayNames = modelList.map { it.displayName }
             val dropdownLayout = layoutInflater.inflate(R.layout.dropdown_layout, null) as TextInputLayout
             val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
             modelAutoComplete = autoComplete
@@ -576,19 +587,20 @@ class MainActivity : AppCompatActivity() {
             val safeIndex = if (selectedModelIndex in displayNames.indices) selectedModelIndex else 0
             autoComplete.setText(displayNames[safeIndex], false)
 
-            val adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_dropdown_item_1line,
-                displayNames
+            autoComplete.setAdapter(
+                ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_dropdown_item_1line,
+                    displayNames
+                )
             )
-            autoComplete.setAdapter(adapter)
 
             autoComplete.setOnItemClickListener { _, _, position, _ ->
                 selectedModelIndex = position
                 ProjectionHolder.selectedModelIndex = position
                 ConfigManager.updateConfig { modelIndex = position }
                 val model = modelList[position]
-                loadModel(model.filename)
+                loadModel(model)
                 modelInfoCardView?.let { removeView(it) }
                 modelInfoCardView = buildModelInfoCard(model)
                 addView(modelInfoCardView!!)
@@ -597,10 +609,40 @@ class MainActivity : AppCompatActivity() {
             }
 
             addView(dropdownLayout)
+            addView(createSpacer(8))
+
+            // 当前选中模型的编辑 / 删除
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(MaterialButton(
+                    this@MainActivity, null,
+                    com.google.android.material.R.attr.materialButtonOutlinedStyle
+                ).apply {
+                    text = "编辑信息"
+                    isAllCaps = false
+                    setOnClickListener {
+                        modelList.getOrNull(selectedModelIndex)?.let { showModelEditDialog(it) }
+                    }
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                        .apply { marginEnd = dp(8) }
+                })
+                addView(MaterialButton(
+                    this@MainActivity, null,
+                    com.google.android.material.R.attr.materialButtonOutlinedStyle
+                ).apply {
+                    text = "删除"
+                    isAllCaps = false
+                    setTextColor(Color.parseColor("#B3261E"))
+                    setOnClickListener {
+                        modelList.getOrNull(selectedModelIndex)?.let { confirmDeleteModel(it) }
+                    }
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                })
+            })
+
             addView(createSpacer(16))
 
-            if (modelList.isNotEmpty()) {
-                val model = modelList[selectedModelIndex]
+            modelList.getOrNull(selectedModelIndex)?.let { model ->
                 modelInfoCardView = buildModelInfoCard(model)
                 addView(modelInfoCardView!!)
             }
@@ -653,7 +695,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun buildModelInfoCard(model: ModelInfo): LinearLayout {
+    private fun buildModelInfoCard(model: ImportedModel): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
@@ -669,13 +711,16 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, 0, 0, dp(8))
             })
 
-            addView(buildInfoRow("量化方式", model.precision))
+            addView(buildInfoRow("文件", model.fileName))
+            addView(createSpacer(8))
+            // 这里显示的是输入张量的数据类型，也就是引擎实际按什么精度喂数据
+            addView(buildInfoRow("输入类型", model.precision))
             addView(createSpacer(8))
             addView(buildInfoRow("输入尺寸", "${model.inputSize}x${model.inputSize}"))
             addView(createSpacer(8))
             addView(buildInfoRow("输出数量", model.outputSize.toString()))
             addView(createSpacer(8))
-            addView(buildInfoRow("描述", model.description))
+            addView(buildInfoRow("形状", model.description))
             if (model.classes.isNotEmpty()) {
                 addView(createSpacer(8))
                 val classStr = model.classes.entries.sortedBy { it.key }.joinToString(", ") { "${it.key}:${it.value}" }
@@ -712,30 +757,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int): Int = (v * displayDensity).toInt()
-
-    /**
-     * 授权失败 → 跳 LoginActivity。
-     * 如果连 LoginActivity 都启不起来（manifest 里被删 / disabled），
-     * 直接 Toast 报错 + finishAffinity + System.exit(1) 闪退，不让用户停留在无授权的 MainActivity。
-     */
-    private fun redirectToLoginOrCrash(reason: String) {
-        try {
-            val intent = Intent(this, LoginActivity::class.java).apply {
-                putExtra(LoginActivity.EXTRA_REASON, reason)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            }
-            startActivity(intent)
-            finish()
-        } catch (e: Exception) {
-            Toast.makeText(
-                this,
-                "授权异常且无法跳转验证界面，请重启 app",
-                Toast.LENGTH_LONG
-            ).show()
-            finishAffinity()
-            System.exit(1)
-        }
-    }
 
     private fun onFabClick() {
         if (aimbotState != AimbotState.STANDBY) {
@@ -1066,71 +1087,226 @@ class MainActivity : AppCompatActivity() {
         updateFabState()
     }
 
-    private fun loadModelsFromJson() {
-        try {
-            val jsonString = assets.open("models.json").bufferedReader().use { it.readText() }
-            val jsonObject = JSONObject(jsonString)
-            val modelsArray = jsonObject.getJSONArray("models")
+    // ==================== 模型：加载 / 导入 / 预热 ====================
 
-            modelList = (0 until modelsArray.length()).map { i ->
-                val model = modelsArray.getJSONObject(i)
-                val classesMap = mutableMapOf<Int, String>()
-                if (model.has("classes")) {
-                    val classesObj = model.getJSONObject("classes")
-                    classesObj.keys().forEach { key ->
-                        classesMap[key.toInt()] = classesObj.getString(key)
-                    }
-                }
-                ModelInfo(
-                    filename = model.getString("filename"),
-                    displayName = model.getString("displayName"),
-                    precision = model.getString("precision"),
-                    inputSize = model.getInt("inputSize"),
-                    outputSize = model.getInt("outputSize"),
-                    description = model.getString("description"),
-                    classes = classesMap
-                )
+    /** 从 ModelRepository 读一遍用户已导入的模型，并把快照推给 FloatService。 */
+    private fun loadModelsFromRepository() {
+        modelList = ModelRepository.list()
+        if (selectedModelIndex !in modelList.indices) selectedModelIndex = 0
+        publishModelList()
+        Log.d("Aimbot_AI", "已导入模型 ${modelList.size} 个")
+    }
+
+    /**
+     * 把当前模型列表快照写进 ProjectionHolder，供 FloatService 读取。
+     * 列表变化（导入 / 删除 / 改元数据）之后都要调一次，否则悬浮窗那边还是旧的。
+     */
+    private fun publishModelList() {
+        ProjectionHolder.modelList = modelList.map { m ->
+            ProjectionHolder.ModelEntry(
+                filename = m.fileName,
+                path = ModelRepository.absolutePathOf(m),
+                displayName = m.displayName,
+                precision = m.precision,
+                inputSize = m.inputSize,
+                outputSize = m.outputSize,
+                description = m.description,
+                classes = m.classes
+            )
+        }
+        ProjectionHolder.selectedModelIndex = selectedModelIndex
+    }
+
+    /**
+     * 导入用户选中的模型文件。
+     *
+     * 探测要开 TFLite Interpreter 读张量形状，大模型可能几百毫秒，所以整个过程
+     * 放后台线程，主线程只负责进度框和结果提示。
+     */
+    private fun importModels(uris: List<Uri>) {
+        val progress = MaterialAlertDialogBuilder(this)
+            .setTitle("正在导入")
+            .setMessage("正在复制并解析模型…")
+            .setCancelable(false)
+            .create()
+        progress.show()
+
+        Thread {
+            val added = mutableListOf<ImportedModel>()
+            val failed = mutableListOf<String>()
+            for (uri in uris) {
+                ModelRepository.importFrom(uri)
+                    .onSuccess { m -> if (m != null) added.add(m) }
+                    .onFailure { e -> failed.add(e.message ?: "未知错误") }
             }
+            runOnUiThread {
+                progress.dismiss()
+                loadModelsFromRepository()
+                rebuildModelCard()
 
-            Log.d("Aimbot_AI", "Loaded ${modelList.size} models from JSON")
-        } catch (e: Exception) {
-            Log.e("Aimbot_AI", "Failed to load models from JSON: ${e.message}", e)
-            modelList = emptyList()
+                if (added.isEmpty() && failed.isEmpty()) {
+                    Toast.makeText(this, "已复制权重文件", Toast.LENGTH_SHORT).show()
+                } else if (failed.isNotEmpty()) {
+                    MaterialAlertDialogBuilder(this)
+                        .setTitle("部分文件导入失败")
+                        .setMessage(failed.joinToString("\n"))
+                        .setPositiveButton("知道了", null)
+                        .show()
+                }
+                // 刚导入的模型先让用户确认一下元数据，尤其是类别名
+                added.firstOrNull()?.let { showModelEditDialog(it) }
+            }
+        }.start()
+    }
+
+    /**
+     * 元数据编辑框。探测出来的只是默认值——类别名尤其需要用户自己填，
+     * 因为类别语义完全取决于用户训练时用的数据集，本应用不做任何假设。
+     */
+    private fun showModelEditDialog(model: ImportedModel) {
+        val pad = dp(20)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, dp(8), pad, 0)
+        }
+
+        fun field(label: String, value: String, numeric: Boolean = false): EditText {
+            container.addView(TextView(this).apply {
+                text = label
+                textSize = 12f
+                setTextColor(MD3_ON_SURFACE_VARIANT)
+                setPadding(0, dp(8), 0, 0)
+            })
+            val et = EditText(this).apply {
+                setText(value)
+                textSize = 14f
+                if (numeric) inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            }
+            container.addView(et)
+            return et
+        }
+
+        val nameEt = field("显示名称", model.displayName)
+        val inputEt = field("输入尺寸（正方形边长，像素）", model.inputSize.toString(), numeric = true)
+        val outputEt = field("输出数量（anchor 数，0 = 由引擎自行读取）", model.outputSize.toString(), numeric = true)
+        val classesEt = field(
+            "类别名（按 id 顺序，逗号分隔）",
+            model.classes.entries.sortedBy { it.key }.joinToString(", ") { it.value }
+        )
+
+        container.addView(TextView(this).apply {
+            text = "文件：${model.fileName}\n${model.description}"
+            textSize = 11f
+            setTextColor(MD3_ON_SURFACE_VARIANT)
+            setPadding(0, dp(12), 0, 0)
+        })
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("模型信息")
+            .setView(ScrollView(this).apply { addView(container) })
+            .setPositiveButton("保存") { _, _ ->
+                model.displayName = nameEt.text.toString().trim().ifEmpty { model.fileName }
+                model.inputSize = inputEt.text.toString().trim().toIntOrNull() ?: model.inputSize
+                model.outputSize = outputEt.text.toString().trim().toIntOrNull() ?: model.outputSize
+                val names = classesEt.text.toString().split(',')
+                    .map { it.trim() }.filter { it.isNotEmpty() }
+                model.classes = if (names.isEmpty()) {
+                    mutableMapOf(0 to "class_0")
+                } else {
+                    names.mapIndexed { i, n -> i to n }.toMap().toMutableMap()
+                }
+                ModelRepository.update(model)
+                loadModelsFromRepository()
+                rebuildModelCard()
+                Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun confirmDeleteModel(model: ImportedModel) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("删除模型")
+            .setMessage("确定删除「${model.displayName}」？模型文件会从应用内部存储中移除，此操作不可撤销。")
+            .setPositiveButton("删除") { _, _ ->
+                ModelRepository.remove(model)
+                if (selectedModelIndex >= ModelRepository.list().size) selectedModelIndex = 0
+                ConfigManager.updateConfig { modelIndex = selectedModelIndex }
+                loadModelsFromRepository()
+                rebuildModelCard()
+                Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 模型卡片是代码构建的，列表变化后整块重建最省事。 */
+    private fun rebuildModelCard() {
+        val section = modelSection ?: return
+        val parent = section.parent as? ViewGroup ?: return
+        val idx = parent.indexOfChild(section)
+        if (idx < 0) return
+        parent.removeViewAt(idx)
+        modelInfoCardView = null
+        val fresh = buildModelCard()
+        modelSection = fresh
+        parent.addView(fresh, idx)
+    }
+
+    // ========== QNN HTP 预热 ==========
+    // 原先挂在 LoginActivity 上（跟着授权界面那几秒顺带做掉），授权界面移除后
+    // 搬到这里。作用是让 QNN 提前把每个 tflite 的 HTP 图编译好写进 cache/qnn/，
+    // 否则用户第一次选中某个模型时要现场编译，首次推理会明显卡一下。
+    private var prewarmExecutor: ExecutorService? = null
+
+    private fun startPrewarmInBackground() {
+        val tflite = modelList.filter { it.fileName.endsWith(".tflite", ignoreCase = true) }
+        if (tflite.isEmpty()) return
+
+        // QNN HTP 是 per-device 互斥的：worker 持锁编译时，主线程的 JniCallBack.init()
+        // 必须等它放锁。所以把当前选中的模型提到队首先编，其余的随后补，
+        // 避免当前模型排在后面时首次加载要等前面全部编完。
+        val current = modelList.getOrNull(selectedModelIndex)
+        val ordered = if (current != null && current in tflite) {
+            listOf(current) + tflite.filter { it.id != current.id }
+        } else tflite
+
+        val executor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "QnnPrewarm").apply { priority = Thread.NORM_PRIORITY - 1 }
+        }
+        prewarmExecutor = executor
+        executor.execute {
+            for (m in ordered) {
+                val f = ModelRepository.fileOf(m)
+                if (!f.exists()) continue
+                val ok = JniCallBack.prewarmQnn(f.absolutePath)
+                Log.i("QnnPrewarm", "prewarm ${m.fileName} -> $ok")
+            }
+            executor.shutdown()
+            prewarmExecutor = null
         }
     }
 
-    private fun loadModel(filename: String) {
-        val modelFile = File(filesDir, filename)
+    private fun loadModel(model: ImportedModel) {
+        val modelFile = ModelRepository.fileOf(model)
+        if (!modelFile.exists()) {
+            Toast.makeText(this, "模型文件已丢失，请重新导入", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (ModelRepository.isMissingWeights(model)) {
+            Toast.makeText(this, "缺少同名 .bin 权重文件，请一并导入", Toast.LENGTH_LONG).show()
+            return
+        }
         try {
-            // Don't wipe the QNN cache here — that wipes out everything the
-            // LoginActivity prewarmer just wrote. Each model lives in its own
-            // <token>_<fingerprint>.bin file under cache/qnn/, so loading a
-            // second model just adds (or fingerprint-hits) one file. The
-            // prewarm pass is what keeps model switching instant.
+            // 不要清 QNN 缓存：预热写进去的编译产物按 <token>_<fingerprint>.bin
+            // 分文件存放，加载第二个模型只是新增（或命中）一个文件而已。
+            // 清掉的话每次切模型都要重新编译 HTP 图。
             File(cacheDir, "qnn").mkdirs()
-            if (!modelFile.exists()) {
-                modelFile.parentFile?.mkdirs()
-                assets.open(filename).use { input ->
-                    FileOutputStream(modelFile).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-            }
-            // For NCNN models, also copy the .bin file
-            if (filename.endsWith(".param")) {
-                val binFilename = filename.replace(".param", ".bin")
-                val binFile = File(filesDir, binFilename)
-                if (!binFile.exists()) {
-                    assets.open(binFilename).use { input ->
-                        FileOutputStream(binFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                }
-            }
             val cfg = ConfigManager.getConfig()
             JniCallBack.setForceCpu(cfg.useCpuInference)
             JniCallBack.setCpuThreads(cfg.cpuThreadCount)
+            // ncnn 需要显式告知输入尺寸；tflite 由引擎自己从模型里读
+            if (model.inputSize > 0) JniCallBack.setInputSize(model.inputSize, model.inputSize)
             val success = JniCallBack.init(modelFile.absolutePath)
             if (success) {
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()
@@ -1141,9 +1317,12 @@ class MainActivity : AppCompatActivity() {
                 }
                 modelBadge.text = ProjectionHolder.currentModelName
                 Toast.makeText(this, "模型加载成功", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "模型加载失败，检查格式是否为 YOLO 导出的 tflite/ncnn", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
             Log.e("Aimbot_AI", "模型加载异常: ${e.message}", e)
+            Toast.makeText(this, "模型加载异常：${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1171,40 +1350,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 启动时按上次选中的下标加载模型。一个模型都没导入时什么都不做。 */
     private fun loadDefaultModel() {
         if (modelList.isEmpty()) return
-
         try {
-            // Don't wipe QNN cache here — prewarm in LoginActivity already
-            // produced a cache file for every model. Wiping would force a
-            // full QNN HTP recompile on each app launch.
             File(cacheDir, "qnn").mkdirs()
             val idx = selectedModelIndex.coerceIn(0, modelList.size - 1)
             val defaultModel = modelList[idx]
-            val modelFile = File(filesDir, defaultModel.filename)
-            if (!modelFile.exists()) {
-                modelFile.parentFile?.mkdirs()
-                assets.open(defaultModel.filename).use { input ->
-                    FileOutputStream(modelFile).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-            }
-            // For NCNN models, also copy the .bin file
-            if (defaultModel.filename.endsWith(".param")) {
-                val binFilename = defaultModel.filename.replace(".param", ".bin")
-                val binFile = File(filesDir, binFilename)
-                if (!binFile.exists()) {
-                    assets.open(binFilename).use { input ->
-                        FileOutputStream(binFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                }
+            val modelFile = ModelRepository.fileOf(defaultModel)
+            if (!modelFile.exists() || ModelRepository.isMissingWeights(defaultModel)) {
+                Log.w("Aimbot_AI", "默认模型不可用: ${defaultModel.fileName}")
+                return
             }
             val cfg2 = ConfigManager.getConfig()
             JniCallBack.setForceCpu(cfg2.useCpuInference)
             JniCallBack.setCpuThreads(cfg2.cpuThreadCount)
+            if (defaultModel.inputSize > 0) {
+                JniCallBack.setInputSize(defaultModel.inputSize, defaultModel.inputSize)
+            }
             val ok = JniCallBack.init(modelFile.absolutePath)
             if (ok) {
                 ProjectionHolder.currentModelName = JniCallBack.getBackend()

@@ -89,29 +89,22 @@ class InferenceManager(
         val wasRunning = inferRunning.getAndSet(false)
         try { executor.submit { }.get() } catch (_: Exception) {}
         JniCallBack.release()
-        val modelFile = File(service.applicationContext.filesDir, filename)
+        // 模型全部由用户经 ModelRepository 导入，绝对路径记在 ProjectionHolder 的
+        // 快照里。找不到条目、或文件被用户从外面删掉了，就放弃这次切换——不再
+        // 有 assets 兜底可言。
+        val entry = ProjectionHolder.modelList.find { it.filename == filename }
+        val modelFile = entry?.let { File(it.path) }
+        if (entry == null || modelFile == null || !modelFile.exists()) {
+            Log.e(TAG, "模型不可用（未导入或文件已被删除）: $filename")
+            if (wasRunning) startInferLoop()
+            return
+        }
         try {
-            // Leave the QNN cache in place — prewarm in LoginActivity already
-            // populated it. Wiping here would force every model switch to
-            // re-compile the HTP graph from scratch.
+            // 保留 QNN 缓存：MainActivity 的预热已经把编译好的 HTP 图写进去了，
+            // 清掉会让每次切模型都要重新编译。
             File(service.applicationContext.cacheDir, "qnn").mkdirs()
-            if (!modelFile.exists()) {
-                // Create parent directories if needed (for ncnn/ subdirectory)
-                modelFile.parentFile?.mkdirs()
-                service.assets.open(filename).use { i ->
-                    FileOutputStream(modelFile).use { o -> i.copyTo(o) }
-                }
-            }
-            // For NCNN models, also copy the .bin file
-            if (filename.endsWith(".param")) {
-                val binFilename = filename.replace(".param", ".bin")
-                val binFile = File(service.applicationContext.filesDir, binFilename)
-                if (!binFile.exists()) {
-                    service.assets.open(binFilename).use { i ->
-                        FileOutputStream(binFile).use { o -> i.copyTo(o) }
-                    }
-                }
-            }
+            // ncnn 需要显式告知输入尺寸；tflite 由引擎自己从模型里读
+            if (entry.inputSize > 0) JniCallBack.setInputSize(entry.inputSize, entry.inputSize)
             val cfg = ConfigManager.getConfig()
             val useCpu = cfg.useCpuInference
             Log.d(TAG, "loadModel: useCpuInference=$useCpu, threads=${cfg.cpuThreadCount}")
@@ -121,9 +114,7 @@ class InferenceManager(
                 val backend = JniCallBack.getBackend()
                 Log.d(TAG, "模型切换成功: $filename, 后端=$backend")
                 ProjectionHolder.currentModelName = backend
-                // Load classes map from ProjectionHolder
-                val entry = ProjectionHolder.modelList.find { it.filename == filename }
-                currentClasses = entry?.classes ?: emptyMap()
+                currentClasses = entry.classes
                 // 模型切换时更新类别选择：保留仍存在的类别，新增的自动选中
                 if (currentClasses.isNotEmpty()) {
                     val validIds = currentClasses.keys

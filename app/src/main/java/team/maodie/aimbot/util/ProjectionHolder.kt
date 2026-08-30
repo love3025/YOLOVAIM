@@ -12,8 +12,12 @@ object ProjectionHolder {
     var mediaProjection: MediaProjection? = null
 
     // 模型列表（由 MainActivity 设置，供 FloatService 读取）
+    //
+    // 模型不再来自 assets：全部是用户经 ModelRepository 导入到 filesDir/models/ 的，
+    // 所以这里直接带上绝对路径，服务端不用再自己拼路径或回退去解压 assets。
     data class ModelEntry(
         val filename: String,
+        val path: String,
         val displayName: String,
         val precision: String,
         val inputSize: Int,

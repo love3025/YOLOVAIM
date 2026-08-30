@@ -648,41 +648,31 @@ class FloatService : Service() {
         val wasRunning = inferRunning.getAndSet(false)
         try { executor.submit { }.get() } catch (_: Exception) {}
         JniCallBack.release()
-        val modelFile = java.io.File(applicationContext.filesDir, filename)
+        // 模型全部由用户经 ModelRepository 导入，ProjectionHolder 的快照里直接
+        // 带绝对路径。条目不存在或文件被删了就放弃这次切换，没有 assets 兜底。
+        val entry = ProjectionHolder.modelList.find { it.filename == filename }
+        val modelFile = entry?.let { java.io.File(it.path) }
+        if (entry == null || modelFile == null || !modelFile.exists()) {
+            Log.e(TAG, "模型不可用（未导入或文件已被删除）: $filename")
+            if (wasRunning) startInferLoop()
+            return
+        }
         try {
-            // Don't wipe the QNN cache here — prewarm in LoginActivity already
-            // populated it; wiping would defeat that pass and force each
-            // model switch to recompile the HTP graph from scratch.
+            // 保留 QNN 缓存：MainActivity 的预热已经把编译好的 HTP 图写进去了，
+            // 清掉会让每次切模型都要重新编译。
             java.io.File(applicationContext.cacheDir, "qnn").mkdirs()
-            if (!modelFile.exists()) {
-                modelFile.parentFile?.mkdirs()
-                assets.open(filename).use { i -> java.io.FileOutputStream(modelFile).use { o -> i.copyTo(o) } }
-            }
-            // For NCNN models, also copy the .bin file
-            if (filename.endsWith(".param")) {
-                val binFilename = filename.replace(".param", ".bin")
-                val binFile = java.io.File(applicationContext.filesDir, binFilename)
-                if (!binFile.exists()) {
-                    assets.open(binFilename).use { i -> java.io.FileOutputStream(binFile).use { o -> i.copyTo(o) } }
-                }
-            }
             val cfg = ConfigManager.getConfig()
             val useCpu = cfg.useCpuInference
             Log.d(TAG, "loadModel: useCpuInference=$useCpu, threads=${cfg.cpuThreadCount}")
             JniCallBack.setForceCpu(useCpu)
             JniCallBack.setCpuThreads(cfg.cpuThreadCount)
-            // Set input size for NCNN models (TFLite reads from model automatically)
-            val entry = ProjectionHolder.modelList.find { it.filename == filename }
-            if (entry != null) {
-                JniCallBack.setInputSize(entry.inputSize, entry.inputSize)
-            }
+            // ncnn 需要显式告知输入尺寸；tflite 由引擎自己从模型里读
+            if (entry.inputSize > 0) JniCallBack.setInputSize(entry.inputSize, entry.inputSize)
             if (JniCallBack.init(modelFile.absolutePath)) {
                 val backend = JniCallBack.getBackend()
                 Log.d(TAG, "模型切换成功: $filename, 后端=$backend")
                 ProjectionHolder.currentModelName = backend
-                // Load classes map from ProjectionHolder
-                val entry = ProjectionHolder.modelList.find { it.filename == filename }
-                currentClasses = entry?.classes ?: emptyMap()
+                currentClasses = entry.classes
                 // 模型切换时更新类别选择：保留仍存在的类别，新增的自动选中
                 if (currentClasses.isNotEmpty()) {
                     val validIds = currentClasses.keys
