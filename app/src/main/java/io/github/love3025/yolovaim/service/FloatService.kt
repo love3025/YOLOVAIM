@@ -142,6 +142,7 @@ class FloatService : Service() {
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
     private var recoilMaxOffset = 200f; private var recoilResetIntervalMs = 300
+    private var recoilPerShot = 8f
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -286,6 +287,7 @@ class FloatService : Service() {
         aimController.classBoxAimRatios = classBoxAimRatios
         aimController.recoilEnabled = recoilEnabled
         aimController.recoilStrength = recoilStrength
+        aimController.recoilPerShot = recoilPerShot
         aimController.recoilMaxOffset = recoilMaxOffset
         aimController.recoilResetIntervalMs = recoilResetIntervalMs
 
@@ -325,6 +327,7 @@ class FloatService : Service() {
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
+        recoilPerShot = cfg.recoilPerShot
         recoilMaxOffset = cfg.recoilMaxOffset
         recoilResetIntervalMs = cfg.recoilResetIntervalMs
         ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
@@ -783,6 +786,7 @@ class FloatService : Service() {
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
         guiPanel.recoilEnabled = cfg.recoilEnabled
         guiPanel.recoilStrength = cfg.recoilStrength
+        guiPanel.recoilPerShot = cfg.recoilPerShot
         guiPanel.recoilMaxOffset = cfg.recoilMaxOffset
         guiPanel.recoilResetIntervalMs = cfg.recoilResetIntervalMs
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
@@ -910,6 +914,7 @@ class FloatService : Service() {
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
+        guiPanel.onRecoilPerShotChanged = { recoilPerShot = it; aimController.recoilPerShot = it; ConfigManager.updateConfig { recoilPerShot = it } }
         guiPanel.onRecoilMaxOffsetChanged = { recoilMaxOffset = it; aimController.recoilMaxOffset = it; ConfigManager.updateConfig { recoilMaxOffset = it } }
         guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
         guiPanel.onAimTouchDisplay = { show ->
@@ -1166,16 +1171,23 @@ class FloatService : Service() {
                                 else ((nowNs - lastFrameNs) / 1e9f).coerceAtMost(0.1f)
                     lastFrameNs = nowNs
 
-                    // 开火电平每帧只查一次 (IPC)，压枪与自动扳机共用这一个采样。
+                    // 开火状态每帧只查一次 (IPC)，压枪与自动扳机共用这一个采样。
+                    // 一次往返同时拿到两样东西：bit0 = 当前电平，bit1.. = 本帧内
+                    // 真实打了几枪(注入层以 120-240Hz 数上升沿，取走即清零，一帧里
+                    // 点了两下也不会丢)。拆成两条命令就是每帧多一次阻塞式 IPC 往返，
+                    // 正是 4ee9e9e 刚从热路径上消除掉的那类浪费。
+                    //
                     // 提到推理之前取：压枪要用本帧的开火状态，否则 executeAiming
                     // 读到的恒是上一帧末尾写入的值，判断永远滞后一帧。代价是
                     // processTrigger 拿到的样本比推理结果早约一个推理耗时，但它
                     // 只用来判断"用户是不是正在手动开火"，这点偏差无影响。
-                    val fingerOnFire = touchService.isFingerInFireZone()
+                    val fireState = touchService.consumeFireState()
+                    val fingerOnFire = (fireState and 1) != 0
+                    val fireTaps = fireState ushr 1
                     val recoilHeld = fingerOnFire || triggerController.triggerFired
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
-                    aimController.updateRecoil(recoilHeld, dtSec, System.currentTimeMillis())
+                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
 
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {

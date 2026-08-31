@@ -52,6 +52,7 @@ data class AppConfig(
     var triggerClasses: Set<Int> = emptySet(),  // empty = all classes
     var recoilEnabled: Boolean = false,
     var recoilStrength: Float = 0.5f,  // 0.0 ~ 1.0
+    var recoilPerShot: Float = 8f,          // 每次点击的固定 kick (px)，0 = 关闭
     var recoilMaxOffset: Float = 200f,      // 压枪偏移上限 (px)
     var recoilResetIntervalMs: Int = 300,   // 松开开火区多久后开始衰减
     var convergeThresh: Int = 10,
@@ -124,6 +125,7 @@ object ConfigManager {
                         triggerClasses = parseIntSet(obj.optJSONArray("triggerClasses")),
                         recoilEnabled = obj.optBoolean("recoilEnabled", false),
                         recoilStrength = obj.optDouble("recoilStrength", 0.5).toFloat(),
+                        recoilPerShot = obj.optDouble("recoilPerShot", 8.0).toFloat(),
                         recoilMaxOffset = obj.optDouble("recoilMaxOffset", 200.0).toFloat(),
                         recoilResetIntervalMs = obj.optInt("recoilResetIntervalMs", 300),
                         convergeThresh = obj.optInt("convergeThresh", 10),
@@ -190,6 +192,7 @@ object ConfigManager {
                     put("triggerClasses", serializeIntSet(config.triggerClasses))
                     put("recoilEnabled", config.recoilEnabled)
                     put("recoilStrength", config.recoilStrength.toDouble())
+                    put("recoilPerShot", config.recoilPerShot.toDouble())
                     put("recoilMaxOffset", config.recoilMaxOffset.toDouble())
                     put("recoilResetIntervalMs", config.recoilResetIntervalMs)
                     put("convergeThresh", config.convergeThresh)
