@@ -1172,13 +1172,21 @@ class FloatService : Service() {
                     // 读到的恒是上一帧末尾写入的值，判断永远滞后一帧。代价是
                     // processTrigger 拿到的样本比推理结果早约一个推理耗时，但它
                     // 只用来判断"用户是不是正在手动开火"，这点偏差无影响。
-                    val fingerOnFire = touchService.isFingerInFireZone()
-                    val recoilHeld = fingerOnFire || triggerController.triggerFired
-                    // 连点计数：这里数的是「电平的上升沿」，采样率就是推理帧率。
-                    // 短于一个帧间隔的点击会漏掉 —— 要根治得在注入层(120-240Hz)
-                    // 数上升沿，那条路走的是新增 IPC 命令，暂时撤下待查。
-                    val fireTaps = if (fingerOnFire && !prevFingerOnFire) 1 else 0
+                    // 优先用注入层的上升沿计数(120-240Hz，短点击不会漏)。注入层不
+                    // 支持时返回 -1，退回电平查询 + 应用侧数边沿 —— 后者采样率就是
+                    // 推理帧率，短于一个帧间隔的点击仍会漏，但通路是已验证的。
+                    val packed = touchService.consumeFireState()
+                    val fingerOnFire: Boolean
+                    val fireTaps: Int
+                    if (packed >= 0) {
+                        fingerOnFire = (packed and 1) != 0
+                        fireTaps = packed ushr 1
+                    } else {
+                        fingerOnFire = touchService.isFingerInFireZone()
+                        fireTaps = if (fingerOnFire && !prevFingerOnFire) 1 else 0
+                    }
                     prevFingerOnFire = fingerOnFire
+                    val recoilHeld = fingerOnFire || triggerController.triggerFired
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
                     aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())

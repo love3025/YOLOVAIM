@@ -139,6 +139,10 @@ class InputManagerInjectorClient(private val context: Context) : TouchInjectorIn
         return try { remoteService?.isFingerInFireZone() ?: false } catch (e: Exception) { Log.e(TAG, "isFingerInFireZone: ${e.message}"); false }
     }
 
+    override fun consumeFireState(): Int {
+        return try { remoteService?.consumeFireState() ?: -1 } catch (e: Exception) { Log.e(TAG, "consumeFireState: ${e.message}"); -1 }
+    }
+
     override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {
         try { remoteService?.setJoystickZone(left, top, right, bottom) } catch (e: Exception) { Log.e(TAG, "setJoystickZone: ${e.message}") }
     }

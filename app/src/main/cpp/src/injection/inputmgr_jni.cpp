@@ -173,6 +173,13 @@ Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsF
     return inputmgr_is_finger_in_fire_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jint JNICALL
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrConsumeFireState(
+    JNIEnv*, jclass)
+{
+    return (jint)inputmgr_consume_fire_state();
+}
+
 JNIEXPORT jboolean JNICALL
 Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsFingerInJoystickZone(
     JNIEnv*, jclass)

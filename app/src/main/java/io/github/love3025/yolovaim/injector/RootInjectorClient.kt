@@ -24,6 +24,19 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     private val mainHandler = Handler(Looper.getMainLooper())
     private val cmdLock = Object()
 
+    // 单线程复用，不是每次调用起一个线程 —— 这条路径是每帧走的。
+    private val readerExec = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "root-daemon-reader").apply { isDaemon = true }
+    }
+
+    // daemon 正常回复在 1ms 内（execCmd 里 >0.5ms 就打日志了）。
+    // 500ms 足够宽松到不会误伤，又不至于让一帧卡到肉眼可见。
+    private val CMD_TIMEOUT_MS = 500L
+
+    // GET_FIRE_STATE 是后加的命令，旧 daemon 不认识。连接时探一次，
+    // 不支持就永久回退到 IS_FINGER_IN_FIRE_ZONE，不在热路径上反复试。
+    @Volatile private var supportsFireState = false
+
     override fun connect(callback: InjectorCallback) {
         Log.d(TAG, "Attempting root connection...")
         try {
@@ -62,6 +75,14 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
             }
 
             connected = true
+
+            // 能力探测：新增命令只在这里试一次。旧 daemon 会回 ERR:unknown
+            // command，此后热路径永远走已验证的 IS_FINGER_IN_FIRE_ZONE。
+            val probe = execCmd("GET_FIRE_STATE")
+            supportsFireState = probe != null && probe.startsWith("OK:") &&
+                                probe.removePrefix("OK:").trim().toIntOrNull() != null
+            Log.d(TAG, "GET_FIRE_STATE supported=$supportsFireState (probe=$probe)")
+
             Log.d(TAG, "Root daemon connected")
 
             // Liveness monitoring thread
@@ -97,14 +118,34 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
 
     override fun isConnected(): Boolean = connected && process != null
 
-    private fun execCmd(cmd: String): String? {
+    /**
+     * 阻塞往返，带超时。
+     *
+     * 超时���是可选的保险：这个函数在推理循环里每帧都被调用，而
+     * BufferedReader.readLine() 本身没有超时。daemon 只要有一次没吐出预期的
+     * 回复，推理线程就永久停在这里 —— 表现是「应用能打开、不闪退、但完全
+     * 没有效果」，没有崩溃也没有异常日志，极难定位（2026-08-31 实测踩过）。
+     *
+     * 超时后把 connected 置 false：读线程已经卡死在 readLine 上，
+     * cancel(true) 对阻塞的 InputStream 读无效，后续命令会排在它后面。
+     * 与其每帧再挂一次，不如直接进入断开状态，让上层看到真实情况。
+     */
+    private fun execCmd(cmd: String, timeoutMs: Long = CMD_TIMEOUT_MS): String? {
         synchronized(cmdLock) {
             if (!connected) return null
             val t0 = System.nanoTime()
             try {
                 daemonStdin!!.write("$cmd\n".toByteArray())
                 daemonStdin!!.flush()
-                val resp = daemonReader?.readLine()
+                val fut = readerExec.submit<String?> { daemonReader?.readLine() }
+                val resp = try {
+                    fut.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (te: java.util.concurrent.TimeoutException) {
+                    fut.cancel(true)
+                    Log.e(TAG, "execCmd timeout (${timeoutMs}ms): $cmd")
+                    connected = false
+                    return null
+                }
                 val dtMs = (System.nanoTime() - t0) / 1e6
                 // Log slow commands. Daemon IPC is usually <1ms; >1ms indicates daemon is behind.
                 if (dtMs > 0.5) {
@@ -223,6 +264,13 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     override fun isFingerInFireZone(): Boolean {
         val resp = execCmd("IS_FINGER_IN_FIRE_ZONE")
         return resp == "OK:1"
+    }
+
+    override fun consumeFireState(): Int {
+        if (!supportsFireState) return -1        // 不支持：本地返回，不发 IPC
+        val resp = execCmd("GET_FIRE_STATE") ?: return -1
+        if (!resp.startsWith("OK:")) return -1
+        return resp.removePrefix("OK:").trim().toIntOrNull() ?: -1
     }
 
     override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {

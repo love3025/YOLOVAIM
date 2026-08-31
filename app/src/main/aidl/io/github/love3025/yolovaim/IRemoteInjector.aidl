@@ -53,4 +53,10 @@ interface IRemoteInjector {
     void setJoystickZone(int left, int top, int right, int bottom);
     boolean isFingerInJoystickZone();
     boolean liftJoystickFinger();
+
+    // 新方法一律追加在接口末尾：AIDL 的 transaction ID 按声明顺序分配，
+    // 插在中间会把后面所有方法的 ID 往后挪一位，客户端与服务端版本不一致时
+    // 每一次调用都会打到错误的方法上。
+    /** 一次取回开火区电平与点击数：bit0 = 电平，bit1.. = 点击数；不支持返回 -1。 */
+    int consumeFireState();
 }
