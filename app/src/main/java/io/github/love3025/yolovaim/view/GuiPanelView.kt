@@ -66,6 +66,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerClassesChanged: ((Set<Int>) -> Unit)? = null
     var onRecoilEnabledChanged: ((Boolean) -> Unit)? = null
     var onRecoilStrengthChanged: ((Float) -> Unit)? = null
+    var onRecoilMaxOffsetChanged: ((Float) -> Unit)? = null
+    var onRecoilResetIntervalChanged: ((Int) -> Unit)? = null
     var onConvergeThreshChanged: ((Int) -> Unit)? = null
     var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
     var onAimbotFovChanged: ((Int) -> Unit)? = null
@@ -105,6 +107,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var autoSaveDataset = false
     var recoilEnabled = false
     var recoilStrength = 0.5f
+    var recoilMaxOffset = 200f
+    var recoilResetIntervalMs = 300
     var autoStopEnabled = false
     private var navScrollView: ScrollView? = null
     private var savedNavScrollY = 0
@@ -224,6 +228,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         })
         contentContainer.addView(buildStepperSlider("压枪强度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
         contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键时持续下压"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("压枪上限", recoilMaxOffset, 50f, 600f, "0px", 10f) { recoilMaxOffset = it; onRecoilMaxOffsetChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "偏移量累积到此值后不再增加"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("开火重置间隔", recoilResetIntervalMs.toFloat(), 50f, 1000f, "0ms", 50f) { v -> val iv = v.toInt(); recoilResetIntervalMs = iv; onRecoilResetIntervalChanged?.invoke(iv) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "松开开火键超过此时长才开始回落，连点时枪与枪之间不清零"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildStepperSlider("收敛阈值", convergeThresh.toFloat(), 0f, 100f, "0px") { v -> val iv = v.toInt(); convergeThresh = iv; onConvergeThreshChanged?.invoke(iv) })
