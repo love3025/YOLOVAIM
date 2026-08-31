@@ -141,6 +141,7 @@ class FloatService : Service() {
     private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f; private var kf = 0.05f
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
+    private var recoilTapStrength = 0.5f; private var recoilResetIntervalMs = 300
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -285,6 +286,8 @@ class FloatService : Service() {
         aimController.classBoxAimRatios = classBoxAimRatios
         aimController.recoilEnabled = recoilEnabled
         aimController.recoilStrength = recoilStrength
+        aimController.recoilTapStrength = recoilTapStrength
+        aimController.recoilResetIntervalMs = recoilResetIntervalMs
 
         // TriggerController
         triggerController.triggerEnabled = triggerEnabled
@@ -322,6 +325,8 @@ class FloatService : Service() {
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
+        recoilTapStrength = cfg.recoilTapStrength
+        recoilResetIntervalMs = cfg.recoilResetIntervalMs
         ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
         aimMode = cfg.aimMode
         bezierDuration = cfg.bezierDuration
@@ -778,6 +783,8 @@ class FloatService : Service() {
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
         guiPanel.recoilEnabled = cfg.recoilEnabled
         guiPanel.recoilStrength = cfg.recoilStrength
+        guiPanel.recoilTapStrength = cfg.recoilTapStrength
+        guiPanel.recoilResetIntervalMs = cfg.recoilResetIntervalMs
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
         guiPanel.aimPrediction = cfg.aimPrediction
@@ -903,6 +910,8 @@ class FloatService : Service() {
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
+        guiPanel.onRecoilTapStrengthChanged = { recoilTapStrength = it; aimController.recoilTapStrength = it; ConfigManager.updateConfig { recoilTapStrength = it } }
+        guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
             ConfigManager.updateConfig { aimTouchDisplay = show }
@@ -1125,6 +1134,8 @@ class FloatService : Service() {
         executor.execute {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
+            var lastFrameNs = 0L
+            var prevFingerOnFire = false
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
@@ -1146,6 +1157,32 @@ class FloatService : Service() {
                 val needHwBuf = (recordEnabled && recordSurface != null) || autoSaveDataset
                 val hwBuf = if (needHwBuf) image.hardwareBuffer else null
                 try {
+                    // 帧时基。压枪按时间累加，需要真实的墙钟帧间隔 —— 下面推理
+                    // 信息里那个 inferFps 是从 pre+infer+post 算出来的"理论吞吐"
+                    // (源码注释: not the actual capture rate)，不能拿来当 dt。
+                    // 上限 0.1s：采集卡顿/应用切后台回来时 dt 可能是好几秒，
+                    // 不夹一下会让压枪在一帧里跳掉几百 px。
+                    val nowNs = System.nanoTime()
+                    val dtSec = if (lastFrameNs == 0L) 0f
+                                else ((nowNs - lastFrameNs) / 1e9f).coerceAtMost(0.1f)
+                    lastFrameNs = nowNs
+
+                    // 开火电平每帧只查一次 (IPC)，压枪与自动扳机共用这一个采样。
+                    // 提到推理之前取：压枪要用本帧的开火状态，否则 executeAiming
+                    // 读到的恒是上一帧末尾写入的值，判断永远滞后一帧。代价是
+                    // processTrigger 拿到的样本比推理结果早约一个推理耗时，但它
+                    // 只用来判断"用户是不是正在手动开火"，这点偏差无影响。
+                    val fingerOnFire = touchService.isFingerInFireZone()
+                    val recoilHeld = fingerOnFire || triggerController.triggerFired
+                    // 连点计数：这里数的是「电平的上升沿」，采样率就是推理帧率。
+                    // 短于一个帧间隔的点击会漏掉 —— 要根治得在注入层(120-240Hz)
+                    // 数上升沿，那条路走的是新增 IPC 命令，暂时撤下待查。
+                    val fireTaps = if (fingerOnFire && !prevFingerOnFire) 1 else 0
+                    prevFingerOnFire = fingerOnFire
+                    // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
+                    // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
+                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
+
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
                         try {
@@ -1276,16 +1313,13 @@ class FloatService : Service() {
                         }
 
                         // detection-based trigger: center in any detection box (filtered by aimClasses)
-                        // The fire-zone state is queried once and handed to
-                        // processTrigger, which used to re-query it over IPC a
-                        // few lines before this did. Both reads happen in the
-                        // same frame and describe the same physical finger, so
-                        // the second round-trip could only ever return the same
-                        // answer.
-                        val fingerOnFire = touchService.isFingerInFireZone()
+                        // The fire-zone state is queried once per frame (at the
+                        // top of the loop, where the recoil state machine needs
+                        // it) and handed down here. It used to be re-queried over
+                        // IPC; both reads happen in the same frame and describe
+                        // the same physical finger, so the second round-trip
+                        // could only ever return the same answer.
                         triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get(), fingerOnFire)
-                        // 压枪：每帧更新扳机状态（支持手动开火 + 自动扳机）
-                        aimController.triggerHeld = fingerOnFire || triggerController.triggerFired
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
                 finally { hwBuf?.close(); image.close() }
             }

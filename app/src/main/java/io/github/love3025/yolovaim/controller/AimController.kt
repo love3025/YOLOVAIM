@@ -22,6 +22,19 @@ class AimController(
         private const val AREA_INDEX_AIM = 2
 
         /**
+         * 压枪的三个内部标度。都不是可调项 —— 面板上暴露的是 0~1 的强度，
+         * 这里负责把强度换算成像素。
+         *
+         * HOLD_RATE 90 = 30 × 3：改时间基之前是「每帧 recoilStrength * 3f」，
+         * 以 30fps 为换算基准，30fps 下手感与改前一致，60fps 不再翻倍。
+         * TAP_KICK_SCALE 16 让「连点压枪强度 0.5」≈ 每枪 8px。
+         * MAX_OFFSET 是防跑飞的安全网(盲射/手指卡住)，正常交火够不到。
+         */
+        private const val HOLD_RATE = 90f
+        private const val TAP_KICK_SCALE = 16f
+        private const val MAX_OFFSET = 400f
+
+        /**
          * Per-frame latency tracing, compiled out by default.
          *
          * The 0.05ms threshold on these sites never gated anything in practice:
@@ -84,8 +97,11 @@ class AimController(
     // Recoil compensation
     var recoilEnabled = false
     var recoilStrength = 0.5f   // 0.0 ~ 1.0
-    var triggerHeld = false     // true while trigger is actively firing
+    var recoilTapStrength = 0.5f      // 连点压枪强度 0.0 ~ 1.0，0 = 关闭
+    var recoilResetIntervalMs = 300   // 松开开火区超过此时长才开始回落；0 = 立即重置
     private var recoilOffsetY = 0f
+    private var lastFireMs = 0L
+    private var pendingKick = 0f
 
     // Class filtering
     var aimClasses: MutableSet<Int> = mutableSetOf()
@@ -217,16 +233,12 @@ class AimController(
 
     fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {
         val t0 = System.nanoTime()
-        // 压枪：按住扳机时持续下压目标位置
+        // 压枪：偏移量由 updateRecoil() 每帧维护，这里只读。
+        // 累加/清零绝不能放回这里 —— executeAiming() 只在选到目标时才被调用
+        // (FloatService 的 target != null 分支)，把状态机放进来就等于
+        // 「无目标 → 既不累加也不清零」，偏移被冻结着带到下一次交火。
         var adjustedTargetY = targetY
-        if (recoilEnabled) {
-            if (triggerHeld) {
-                recoilOffsetY += recoilStrength * 3f
-                adjustedTargetY += recoilOffsetY
-            } else {
-                recoilOffsetY = 0f
-            }
-        }
+        if (recoilEnabled) adjustedTargetY += recoilOffsetY
         if (aimMode == 1) {
             executeAimingBezier(targetX, adjustedTargetY, cx, cy)
         } else {
@@ -434,10 +446,73 @@ class AimController(
         return false
     }
 
+    // 刻意不在这里调 resetRecoil()。lift() 的调用点之一是 FloatService 里
+    // 「pointerDown 且 (!aimbotOn || !hasDetects || !holdToAimActive)」那条，
+    // 其中 !hasDetects 就是「画面暂时没目标」。在这里清压枪，等于把持续开火
+    // 途中目标被烟雾/掩体挡一帧就重置的行为装回去 —— 比原来的 bug 更糟，因为
+    // 它发生在手指还按着、枪口还在爬的时候。压枪的生命周期由 updateRecoil()
+    // 的开火时间戳独占，触点抬起是瞄准逻辑的事，两者不耦合。
     fun lift() {
         touchClient()?.lift()
         aimingState.pointerDown = false
         aimingState.lockedTarget = null
+    }
+
+    /**
+     * 压枪状态机 —— 必须每推理帧调用一次，且与「有没有目标」无关。
+     *
+     * 时间基而不是帧基：原来是 `recoilStrength * 3f` 每帧固定量，30fps 按住
+     * 一秒下压 45px、60fps 就是 90px。`4ee9e9e` 提帧之后压枪同比变快，
+     * recoilStrength 得跟着重调。90f = 30 × 3，以 30fps 为换算基准，
+     * 因此 30fps 下手感与改前一致，60fps 不再翻倍。
+     *
+     * 松手后不立即清零，而是超过 recoilResetIntervalMs 才开始衰减：
+     *  - 半自动连点的枪与枪之间（松手 100-200ms）不该被清零，否则每枪都从 0 压起
+     *  - 时间判断是绝对的，只要之后任何一次调用算得出 now - lastFireMs，
+     *    就能重建「已经松了多久」。旧实现那种「必须在松手且有目标的那一瞬间
+     *    恰好被调用到，否则这次重置永久丢失」的路径因此不复存在
+     *  - 衰减而非硬清零：offset 可以累到上百 px，一帧归零会让 errorY 跳变，
+     *    而 applyDragSafety() 管的是总位移、不是每帧速率，挡不住这个尖峰，
+     *    PID 的微分项会直接吃到
+     *
+     * 注意这里不看 aimbotOn / holdToAimActive：玩家在开火，游戏内枪口就在爬升，
+     * 这与自瞄有没有接管无关。等自瞄再接手时，偏移量应当反映真实的累计爬升。
+     */
+    fun updateRecoil(held: Boolean, taps: Int, dtSec: Float, nowMs: Long) {
+        if (!recoilEnabled) { recoilOffsetY = 0f; pendingKick = 0f; return }
+
+        // 连点：每检测到一次按下，加一份固定量。与按住多久无关。
+        if (taps > 0 && recoilTapStrength > 0f) {
+            pendingKick += recoilTapStrength * TAP_KICK_SCALE * taps
+            lastFireMs = nowMs
+        }
+        // kick 摊到之后几帧释放而不是一帧打满：它进的是 PID 的目标值，而 Y 轴的
+        // kp/kd 本就被 kpYRatio/kdYRatio 特意压低来抑制纵向震荡，一次性十几 px
+        // 的阶跃正是那个环节最不擅长吃的输入。0.4 → 每帧释放剩余的 60% @30fps。
+        if (pendingKick > 0f) {
+            val take = pendingKick * (1f - Math.pow(0.4, (dtSec * 30f).toDouble()).toFloat())
+            recoilOffsetY += take
+            pendingKick -= take
+            if (pendingKick < 0.5f) { recoilOffsetY += pendingKick; pendingKick = 0f }
+        }
+
+        // 长按：按住时按时间连续爬升。
+        if (held) {
+            recoilOffsetY += recoilStrength * HOLD_RATE * dtSec
+            lastFireMs = nowMs
+        } else if (recoilResetIntervalMs <= 0) {
+            // 间隔 = 0：松开开火区立即重置，不走衰减。
+            recoilOffsetY = 0f
+            pendingKick = 0f
+        } else if (pendingKick <= 0f && nowMs - lastFireMs > recoilResetIntervalMs) {
+            // 衰减系数同样按时间归一，否则这里又会引入一个帧率相关量，
+            // 把上面刚换成时间基的意义抵消掉。0.7/帧 @30fps 为基准。
+            recoilOffsetY *= Math.pow(0.7, (dtSec * 30f).toDouble()).toFloat()
+            if (recoilOffsetY < 1f) recoilOffsetY = 0f
+        }
+        // 上限是防跑飞的安全网，不是可调项：真实一个弹匣打完也就 2-3 秒，
+        // 长按压枪强度 × 持续时间才是实际决定压多少的东西，上限基本不会碰到。
+        recoilOffsetY = recoilOffsetY.coerceIn(0f, MAX_OFFSET)
     }
 
     fun resetRecoil() {
