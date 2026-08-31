@@ -67,6 +67,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onRecoilEnabledChanged: ((Boolean) -> Unit)? = null
     var onRecoilStrengthChanged: ((Float) -> Unit)? = null
     var onRecoilTapStrengthChanged: ((Float) -> Unit)? = null
+    var onRecoilSpeedChanged: ((Float) -> Unit)? = null
     var onRecoilResetIntervalChanged: ((Int) -> Unit)? = null
     var onConvergeThreshChanged: ((Int) -> Unit)? = null
     var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
@@ -108,6 +109,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var recoilEnabled = false
     var recoilStrength = 0.5f
     var recoilTapStrength = 0.5f
+    var recoilSpeed = 0.5f
     var recoilResetIntervalMs = 300
     var autoStopEnabled = false
     private var navScrollView: ScrollView? = null
@@ -226,9 +228,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "压枪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = recoilEnabled; setOnCheckedChangeListener { _, c -> recoilEnabled = c; onRecoilEnabledChanged?.invoke(c) } })
         })
-        contentContainer.addView(buildStepperSlider("长按压枪强度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
-        contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键不放时，持续下压的快慢"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
-        contentContainer.addView(buildStepperSlider("连点压枪强度", recoilTapStrength, 0f, 1.0f, "%.0f%%") { recoilTapStrength = it; onRecoilTapStrengthChanged?.invoke(it) })
+        contentContainer.addView(buildStepperSlider("长按下压力度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键最多下压多远，按目标框高算：50% 约到身体，100% 约到脚"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("长按下压速度", recoilSpeed, 0f, 1.0f, "%.0f%%") { recoilSpeed = it; onRecoilSpeedChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "多久走完上面那段范围：0%≈7秒 50%≈4秒 100%≈1秒。后坐力大、开火前期压不住就调高"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("连点下压力度", recoilTapStrength, 0f, 1.0f, "%.0f%%") { recoilTapStrength = it; onRecoilTapStrengthChanged?.invoke(it) })
         contentContainer.addView(MaterialTextView(context).apply { text = "每点一次开火键下压一份固定量，与按住多久无关；0 = 关闭"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(buildStepperSlider("开火重置间隔", recoilResetIntervalMs.toFloat(), 0f, 1000f, "0ms", 50f) { v -> val iv = v.toInt(); recoilResetIntervalMs = iv; onRecoilResetIntervalChanged?.invoke(iv) })
         contentContainer.addView(MaterialTextView(context).apply { text = "松开开火键超过此时长才开始回落；0 = 松开即重置"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })

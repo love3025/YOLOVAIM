@@ -53,6 +53,7 @@ data class AppConfig(
     var recoilEnabled: Boolean = false,
     var recoilStrength: Float = 0.5f,  // 0.0 ~ 1.0
     var recoilTapStrength: Float = 0.5f,    // 连点压枪强度 0.0~1.0，0 = 关闭
+    var recoilSpeed: Float = 0.5f,          // 压枪速度 0.0~1.0，多久走完下压范围
     var recoilResetIntervalMs: Int = 300,   // 松开多久后回落；0 = 立即重置
     var convergeThresh: Int = 10,
     var autoStopEnabled: Boolean = false,
@@ -125,6 +126,7 @@ object ConfigManager {
                         recoilEnabled = obj.optBoolean("recoilEnabled", false),
                         recoilStrength = obj.optDouble("recoilStrength", 0.5).toFloat(),
                         recoilTapStrength = obj.optDouble("recoilTapStrength", 0.5).toFloat(),
+                        recoilSpeed = obj.optDouble("recoilSpeed", 0.5).toFloat(),
                         recoilResetIntervalMs = obj.optInt("recoilResetIntervalMs", 300),
                         convergeThresh = obj.optInt("convergeThresh", 10),
                         autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
@@ -191,6 +193,7 @@ object ConfigManager {
                     put("recoilEnabled", config.recoilEnabled)
                     put("recoilStrength", config.recoilStrength.toDouble())
                     put("recoilTapStrength", config.recoilTapStrength.toDouble())
+                    put("recoilSpeed", config.recoilSpeed.toDouble())
                     put("recoilResetIntervalMs", config.recoilResetIntervalMs)
                     put("convergeThresh", config.convergeThresh)
                     put("autoStopEnabled", config.autoStopEnabled)
