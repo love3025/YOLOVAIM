@@ -1068,6 +1068,13 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     }
 
     @Override
+    public int consumeFireState() throws RemoteException {
+        return inputMethod == INPUT_METHOD_INPUT_MANAGER
+            ? nativeInputmgrConsumeFireState()
+            : nativeConsumeFireState();
+    }
+
+    @Override
     public void setJoystickZone(int left, int top, int right, int bottom) throws RemoteException {
         if (inputMethod == INPUT_METHOD_INPUT_MANAGER) {
             nativeInputmgrSetJoystickZone(left, top, right, bottom);
@@ -1191,6 +1198,7 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static native boolean nativeIsFingerInTriggerZone();
     private static native void nativeSetFireZone(int left, int top, int right, int bottom);
     private static native boolean nativeIsFingerInFireZone();
+    private static native int nativeConsumeFireState();
     private static native void nativeSetJoystickZone(int left, int top, int right, int bottom);
     private static native boolean nativeIsFingerInJoystickZone();
     private static native boolean nativeLiftJoystickFinger();
@@ -1221,6 +1229,7 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     private static native void nativeInputmgrSetJoystickZone(int l, int t, int r, int b);
     private static native boolean nativeInputmgrIsFingerInTriggerZone();
     private static native boolean nativeInputmgrIsFingerInFireZone();
+    private static native int nativeInputmgrConsumeFireState();
     private static native boolean nativeInputmgrIsFingerInJoystickZone();
     private static native boolean nativeInputmgrLiftJoystickFinger();
 

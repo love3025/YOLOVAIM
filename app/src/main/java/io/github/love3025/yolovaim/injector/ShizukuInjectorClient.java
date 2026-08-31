@@ -242,6 +242,13 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
         return false;
     }
 
+    public int consumeFireState() {
+        if (remoteService != null) {
+            try { return remoteService.consumeFireState(); } catch (Exception e) { Log.e(TAG, "consumeFireState: " + e.getMessage()); }
+        }
+        return -1;
+    }
+
     public void setJoystickZone(int left, int top, int right, int bottom) {
         if (remoteService != null) {
             try { remoteService.setJoystickZone(left, top, right, bottom); } catch (Exception e) { Log.e(TAG, "setJoystickZone: " + e.getMessage()); }
