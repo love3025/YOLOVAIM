@@ -222,7 +222,7 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
 
     override fun isFingerInFireZone(): Boolean = delegate?.isFingerInFireZone() ?: false
 
-    override fun consumeFireTaps(): Int = delegate?.consumeFireTaps() ?: 0
+    override fun consumeFireState(): Int = delegate?.consumeFireState() ?: 0
 
     override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {
         delegate?.setJoystickZone(left, top, right, bottom)

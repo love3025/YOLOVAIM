@@ -21,7 +21,7 @@
  *     IS_FINGER_IN_ZONE
  *     SET_FIRE_ZONE <l> <t> <r> <b>
  *     IS_FINGER_IN_FIRE_ZONE
- *     GET_FIRE_TAPS
+ *     GET_FIRE_STATE
  *     SET_JOYSTICK_ZONE <l> <t> <r> <b>
  *     IS_FINGER_IN_JOYSTICK_ZONE
  *     LIFT_JOYSTICK_FINGER
@@ -185,8 +185,8 @@ static void handle_command(const char* cmd) {
     else if (strcmp(buf, "IS_FINGER_IN_FIRE_ZONE") == 0) {
         reply_int(touch_is_finger_in_fire_zone() ? 1 : 0);
     }
-    else if (strcmp(buf, "GET_FIRE_TAPS") == 0) {
-        reply_int(touch_consume_fire_taps());
+    else if (strcmp(buf, "GET_FIRE_STATE") == 0) {
+        reply_int(touch_consume_fire_state());
     }
     else if (strncmp(buf, "SET_JOYSTICK_ZONE ", 18) == 0) {
         int l, t, r, b;

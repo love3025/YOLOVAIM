@@ -225,8 +225,8 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         return resp == "OK:1"
     }
 
-    override fun consumeFireTaps(): Int {
-        val resp = execCmd("GET_FIRE_TAPS") ?: return 0
+    override fun consumeFireState(): Int {
+        val resp = execCmd("GET_FIRE_STATE") ?: return 0
         if (!resp.startsWith("OK:")) return 0
         return resp.removePrefix("OK:").trim().toIntOrNull() ?: 0
     }

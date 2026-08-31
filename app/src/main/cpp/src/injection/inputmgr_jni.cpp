@@ -174,10 +174,10 @@ Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsF
 }
 
 JNIEXPORT jint JNICALL
-Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrConsumeFireTaps(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrConsumeFireState(
     JNIEnv*, jclass)
 {
-    return (jint)inputmgr_consume_fire_taps();
+    return (jint)inputmgr_consume_fire_state();
 }
 
 JNIEXPORT jboolean JNICALL

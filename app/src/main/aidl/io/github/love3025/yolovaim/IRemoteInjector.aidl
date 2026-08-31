@@ -50,8 +50,8 @@ interface IRemoteInjector {
     boolean isFingerInTriggerZone();
     void setFireZone(int left, int top, int right, int bottom);
     boolean isFingerInFireZone();
-    /** 取走自上次调用以来开火区的点击(上升沿)次数并清零。 */
-    int consumeFireTaps();
+    /** 一次调用取回开火区电平与点击数：bit0 = 电平，bit1.. = 点击次数。 */
+    int consumeFireState();
     void setJoystickZone(int left, int top, int right, int bottom);
     boolean isFingerInJoystickZone();
     boolean liftJoystickFinger();

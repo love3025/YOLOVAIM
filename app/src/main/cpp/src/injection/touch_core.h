@@ -41,8 +41,9 @@ void touch_set_joystick_zone(int l, int t, int r, int b);
 // Zone queries
 bool touch_is_finger_in_trigger_zone(void);
 bool touch_is_finger_in_fire_zone(void);
-// 取走自上次调用以来开火区的点击(上升沿)次数并清零。
-int  touch_consume_fire_taps(void);
+// 一次调用同时取回开火区电平与自上次调用以来的点击(上升沿)次数并清零：
+//   bit0 = 当前是否有手指在开火区；bit1.. = 点击次数
+int  touch_consume_fire_state(void);
 bool touch_is_finger_in_joystick_zone(void);
 
 // Lift physical finger in joystick zone

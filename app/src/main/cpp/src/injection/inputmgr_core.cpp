@@ -770,8 +770,15 @@ bool inputmgr_is_finger_in_fire_zone(void) {
     return false;
 }
 
-// 取走自上次调用以来的点击次数并清零。
-int inputmgr_consume_fire_taps(void) { return g_fire_taps.exchange(0, std::memory_order_relaxed); }
+// 一次往返同时取走电平和点击数：(taps << 1) | level。理由同 touch_core。
+int inputmgr_consume_fire_state(void) {
+    const int taps = g_fire_taps.exchange(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> guard(g_mutex);
+    for (auto& ptr : g_physical_pointers) {
+        if (pointInZone(g_fire_zone, (int)ptr.x, (int)ptr.y)) return (taps << 1) | 1;
+    }
+    return taps << 1;
+}
 
 bool inputmgr_is_finger_in_joystick_zone(void) {
     std::lock_guard<std::mutex> guard(g_mutex);

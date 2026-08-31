@@ -842,8 +842,13 @@ void touch_set_joystick_zone(int l, int t, int r, int b) { g_joystick_zone = {l,
 bool touch_is_finger_in_trigger_zone(void)  { return g_trigger_zone.finger_inside; }
 bool touch_is_finger_in_fire_zone(void)     { return g_fire_zone.finger_inside; }
 
-// 取走自上次调用以来的点击次数并清零。
-int touch_consume_fire_taps(void) { return g_fire_taps.exchange(0, std::memory_order_relaxed); }
+// 一次往返同时取走电平和点击数：(taps << 1) | level。
+// 拆成两条命令会让推理热路径每帧多一次阻塞式 IPC 往返，正是 4ee9e9e 刚
+// 消除掉的那类浪费(execCmd 是 write + readLine，且在 cmdLock 上串行)。
+int touch_consume_fire_state(void) {
+    const int taps = g_fire_taps.exchange(0, std::memory_order_relaxed);
+    return (taps << 1) | (g_fire_zone.finger_inside ? 1 : 0);
+}
 bool touch_is_finger_in_joystick_zone(void) { return g_joystick_zone.finger_inside; }
 
 bool touch_lift_joystick_finger(void) {

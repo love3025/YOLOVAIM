@@ -156,10 +156,10 @@ Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeIsFingerInF
 }
 
 JNIEXPORT jint JNICALL
-Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeConsumeFireTaps(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeConsumeFireState(
     JNIEnv*, jclass)
 {
-    return (jint)touch_consume_fire_taps();
+    return (jint)touch_consume_fire_state();
 }
 
 JNIEXPORT void JNICALL
