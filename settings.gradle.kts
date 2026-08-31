@@ -28,6 +28,6 @@ dependencyResolutionManagement {
 
 }
 
-rootProject.name = "Aimbot"
+rootProject.name = "YOLOVAIM"
 include(":app")
  

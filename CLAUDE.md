@@ -13,7 +13,7 @@ touch injection through Shizuku or Root (uinput).
 imported by the user at runtime via SAF; class semantics are user-supplied. See `ModelRepository`.
 
 Fork note: the upstream project gated `MainActivity` behind a license-code check implemented in a
-closed-source `libaimbot_license.so`. That gate, `LoginActivity`, `LicenseManager`, the `.so`, and
+closed-source `libaimbot_license.so` (upstream name). That gate, `LoginActivity`, `LicenseManager`, the `.so`, and
 the now-unused `INTERNET` permission were all removed in this fork. The QNN prewarm pass that used
 to piggyback on the login screen now lives in `MainActivity.startPrewarmInBackground()`.
 
@@ -53,7 +53,7 @@ git push origin v1.0.x
 3. 更新 `dialog_changelog.xml` 添加新版本条目
 4. `./gradlew assembleRelease` 构建 release APK
 5. `git tag` 打 tag 并 push
-6. GitHub Release 页面创建 Release，上传 APK，标题格式 `Aimbot Android v1.0.x`
+6. GitHub Release 页面创建 Release，上传 APK，标题格式 `YOLOVAIM v1.0.x`
 
 ### 注意事项
 
@@ -109,7 +109,7 @@ injector/
 └── UinputInjector.java          # Legacy standalone injector (superseded)
 
 inference/
-├── JniCallBack.kt               # JNI bridge → libaimbot.so
+├── JniCallBack.kt               # JNI bridge → libyolovaim.so
 └── TfliteClassifier.kt          # Alternative pure-Java TFLite classifier (unused)
 
 util/
@@ -122,7 +122,7 @@ util/
 src/inference/
 ├── inference_engine.h           # Abstract base: init, detect, release, setConfidence, setInputSize
 ├── common.h                     # Detection struct, NMS, sigmoid, timing
-├── aimbot.cpp                   # JNI bridge — creates NcnnEngine or LiteRtEngine by model extension
+├── yolovaim.cpp                   # JNI bridge — creates NcnnEngine or LiteRtEngine by model extension
 ├── ncnn_engine.h/cpp            # NCNN inference (YOLOv8 DFL + legacy format, float32 + int8)
 ├── litert_engine.h/cpp          # TFLite inference (QNN HTP → GPU → CPU fallback chain)
 ├── qnn_engine.h/cpp             # QNN HTP delegate builder (Qualcomm detection, FastRPC preload)
@@ -135,7 +135,7 @@ src/injection/
 src/daemon/
 └── root_daemon.cpp              # Standalone su daemon, stdin/stdout command protocol (20+ commands)
 
-CMakeLists.txt                   # 3 targets: aimbot (shared), uinput_inject (shared), root_daemon (exec)
+CMakeLists.txt                   # 3 targets: yolovaim (shared), uinput_inject (shared), root_daemon (exec)
                                  # + touch_core (static) shared between injection targets
                                  # Links NCNN with Vulkan + OpenMP
 ```
@@ -144,7 +144,7 @@ CMakeLists.txt                   # 3 targets: aimbot (shared), uinput_inject (sh
 
 1. `MediaProjection` captures screen into `ImageReader`
 2. `InferenceManager` calls `JniCallBack.detect()` via JNI
-3. `aimbot.cpp` selects engine by model extension (`.param` → NCNN, `.tflite` → LiteRt/QNN)
+3. `yolovaim.cpp` selects engine by model extension (`.param` → NCNN, `.tflite` → LiteRt/QNN)
 4. Returns `[classId, score, x1, y1, x2, y2, ...]`
 5. `FloatService` converts to screen pixels, posts to `OverlayCanvasView` for overlay
 6. `AimController`: PID or Bezier moves virtual finger via injector client → uinput
@@ -192,7 +192,7 @@ Four configurable zones (via AreaSettingsView):
 - QNN HTP: `TfLiteQnnDelegateCreate` with `kHtpBackend`, preloads `libcdsprpc.so`
 - GPU: `TfLiteGpuDelegateV2Create`
 - CPU: default TFLite (final fallback)
-- `cache_dir=/data/data/team.maodie.aimbot/cache/qnn`
+- `cache_dir=/data/data/io.github.love3025.yolovaim/cache/qnn`
 
 ### Output Format
 

@@ -24,11 +24,11 @@
 #define LOG_TAG "TouchCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "AimbotLatency", __VA_ARGS__)
+#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
 #else
 #define LOGD(...) do { fprintf(stderr, "D/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #define LOGE(...) do { fprintf(stderr, "E/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
-#define LOGLAT(...) do { fprintf(stderr, "D/AimbotLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#define LOGLAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #endif
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -298,8 +298,11 @@ static bool detectTouchDeviceViaGetevent(char* outPath, size_t pathSize,
             hasSlot = hasX = hasY = false;
             maxX = maxY = 0;
         }
-        // Skip our own previously-created virtual device
-        if (strstr(line, "name:") && strstr(line, "Aimbot")) {
+        // NOTE: 遗留过滤器。早期版本把虚拟设备命名为品牌名，此处按名字跳过自己。
+        // 现在设备名克隆自真实触摸设备（见下方 EVIOCGNAME 分支）或为随机串，
+        // 所以这个条件实际已经匹配不到任何东西。改名时一并更新以免留下旧品牌，
+        // 行为未变；要真正修复应改为按 uinput fd / devpath 排除自身。
+        if (strstr(line, "name:") && strstr(line, "YOLOVAIM")) {
             hasSlot = hasX = hasY = false;
             maxX = maxY = 0;
         }

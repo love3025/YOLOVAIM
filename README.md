@@ -1,4 +1,4 @@
-# YOLO Overlay Detector (Android)
+# YOLOVAIM
 
 基于用户自备 YOLO 模型的 Android 屏幕目标检测 + 触控自动化框架。
 
