@@ -84,10 +84,12 @@ class AimController(
     // Recoil compensation
     var recoilEnabled = false
     var recoilStrength = 0.5f   // 0.0 ~ 1.0
+    var recoilPerShot = 8f            // 每次点击的固定 kick (px)，0 = 关闭半自动模式
     var recoilMaxOffset = 200f        // 偏移量硬上限 (px)
     var recoilResetIntervalMs = 300   // 松开开火区超过此时长才开始衰减
     private var recoilOffsetY = 0f
     private var lastFireMs = 0L
+    private var pendingKick = 0f
 
     // Class filtering
     var aimClasses: MutableSet<Int> = mutableSetOf()
@@ -463,13 +465,37 @@ class AimController(
      *
      * 注意这里不看 aimbotOn / holdToAimActive：玩家在开火，游戏内枪口就在爬升，
      * 这与自瞄有没有接管无关。等自瞄再接手时，偏移量应当反映真实的累计爬升。
+     *
+     * taps 是注入层数出来的点击次数(上升沿)，不是电平采样。半自动连点靠它按
+     * 「打了几枪」计量：电平方案下每次点击贡献的帧数取决于按压时长与推理帧的
+     * 相位，30fps 下短于 33ms 的点击整帧落空，那一枪的压枪根本没算。
+     * 长按与连点的总量本就该不同（真实的物理现象），要消除的是「同样打 10 枪，
+     * 只因按压时长和相位不同就差三倍、还随机漏枪」。
      */
-    fun updateRecoil(held: Boolean, dtSec: Float, nowMs: Long) {
-        if (!recoilEnabled) { recoilOffsetY = 0f; return }
+    fun updateRecoil(held: Boolean, taps: Int, dtSec: Float, nowMs: Long) {
+        if (!recoilEnabled) { recoilOffsetY = 0f; pendingKick = 0f; return }
+
+        // 半自动：每枪一个固定 kick，与按压时长、帧率、相位全部无关。
+        if (taps > 0 && recoilPerShot > 0f) {
+            pendingKick += recoilPerShot * taps
+            lastFireMs = nowMs
+        }
+        // kick 摊到之后几帧释放，而不是一帧打满。它进的是 PID 的目标值，
+        // 而 Y 轴的 kp/kd 本就被 kpYRatio/kdYRatio 特意压低来抑制纵向震荡 ——
+        // 一次性 8-10px 的阶跃正好是那个被压低的环节最不擅长吃的输入。
+        // 0.4 → 每帧释放剩余的 60% @30fps，约 4 帧放完，同样按 dt 归一。
+        if (pendingKick > 0f) {
+            val take = pendingKick * (1f - Math.pow(0.4, (dtSec * 30f).toDouble()).toFloat())
+            recoilOffsetY += take
+            pendingKick -= take
+            if (pendingKick < 0.5f) { recoilOffsetY += pendingKick; pendingKick = 0f }
+        }
+
+        // 全自动：按住时按时间连续爬升。
         if (held) {
             recoilOffsetY += recoilStrength * 90f * dtSec
             lastFireMs = nowMs
-        } else if (nowMs - lastFireMs > recoilResetIntervalMs) {
+        } else if (pendingKick <= 0f && nowMs - lastFireMs > recoilResetIntervalMs) {
             // 衰减系数同样按时间归一，否则这里又会引入一个帧率相关量，
             // 把上面刚换成时间基的意义抵消掉。0.7/帧 @30fps 为基准。
             recoilOffsetY *= Math.pow(0.7, (dtSec * 30f).toDouble()).toFloat()

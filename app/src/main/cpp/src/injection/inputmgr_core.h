@@ -60,6 +60,8 @@ void inputmgr_set_joystick_zone(int l, int t, int r, int b);
 // Zone queries
 bool inputmgr_is_finger_in_trigger_zone(void);
 bool inputmgr_is_finger_in_fire_zone(void);
+// 取走自上次调用以来开火区的点击(上升沿)次数并清零。
+int  inputmgr_consume_fire_taps(void);
 bool inputmgr_is_finger_in_joystick_zone(void);
 
 // Lift physical finger in joystick zone

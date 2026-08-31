@@ -142,6 +142,7 @@ class FloatService : Service() {
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
     private var recoilMaxOffset = 200f; private var recoilResetIntervalMs = 300
+    private var recoilPerShot = 8f
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -286,6 +287,7 @@ class FloatService : Service() {
         aimController.classBoxAimRatios = classBoxAimRatios
         aimController.recoilEnabled = recoilEnabled
         aimController.recoilStrength = recoilStrength
+        aimController.recoilPerShot = recoilPerShot
         aimController.recoilMaxOffset = recoilMaxOffset
         aimController.recoilResetIntervalMs = recoilResetIntervalMs
 
@@ -325,6 +327,7 @@ class FloatService : Service() {
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
+        recoilPerShot = cfg.recoilPerShot
         recoilMaxOffset = cfg.recoilMaxOffset
         recoilResetIntervalMs = cfg.recoilResetIntervalMs
         ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
@@ -783,6 +786,7 @@ class FloatService : Service() {
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
         guiPanel.recoilEnabled = cfg.recoilEnabled
         guiPanel.recoilStrength = cfg.recoilStrength
+        guiPanel.recoilPerShot = cfg.recoilPerShot
         guiPanel.recoilMaxOffset = cfg.recoilMaxOffset
         guiPanel.recoilResetIntervalMs = cfg.recoilResetIntervalMs
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
@@ -910,6 +914,7 @@ class FloatService : Service() {
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
+        guiPanel.onRecoilPerShotChanged = { recoilPerShot = it; aimController.recoilPerShot = it; ConfigManager.updateConfig { recoilPerShot = it } }
         guiPanel.onRecoilMaxOffsetChanged = { recoilMaxOffset = it; aimController.recoilMaxOffset = it; ConfigManager.updateConfig { recoilMaxOffset = it } }
         guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
         guiPanel.onAimTouchDisplay = { show ->
@@ -1173,9 +1178,12 @@ class FloatService : Service() {
                     // 只用来判断"用户是不是正在手动开火"，这点偏差无影响。
                     val fingerOnFire = touchService.isFingerInFireZone()
                     val recoilHeld = fingerOnFire || triggerController.triggerFired
+                    // 本帧内真实打了几枪。注入层以 120-240Hz 数上升沿，取走即清零，
+                    // 所以即便一帧里点了两下也不会丢。
+                    val fireTaps = touchService.consumeFireTaps()
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
-                    aimController.updateRecoil(recoilHeld, dtSec, System.currentTimeMillis())
+                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
 
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {

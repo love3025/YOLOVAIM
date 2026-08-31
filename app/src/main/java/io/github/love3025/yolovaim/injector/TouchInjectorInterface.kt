@@ -27,6 +27,16 @@ interface TouchInjectorInterface {
     fun isFingerInTriggerZone(): Boolean
     fun setFireZone(left: Int, top: Int, right: Int, bottom: Int)
     fun isFingerInFireZone(): Boolean
+
+    /**
+     * 取走自上次调用以来开火区被按下的次数（上升沿计数）并清零。
+     *
+     * isFingerInFireZone() 是电平查询：应用按推理帧率(30-60Hz)采样，而注入层
+     * 看到的是 120-240Hz 的真实触摸事件，短于一个帧间隔的点击会被整帧漏掉，
+     * 且漏与不漏取决于点击与推理帧的相位。半自动连点必须靠这个计数才能按
+     * 「打了几枪」而不是「按了多久」来计量。
+     */
+    fun consumeFireTaps(): Int
     fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int)
     fun isFingerInJoystickZone(): Boolean
     fun liftJoystickFinger(): Boolean
