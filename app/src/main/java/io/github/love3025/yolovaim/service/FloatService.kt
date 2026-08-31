@@ -141,7 +141,7 @@ class FloatService : Service() {
     private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f; private var kf = 0.05f
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
-    private var recoilMaxOffset = 200f; private var recoilResetIntervalMs = 300
+    private var recoilTapStrength = 0.5f; private var recoilResetIntervalMs = 300
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -286,7 +286,7 @@ class FloatService : Service() {
         aimController.classBoxAimRatios = classBoxAimRatios
         aimController.recoilEnabled = recoilEnabled
         aimController.recoilStrength = recoilStrength
-        aimController.recoilMaxOffset = recoilMaxOffset
+        aimController.recoilTapStrength = recoilTapStrength
         aimController.recoilResetIntervalMs = recoilResetIntervalMs
 
         // TriggerController
@@ -325,7 +325,7 @@ class FloatService : Service() {
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
-        recoilMaxOffset = cfg.recoilMaxOffset
+        recoilTapStrength = cfg.recoilTapStrength
         recoilResetIntervalMs = cfg.recoilResetIntervalMs
         ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
         aimMode = cfg.aimMode
@@ -783,7 +783,7 @@ class FloatService : Service() {
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
         guiPanel.recoilEnabled = cfg.recoilEnabled
         guiPanel.recoilStrength = cfg.recoilStrength
-        guiPanel.recoilMaxOffset = cfg.recoilMaxOffset
+        guiPanel.recoilTapStrength = cfg.recoilTapStrength
         guiPanel.recoilResetIntervalMs = cfg.recoilResetIntervalMs
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
@@ -910,7 +910,7 @@ class FloatService : Service() {
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
-        guiPanel.onRecoilMaxOffsetChanged = { recoilMaxOffset = it; aimController.recoilMaxOffset = it; ConfigManager.updateConfig { recoilMaxOffset = it } }
+        guiPanel.onRecoilTapStrengthChanged = { recoilTapStrength = it; aimController.recoilTapStrength = it; ConfigManager.updateConfig { recoilTapStrength = it } }
         guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
@@ -1135,6 +1135,7 @@ class FloatService : Service() {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             var lastFrameNs = 0L
+            var prevFingerOnFire = false
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
@@ -1173,9 +1174,14 @@ class FloatService : Service() {
                     // 只用来判断"用户是不是正在手动开火"，这点偏差无影响。
                     val fingerOnFire = touchService.isFingerInFireZone()
                     val recoilHeld = fingerOnFire || triggerController.triggerFired
+                    // 连点计数：这里数的是「电平的上升沿」，采样率就是推理帧率。
+                    // 短于一个帧间隔的点击会漏掉 —— 要根治得在注入层(120-240Hz)
+                    // 数上升沿，那条路走的是新增 IPC 命令，暂时撤下待查。
+                    val fireTaps = if (fingerOnFire && !prevFingerOnFire) 1 else 0
+                    prevFingerOnFire = fingerOnFire
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
-                    aimController.updateRecoil(recoilHeld, dtSec, System.currentTimeMillis())
+                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
 
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
