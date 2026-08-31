@@ -517,11 +517,18 @@ class AimController(
             if (pendingKick < 0.5f) { recoilOffsetY += pendingKick; pendingKick = 0f }
         }
 
-        // 长按：以恒定速度走向 range。恒速而不是指数逼近 —— 后者末段无限慢，
-        // "多久压到脚"就没法定义了，也不符合真实枪械先爬升后见顶的形状。
+        // 长按：恒速下压，到 range 为止。
+        //
+        // 速率只由速度决定，用的是整个框高 h 而不是 range —— 这才是真正的解耦。
+        // 之前写成 range/sec，等于强度调低时下降也跟着变慢，两个滑块又绑在一起了；
+        // 而且"多久压到脚"说的是走完整个框高的时间，用 range 的话强度 50% 就变成
+        // 4 秒只走半程，等于又慢一倍。
+        //
+        // 恒速而不是指数逼近：后者末段无限慢，"多久压到脚"无从定义，也不符合真实
+        // 枪械先爬升后见顶的形状。
         if (held) {
             val sec = TRAVERSAL_SLOW_SEC + (TRAVERSAL_FAST_SEC - TRAVERSAL_SLOW_SEC) * recoilSpeed
-            recoilOffsetY += (range / sec) * dtSec
+            recoilOffsetY += (h / sec) * dtSec
             lastFireMs = nowMs
         } else if (recoilResetIntervalMs <= 0) {
             // 间隔 = 0：松开开火区立即重置，不走衰减。
@@ -536,6 +543,9 @@ class AimController(
         // 终点就是 range 本身，不需要另一个"上限"参数。
         recoilOffsetY = recoilOffsetY.coerceIn(0f, range)
     }
+
+    /** 排障用：外部只读当前偏移量。 */
+    val recoilOffsetDebug: Float get() = recoilOffsetY
 
     fun resetRecoil() {
         recoilOffsetY = 0f

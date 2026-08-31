@@ -1144,8 +1144,11 @@ class FloatService : Service() {
             // 压枪的下压范围按目标框高取比例。updateRecoil 在帧首调用，
             // 那时本帧还没选目标，所以用上一帧的框高 —— 差一帧无影响。
             var lastBoxH = 0f
+            // 排障用，只被下面那条每 30 帧一次的日志读取
+            var dbgHeld = false; var dbgTaps = 0; var dbgRaw = -1
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
+                if (aliveCtr % 30 == 0) { Log.d(TAG, "recoil on=$recoilEnabled held=$dbgHeld taps=$dbgTaps boxH=$lastBoxH offset=${aimController.recoilOffsetDebug} raw=$dbgRaw") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
 
@@ -1195,6 +1198,7 @@ class FloatService : Service() {
                     }
                     prevFingerOnFire = fingerOnFire
                     val recoilHeld = fingerOnFire || triggerController.triggerFired
+                    dbgHeld = recoilHeld; dbgTaps = fireTaps; dbgRaw = packed
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
                     aimController.updateRecoil(recoilHeld, fireTaps, lastBoxH, dtSec, System.currentTimeMillis())
