@@ -554,7 +554,7 @@ std::vector<Detection> MtkEngine::detect(
         LOGE("RunCompiledModel failed: %d", status);
         return {};
     }
-    LOGD("MTK NPU Inference: %lld us", t2 - t1);
+    LOGTRACE("MTK NPU Inference: %lld us", t2 - t1);
 
     // 3. Read output (use first output for YOLOv8)
     void* output_ptr = nullptr;
@@ -565,7 +565,7 @@ std::vector<Detection> MtkEngine::detect(
         return {};
     }
 
-    LOGD("Post-process: num_outputs=%d, num_classes=%d, out_dims=[%d,%d,%d,%d], packed=%zu",
+    LOGTRACE("Post-process: num_outputs=%d, num_classes=%d, out_dims=[%d,%d,%d,%d], packed=%zu",
          m_num_outputs, m_num_classes,
          m_outputs[0].tensor_type.layout.rank > 0 ? m_outputs[0].tensor_type.layout.dimensions[0] : 0,
          m_outputs[0].tensor_type.layout.rank > 1 ? m_outputs[0].tensor_type.layout.dimensions[1] : 0,
@@ -586,14 +586,17 @@ std::vector<Detection> MtkEngine::detect(
     // If INT8 but no quant params from model, use INT8 defaults (scale=1/127, zp=0)
     if (is_int8_output && out_scale == 1.0f && out_zp == 0) {
         out_scale = 1.0f / 127.0f;
-        LOGD("INT8 output detected, using default dequant: scale=%.6f", out_scale);
+        LOGTRACE("INT8 output detected, using default dequant: scale=%.6f", out_scale);
     }
 
-    LOGD("Output type: %s (packed=%zu, expected_f32=%zu, elements=%d, scale=%.6f, zp=%d)",
+    LOGTRACE("Output type: %s (packed=%zu, expected_f32=%zu, elements=%d, scale=%.6f, zp=%d)",
          is_int8_output ? "INT8" : "FLOAT32", actual_size, expected_float32_size,
          total_elements, out_scale, out_zp);
 
-    // Debug: dump first 20 raw values
+    // Debug: dump first 20 raw values. Guarded as a block rather than at the
+    // log call, because building the string is itself 20 snprintf calls per
+    // frame — the formatting was the expensive half.
+#ifdef YOLOVAIM_TRACE
     if (is_int8_output) {
         int8_t* dbg = static_cast<int8_t*>(output_ptr);
         int n = (int)actual_size < 20 ? (int)actual_size : 20;
@@ -614,6 +617,7 @@ std::vector<Detection> MtkEngine::detect(
         }
         LOGD("Output float[0..%d]: %s", n - 1, buf);
     }
+#endif  // YOLOVAIM_TRACE
 
     std::vector<Detection> detections;
     detections.reserve(m_num_outputs);
@@ -714,7 +718,7 @@ std::vector<Detection> MtkEngine::detect(
 
     m_api.UnlockTensorBuffer(m_outputs[0].buffer);
 
-    LOGD("MTK NPU Raw: %zu", detections.size());
+    LOGTRACE("MTK NPU Raw: %zu", detections.size());
 
     auto finalDetections = nms(detections, 0.45f);
     long long tPostEnd = getTimeUs();
@@ -722,7 +726,7 @@ std::vector<Detection> MtkEngine::detect(
     m_last_pre_ms = (float)((tPreEnd - tPreStart) / 1e3);
     m_last_infer_ms = (float)((t2 - t1) / 1e3);
     m_last_post_ms = (float)((tPostEnd - t2) / 1e3);
-    LOGLAT("MTK | pre=%.2fms infer=%.2fms post=%.2fms raw=%zu nms=%zu",
+    LOGTRACELAT("MTK | pre=%.2fms infer=%.2fms post=%.2fms raw=%zu nms=%zu",
            m_last_pre_ms, m_last_infer_ms, m_last_post_ms,
            detections.size(), finalDetections.size());
     return finalDetections;

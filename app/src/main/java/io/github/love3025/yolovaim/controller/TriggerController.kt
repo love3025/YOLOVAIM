@@ -121,10 +121,24 @@ class TriggerController(
         }
     }
 
-    fun processTrigger(lastDetections: List<DetectionInfo>, centerX: Float, centerY: Float, hasDetects: Boolean) {
+    /**
+     * @param fireZoneState pre-sampled result of [TouchInjectorInterface.isFingerInFireZone].
+     *   The caller already needs this value in the same frame (to drive recoil
+     *   control), and it describes a physical finger that injected touches are
+     *   explicitly excluded from, so re-querying it here would cost a second
+     *   blocking IPC round-trip to return the same answer. Pass null to have
+     *   this function query it itself.
+     */
+    fun processTrigger(
+        lastDetections: List<DetectionInfo>,
+        centerX: Float,
+        centerY: Float,
+        hasDetects: Boolean,
+        fireZoneState: Boolean? = null
+    ) {
         if (!triggerEnabled || !hasDetects || touchClient()?.isConnected() != true) return
 
-        val fingerOnFire = touchClient()?.isFingerInFireZone() ?: false
+        val fingerOnFire = fireZoneState ?: (touchClient()?.isFingerInFireZone() ?: false)
         if (fingerOnFire) return
 
         val triggerDets = if (triggerClasses.isEmpty()) lastDetections

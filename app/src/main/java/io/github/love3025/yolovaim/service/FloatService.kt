@@ -38,7 +38,22 @@ import io.github.love3025.yolovaim.util.ProjectionHolder
 
 class FloatService : Service() {
 
-    companion object { const val TAG = "FloatService"; const val CH_ID = "aimbot_ch" }
+    companion object {
+        const val TAG = "FloatService"; const val CH_ID = "aimbot_ch"
+
+        /**
+         * Per-frame trace logging, compiled out by default in every build type.
+         *
+         * The sites guarded by this run once per inference frame (100-300/s on
+         * QNN HTP). Each one costs a String.format plus an __android_log_write
+         * socket round-trip on the same core the inference loop runs on, and
+         * neither is stripped in release (isMinifyEnabled = false, and the
+         * default proguard config does not drop android.util.Log). At that rate
+         * the output is unreadable anyway. Flip to true locally when you
+         * actually want a frame-by-frame trace.
+         */
+        const val TRACE = false
+    }
 
     private lateinit var wm: WindowManager
     private lateinit var ballView: FloatBallView
@@ -53,6 +68,28 @@ class FloatService : Service() {
 
     var mediaProjection: MediaProjection? = null
     private var imageReader: ImageReader? = null
+
+    // Frame-arrival signalling for the inference loop.
+    //
+    // The loop used to poll acquireLatestImage() and Thread.yield() on a
+    // THREAD_PRIORITY_URGENT_DISPLAY thread. Inference takes ~3ms while the
+    // compositor only produces a frame every 8-16ms, so ~80% of the wall clock
+    // was spent burning a big core in the yield loop. That is not just wasted
+    // CPU: it heats the SoC, and the resulting thermal throttling drags the NPU
+    // down with it (the "smooth for the first few minutes, then drops frames"
+    // symptom).
+    //
+    // ImageReader's own listener carries exactly the semantics the loop wants
+    // ("a new frame exists"), so the loop now blocks until it fires. Frame
+    // throughput is unchanged: acquireLatestImage() could never return more
+    // frames than the VirtualDisplay produced.
+    private var readerThread: HandlerThread? = null
+    private var readerHandler: Handler? = null
+    // ReentrantLock rather than an intrinsic monitor: Kotlin's Any does not
+    // expose wait/notify, so a monitor would need a java.lang.Object cast.
+    private val frameLock = java.util.concurrent.locks.ReentrantLock()
+    private val frameCond: java.util.concurrent.locks.Condition = frameLock.newCondition()
+    private var frameReady = false
     private var captureVirtualDisplay: android.hardware.display.VirtualDisplay? = null
     var mediaRecorder: android.media.MediaRecorder? = null
     private var recordSurface: Surface? = null
@@ -372,7 +409,7 @@ class FloatService : Service() {
         }
         if (intent?.action == "STOP") {
             if (mediaRecorder != null) toggleRecording(false)
-            inferRunning.set(false)
+            inferRunning.set(false); wakeInferLoop()
             executor.shutdown()
             cleanupViews()
             touchService.stopGeteventListener()
@@ -561,7 +598,7 @@ class FloatService : Service() {
             mediaRecorder = null
             recordSurface = null
             // 如果模型没在运行，停止推理循环
-            if (!modelRunning) { inferRunning.set(false); broadcastState(1) }
+            if (!modelRunning) { inferRunning.set(false); wakeInferLoop(); broadcastState(1) }
             Log.d(TAG, "Recording stopped")
         }
     }
@@ -646,6 +683,9 @@ class FloatService : Service() {
 
     private fun loadModel(filename: String) {
         val wasRunning = inferRunning.getAndSet(false)
+        // The loop may be parked waiting for a frame; wake it so this
+        // (main-thread) drain returns immediately instead of after the timeout.
+        wakeInferLoop()
         try { executor.submit { }.get() } catch (_: Exception) {}
         JniCallBack.release()
         // 模型全部由用户经 ModelRepository 导入，ProjectionHolder 的快照里直接
@@ -914,7 +954,7 @@ class FloatService : Service() {
             else if (!running) {
                 // 如果录屏还在运行，不要停止推理循环
                 if (!recordEnabled) {
-                    inferRunning.set(false)
+                    inferRunning.set(false); wakeInferLoop()
                     broadcastState(1)
                 }
             }
@@ -1017,15 +1057,64 @@ class FloatService : Service() {
         Log.d(TAG, "updateJoystickZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
+    // Dedicated looper for ImageReader callbacks. Must not be the main looper:
+    // the callback fires at compositor rate, and waking the UI thread 60-120x/s
+    // just to set a flag would show up as jank in every other overlay.
+    private fun ensureReaderHandler(): Handler {
+        readerHandler?.let { return it }
+        val t = HandlerThread("YolovaimReader", android.os.Process.THREAD_PRIORITY_DISPLAY)
+        t.start()
+        readerThread = t
+        val h = Handler(t.looper)
+        readerHandler = h
+        return h
+    }
+
+    // Wake the infer loop when a frame lands. Keeps no reference to the Image
+    // itself — the loop still calls acquireLatestImage() and so still drops
+    // stale frames exactly as before.
+    private fun attachFrameListener(reader: ImageReader) {
+        reader.setOnImageAvailableListener({ wakeInferLoop() }, ensureReaderHandler())
+    }
+
     private fun setupImageReader() {
         captureW = screenWidth; captureH = screenHeight
         Log.d(TAG, "setupImageReader: w=${captureW} h=${captureH}")
 
         imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
+        attachFrameListener(imageReader!!)
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() { Log.d("YolovaimInfer", "MediaProjection 停止"); inferRunning.set(false); imageReader?.close() }
+            override fun onStop() { Log.d("YolovaimInfer", "MediaProjection 停止"); inferRunning.set(false); wakeInferLoop(); imageReader?.close() }
         }, Handler(Looper.getMainLooper()))
         captureVirtualDisplay = mediaProjection?.createVirtualDisplay("YolovaimCapture", captureW, captureH, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null)
+    }
+
+    // Signals a new frame, and doubles as the way to unblock a loop parked in
+    // awaitFrame() so it can re-read inferRunning and exit promptly.
+    private fun wakeInferLoop() {
+        frameLock.lock()
+        try { frameReady = true; frameCond.signalAll() } finally { frameLock.unlock() }
+    }
+
+    private fun clearFrameFlag() {
+        frameLock.lock()
+        try { frameReady = false } finally { frameLock.unlock() }
+    }
+
+    // Park until the reader signals a frame. The bounded wait is a safety net,
+    // not the normal path: a completely static screen produces no frames at all
+    // (the old code span through that case doing nothing), and the timeout also
+    // guarantees the loop notices inferRunning going false even if the listener
+    // never fires again.
+    private fun awaitFrame() {
+        frameLock.lock()
+        try {
+            if (!frameReady) frameCond.await(20, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            frameLock.unlock()
+        }
     }
 
     private fun startInferLoop() {
@@ -1040,9 +1129,22 @@ class FloatService : Service() {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
+
+                // Clear the flag *before* acquiring: a frame that lands in the
+                // window between here and acquireLatestImage() is picked up by
+                // the acquire itself, and one that lands after leaves the flag
+                // set so awaitFrame() returns immediately instead of parking on
+                // an event that already happened.
+                clearFrameFlag()
                 val image = imageReader?.acquireLatestImage()
-                if (image == null) { Thread.yield(); continue }
-                val hwBuf = image.hardwareBuffer
+                if (image == null) { awaitFrame(); continue }
+
+                // Image.getHardwareBuffer() allocates a fresh HardwareBuffer
+                // wrapper (plus two JNI transitions) on every call. Only the
+                // recording and dataset paths need it, and both are off in
+                // normal use, so fetching it unconditionally was per-frame waste.
+                val needHwBuf = (recordEnabled && recordSurface != null) || autoSaveDataset
+                val hwBuf = if (needHwBuf) image.hardwareBuffer else null
                 try {
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
@@ -1108,7 +1210,7 @@ class FloatService : Service() {
 
                         if (result != null) {
                             val count = result.size / 6
-                            if (count > 0) {
+                            if (TRACE && count > 0) {
                                 val cid = result[0].toInt()
                                 val sc = result[1]
                                 val className = currentClasses[cid] ?: "unknown"
@@ -1123,7 +1225,11 @@ class FloatService : Service() {
                             }
                             lastDetections = detectionBuffer.take(detCount)
                             hasDetects.set(detCount > 0)
-                            mainHandler.post { overlayView.updateDetections(lastDetections) }
+                            // updateDetections() is safe to call from any thread
+                            // (it ends in postInvalidateOnAnimation), so the
+                            // mainHandler.post hop was a lambda + Message + main
+                            // looper wake-up per frame for nothing.
+                            overlayView.updateDetections(lastDetections)
 
                             if (autoSaveDataset && detCount > 0 && hwBuf != null) {
                                 saveDatasetFrame(hwBuf, result, count)
@@ -1160,7 +1266,7 @@ class FloatService : Service() {
                             overlayView.fovRadius = aimController.effectiveFov
                         } else {
                             hasDetects.set(false); lastDetections = emptyList()
-                            mainHandler.post { overlayView.updateDetections(lastDetections) }
+                            overlayView.updateDetections(lastDetections)
                         }
 
                         // 抬起条件：按下虚拟触摸但瞄准条件任一不满足都应释放（修了按住激发中途松手后触摸点卡住的 bug）
@@ -1170,9 +1276,16 @@ class FloatService : Service() {
                         }
 
                         // detection-based trigger: center in any detection box (filtered by aimClasses)
-                        triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get())
+                        // The fire-zone state is queried once and handed to
+                        // processTrigger, which used to re-query it over IPC a
+                        // few lines before this did. Both reads happen in the
+                        // same frame and describe the same physical finger, so
+                        // the second round-trip could only ever return the same
+                        // answer.
+                        val fingerOnFire = touchService.isFingerInFireZone()
+                        triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get(), fingerOnFire)
                         // 压枪：每帧更新扳机状态（支持手动开火 + 自动扳机）
-                        aimController.triggerHeld = touchService.isFingerInFireZone() || triggerController.triggerFired
+                        aimController.triggerHeld = fingerOnFire || triggerController.triggerFired
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
                 finally { hwBuf?.close(); image.close() }
             }
@@ -1229,6 +1342,7 @@ class FloatService : Service() {
         if (captureW == curW && captureH == curH) return  // no change
 
         val wasRunning = inferRunning.getAndSet(false)
+        wakeInferLoop()
         Log.d(TAG, "restartCapture: wasRunning=$wasRunning newSize=${curW}x${curH}")
         executor.execute {
             try { Thread.sleep(200) } catch (_: Exception) {}
@@ -1238,6 +1352,7 @@ class FloatService : Service() {
             try { oldReader?.close() } catch (_: Exception) {}
             // Create new reader at new size
             imageReader = ImageReader.newInstance(curW, curH, PixelFormat.RGBA_8888, 2)
+            attachFrameListener(imageReader!!)
             // Resize VirtualDisplay and attach new surface
             try {
                 captureVirtualDisplay?.resize(curW, curH, screenDensity)
@@ -1256,7 +1371,9 @@ class FloatService : Service() {
 
     override fun onDestroy() {
         if (mediaRecorder != null) toggleRecording(false)
-        inferRunning.set(false); executor.shutdown()
+        inferRunning.set(false); wakeInferLoop(); executor.shutdown()
+        try { imageReader?.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
+        readerThread?.quitSafely(); readerThread = null; readerHandler = null
         touchService.stopGeteventListener()
         touchService.destroyRemote()
         touchService.disconnect()

@@ -25,10 +25,20 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACELAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
+#else
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 #else
 #define LOGD(...) do { fprintf(stderr, "D/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #define LOGE(...) do { fprintf(stderr, "E/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #define LOGLAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACELAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#else
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 #endif
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -199,13 +209,21 @@ static void upload() {
     pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeFingerCount == 4 ? 1 : 0);
     pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeFingerCount >= 5 ? 1 : 0);
     pushEvent(count, EV_SYN, SYN_REPORT, 0);
+    // This log used to fire on every successful uinput write — i.e. once per
+    // aim frame — and it runs inside the injector process, in the exact window
+    // where the caller was blocked waiting for the round-trip. It put a logd
+    // socket write on the injection critical path.
+#ifdef YOLOVAIM_TRACE
     long long tWriteStart = touchTimeUs();
+#endif
     int wr = write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
-    long long tWriteEnd = touchTimeUs();
     if (wr < 0) {
         LOGE("upload: write failed errno=%d", errno);
     } else {
-        LOGLAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+#ifdef YOLOVAIM_TRACE
+        long long tWriteEnd = touchTimeUs();
+        LOGTRACELAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+#endif
     }
 }
 

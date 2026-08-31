@@ -9,11 +9,39 @@ import io.github.love3025.yolovaim.injector.ShizukuInjectorClient
 import io.github.love3025.yolovaim.injector.TouchInjectorInterface
 import io.github.love3025.yolovaim.model.TouchMethod
 import io.github.love3025.yolovaim.util.ProjectionHolder
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TouchService(private val context: Context) : TouchInjectorInterface {
     companion object {
         private const val TAG = "TouchService"
     }
+
+    // Trigger taps are dispatched here instead of running on the caller's
+    // thread. Both injector backends implement triggerTap as
+    // down -> sleep(durationMs) -> up, and both sleep on the *calling* thread:
+    // RootInjectorClient does it directly, and ShizukuInjectorClient inherits
+    // it because RemoteInjectorService.triggerTap sleeps inside a synchronous
+    // binder transaction. The caller is the inference loop, so every shot froze
+    // detection and aim tracking for up to 50ms — precisely while the user is
+    // shooting. Sequencing still holds: a single thread keeps DOWN/UP pairs
+    // ordered, and the trigger finger uses its own uinput slot, so a concurrent
+    // aim move cannot disturb it.
+    //
+    // Recreated on reconnect: connect() after disconnect() is a normal flow
+    // here (FloatService tears the injector down and rebuilds it), and a
+    // shut-down executor would silently reject every tap from then on.
+    @Volatile
+    private var tapExecutor: java.util.concurrent.ExecutorService = newTapExecutor()
+
+    private fun newTapExecutor(): java.util.concurrent.ExecutorService =
+        Executors.newSingleThreadExecutor { r ->
+            Thread(r, "yolovaim-tap").apply { isDaemon = true }
+        }
+
+    // Guards against pile-up if cooldown is ever configured below the touch
+    // duration. Previously the blocking call rate-limited this implicitly.
+    private val tapInFlight = AtomicBoolean(false)
 
     enum class ConnectionState {
         DISCONNECTED,
@@ -34,6 +62,8 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     }
 
     override fun connect(callback: InjectorCallback) {
+        if (tapExecutor.isShutdown) tapExecutor = newTapExecutor()
+        tapInFlight.set(false)
         updateState(ConnectionState.CONNECTING)
         when (ProjectionHolder.selectedTouchMethod) {
             TouchMethod.INPUT_MANAGER -> connectInputManager(callback)
@@ -135,7 +165,18 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     override fun triggerUp() { delegate?.triggerUp() }
 
     override fun triggerTap(x: Int, y: Int, durationMs: Int) {
-        delegate?.triggerTap(x, y, durationMs)
+        val d = delegate ?: return
+        if (!tapInFlight.compareAndSet(false, true)) return
+        try {
+            tapExecutor.execute {
+                try { d.triggerTap(x, y, durationMs) }
+                catch (e: Exception) { Log.e(TAG, "triggerTap: ${e.message}") }
+                finally { tapInFlight.set(false) }
+            }
+        } catch (e: Exception) {
+            tapInFlight.set(false)
+            Log.e(TAG, "triggerTap dispatch: ${e.message}")
+        }
     }
 
     override fun blockPhysicalTouch() { delegate?.blockPhysicalTouch() }
@@ -147,6 +188,7 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     override fun isConnected(): Boolean = delegate?.isConnected() ?: false
 
     override fun disconnect() {
+        tapExecutor.shutdownNow()
         delegate?.disconnect()
         delegate = null
         updateState(ConnectionState.DISCONNECTED)

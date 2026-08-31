@@ -20,6 +20,16 @@ class AimController(
         private const val TAG = "AimController"
         private const val LAT_TAG = "YolovaimLatency"
         private const val AREA_INDEX_AIM = 2
+
+        /**
+         * Per-frame latency tracing, compiled out by default.
+         *
+         * The 0.05ms threshold on these sites never gated anything in practice:
+         * executeAiming() contains the injector call, which is a cross-process
+         * round-trip and so always exceeds it. They therefore ran a nanoTime
+         * pair, a String.format and a logd write on every aiming frame.
+         */
+        private const val TRACE = false
     }
 
     // PID parameters
@@ -167,8 +177,10 @@ class AimController(
             val bcy = bestDet.rect.centerY()
             aimingState.lockedTarget = RectF(bcx, bcy, bcx, bcy)
         }
-        val dtMs = (System.nanoTime() - t0) / 1e6
-        if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "selectTarget=%.2fms candidates=%d", dtMs, dets.size))
+        if (TRACE) {
+            val dtMs = (System.nanoTime() - t0) / 1e6
+            if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "selectTarget=%.2fms candidates=%d", dtMs, dets.size))
+        }
         return bestDet
     }
 
@@ -220,8 +232,10 @@ class AimController(
         } else {
             executeAimingPid(targetX, adjustedTargetY, cx, cy)
         }
-        val dtMs = (System.nanoTime() - t0) / 1e6
-        if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "executeAiming=%.2fms mode=%d", dtMs, aimMode))
+        if (TRACE) {
+            val dtMs = (System.nanoTime() - t0) / 1e6
+            if (dtMs > 0.05) Log.d(LAT_TAG, String.format(java.util.Locale.US, "executeAiming=%.2fms mode=%d", dtMs, aimMode))
+        }
     }
 
     private fun executeAimingBezier(targetX: Float, targetY: Float, cx: Float, cy: Float) {

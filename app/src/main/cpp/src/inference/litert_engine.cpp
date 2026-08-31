@@ -212,11 +212,30 @@ std::vector<Detection> LiteRtEngine::detect(
     int H = m_input_height;
     int W = m_input_width;
 
-    // Precompute coordinate LUTs
-    std::vector<int> srcX_lut(W);
-    std::vector<int> srcY_lut(H);
-    for (int x = 0; x < W; ++x) srcX_lut[x] = offsetX + x * regionWidth / W;
-    for (int y = 0; y < H; ++y) srcY_lut[y] = offsetY + y * regionHeight / H;
+    // Coordinate LUTs. These depend only on the crop rect and the model input
+    // size, and neither changes between frames unless the user drags the
+    // 截取范围 slider — so rebuilding them every frame cost two heap
+    // allocations plus W+H integer divisions to produce an identical table.
+    // Cached the same way the quantize LUTs below are; detect() runs on the
+    // single inference thread.
+    static std::vector<int> s_srcX_lut;
+    static std::vector<int> s_srcY_lut;
+    static int s_lutOffX = -1, s_lutOffY = -1;
+    static int s_lutRegW = -1, s_lutRegH = -1;
+    static int s_lutW = -1, s_lutH = -1;
+    if (offsetX != s_lutOffX || offsetY != s_lutOffY ||
+        regionWidth != s_lutRegW || regionHeight != s_lutRegH ||
+        W != s_lutW || H != s_lutH) {
+        s_srcX_lut.resize(W);
+        s_srcY_lut.resize(H);
+        for (int x = 0; x < W; ++x) s_srcX_lut[x] = offsetX + x * regionWidth / W;
+        for (int y = 0; y < H; ++y) s_srcY_lut[y] = offsetY + y * regionHeight / H;
+        s_lutOffX = offsetX; s_lutOffY = offsetY;
+        s_lutRegW = regionWidth; s_lutRegH = regionHeight;
+        s_lutW = W; s_lutH = H;
+    }
+    const std::vector<int>& srcX_lut = s_srcX_lut;
+    const std::vector<int>& srcY_lut = s_srcY_lut;
 
     static const float inv255 = 1.0f / 255.0f;
 
@@ -348,7 +367,7 @@ std::vector<Detection> LiteRtEngine::detect(
     }
 
     long long t2 = getTimeUs();
-    LOGD("LiteRT Inference: %lld us", t2 - t1);
+    LOGTRACE("LiteRT Inference: %lld us", t2 - t1);
 
     // Parse output
     const TfLiteTensor* output_tensor = TfLiteInterpreterGetOutputTensor(m_interpreter, 0);
@@ -468,12 +487,12 @@ std::vector<Detection> LiteRtEngine::detect(
         }
     }
 
-    LOGD("LiteRT Raw: %zu", s_detections.size());
+    LOGTRACE("LiteRT Raw: %zu", s_detections.size());
 
     auto finalDetections = nms(s_detections, 0.45f);
     long long tPostEnd = getTimeUs();
 
-    LOGLAT("LiteRT[%s] | pre=%.2fms infer=%.2fms post=%.2fms total=%.2fms raw=%zu nms=%zu",
+    LOGTRACELAT("LiteRT[%s] | pre=%.2fms infer=%.2fms post=%.2fms total=%.2fms raw=%zu nms=%zu",
            m_backend_type.c_str(),
            (tPreEnd - tPreStart) / 1e3,
            (t2 - t1) / 1e3,

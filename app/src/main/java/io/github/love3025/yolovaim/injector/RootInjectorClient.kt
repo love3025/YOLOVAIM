@@ -124,6 +124,36 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         return resp?.startsWith("OK") == true
     }
 
+    /**
+     * Send a command without waiting for its response.
+     *
+     * [execCmd] is a blocking round-trip: it writes, then parks in readLine()
+     * until the daemon has finished the uinput write and echoed OK. For the
+     * per-frame injection commands that put the inference thread to sleep on
+     * another process's scheduling several times per frame, which is exactly
+     * the kind of latency that spikes under CPU contention.
+     *
+     * The '!' prefix tells the daemon to execute the command and emit no
+     * response line, so nothing accumulates in the pipe for a later read to
+     * trip over. Ordering is fully preserved: cmdLock serialises writers here,
+     * and the daemon consumes stdin from a single thread, so a fire-and-forget
+     * command is still executed strictly before whatever is sent after it.
+     * Only void commands are eligible — anything that returns a value still
+     * goes through [execCmd].
+     */
+    private fun execNoReply(cmd: String) {
+        synchronized(cmdLock) {
+            if (!connected) return
+            try {
+                daemonStdin!!.write("!$cmd\n".toByteArray())
+                daemonStdin!!.flush()
+            } catch (e: Exception) {
+                Log.e(TAG, "execNoReply error: ${e.message}")
+                connected = false
+            }
+        }
+    }
+
     protected fun sendOk(cmd: String): Boolean = execOk(cmd)
     protected fun sendCmd(cmd: String): String? = execCmd(cmd)
 
@@ -149,12 +179,14 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         // durationMs == 0: stay down (caller will moveTo + lift later)
     }
 
+    // Per-frame during aiming — fire-and-forget so the inference loop is not
+    // blocked on the daemon's round-trip.
     override fun moveTo(x: Int, y: Int) {
-        execOk("MOVE $x $y")
+        execNoReply("MOVE $x $y")
     }
 
     override fun lift() {
-        execOk("UP")
+        execNoReply("UP")
     }
 
     override fun keepAlive() {

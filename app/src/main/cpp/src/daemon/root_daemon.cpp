@@ -32,6 +32,15 @@
  *     OK:<value>
  *     ERR:<message>
  *
+ *   A command may be prefixed with '!' to suppress its response line entirely
+ *   (fire-and-forget). The client uses this for the void, per-frame injection
+ *   commands (MOVE / UP / TRIGGER_DOWN / TRIGGER_UP) so the inference thread
+ *   can hand off an injection without blocking on a round-trip through this
+ *   process's scheduling. Ordering is unaffected: stdin is a single serial
+ *   stream consumed by one thread, so a '!' command is still executed strictly
+ *   before whatever follows it. Commands that return a value are never sent
+ *   this way, so the client's read stream stays in lockstep.
+ *
  *   All debug/log output goes to stderr only.
  */
 
@@ -46,6 +55,17 @@ static int g_screen_w = 0;
 static int g_screen_h = 0;
 static volatile int g_running = 1;
 
+// Set per-command by the '!' prefix; suppresses this command's response line.
+static int g_quiet = 0;
+
+static void reply(const char* s) {
+    if (!g_quiet) puts(s);
+}
+
+static void reply_int(int v) {
+    if (!g_quiet) printf("OK:%d\n", v);
+}
+
 // =========================================================================
 // Command handler
 // =========================================================================
@@ -59,125 +79,132 @@ static void handle_command(const char* cmd) {
     char* cr = strchr(buf, '\r');
     if (cr) *cr = '\0';
 
+    // Fire-and-forget prefix. Strip it and remember to stay silent.
+    g_quiet = 0;
+    if (buf[0] == '!') {
+        g_quiet = 1;
+        memmove(buf, buf + 1, strlen(buf));  // includes the terminator
+    }
+
     if (strncmp(buf, "SET_RESOLUTION ", 15) == 0) {
         int w, h;
         if (sscanf(buf + 15, "%d %d", &w, &h) == 2 && w > 0 && h > 0) {
             g_screen_w = w;
             g_screen_h = h;
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strncmp(buf, "SET_DEVICE_RESOLUTION ", 22) == 0) {
         // Device resolution is auto-detected by touch_core, ignore
-        puts("OK");
+        reply("OK");
     }
     else if (strncmp(buf, "SET_ORIENTATION ", 16) == 0) {
         int landscape = atoi(buf + 16);
         touch_set_screen_params(g_screen_w, g_screen_h, landscape != 0);
-        puts("OK");
+        reply("OK");
     }
     else if (strcmp(buf, "OPEN_UINPUT") == 0) {
         if (touch_init(g_screen_w, g_screen_h)) {
             int fd = touch_get_output_fd();
-            printf("OK:%d\n", fd);
+            reply_int(fd);
         } else {
-            puts("ERR:open failed");
+            reply("ERR:open failed");
         }
     }
     else if (strcmp(buf, "CLOSE_UINPUT") == 0) {
         touch_close();
-        puts("OK");
+        reply("OK");
     }
     else if (strcmp(buf, "START_GETEVENT") == 0) {
         touch_start_readers();
-        puts("OK");
+        reply("OK");
     }
     else if (strcmp(buf, "STOP_GETEVENT") == 0) {
         touch_stop_readers();
-        puts("OK");
+        reply("OK");
     }
     else if (strncmp(buf, "DOWN ", 5) == 0) {
         int x, y;
         if (sscanf(buf + 5, "%d %d", &x, &y) == 2) {
             touch_down(TOUCH_VIRTUAL_SLOT, TOUCH_VIRTUAL_ID, x, y);
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strncmp(buf, "MOVE ", 5) == 0) {
         int x, y;
         if (sscanf(buf + 5, "%d %d", &x, &y) == 2) {
             touch_move(TOUCH_VIRTUAL_SLOT, x, y);
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strcmp(buf, "UP") == 0) {
         touch_up(TOUCH_VIRTUAL_SLOT);
-        puts("OK");
+        reply("OK");
     }
     else if (strncmp(buf, "TRIGGER_DOWN ", 13) == 0) {
         int x, y;
         if (sscanf(buf + 13, "%d %d", &x, &y) == 2) {
             touch_down(TOUCH_TRIGGER_SLOT, TOUCH_TRIGGER_ID, x, y);
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strcmp(buf, "TRIGGER_UP") == 0) {
         touch_up(TOUCH_TRIGGER_SLOT);
-        puts("OK");
+        reply("OK");
     }
     else if (strncmp(buf, "SET_TRIGGER_ZONE ", 17) == 0) {
         int l, t, r, b;
         if (sscanf(buf + 17, "%d %d %d %d", &l, &t, &r, &b) == 4) {
             touch_set_trigger_zone(l, t, r, b);
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strcmp(buf, "IS_FINGER_IN_ZONE") == 0) {
-        printf("OK:%d\n", touch_is_finger_in_trigger_zone() ? 1 : 0);
+        reply_int(touch_is_finger_in_trigger_zone() ? 1 : 0);
     }
     else if (strncmp(buf, "SET_FIRE_ZONE ", 14) == 0) {
         int l, t, r, b;
         if (sscanf(buf + 14, "%d %d %d %d", &l, &t, &r, &b) == 4) {
             touch_set_fire_zone(l, t, r, b);
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strcmp(buf, "IS_FINGER_IN_FIRE_ZONE") == 0) {
-        printf("OK:%d\n", touch_is_finger_in_fire_zone() ? 1 : 0);
+        reply_int(touch_is_finger_in_fire_zone() ? 1 : 0);
     }
     else if (strncmp(buf, "SET_JOYSTICK_ZONE ", 18) == 0) {
         int l, t, r, b;
         if (sscanf(buf + 18, "%d %d %d %d", &l, &t, &r, &b) == 4) {
             touch_set_joystick_zone(l, t, r, b);
-            puts("OK");
+            reply("OK");
         } else {
-            puts("ERR:invalid args");
+            reply("ERR:invalid args");
         }
     }
     else if (strcmp(buf, "IS_FINGER_IN_JOYSTICK_ZONE") == 0) {
-        printf("OK:%d\n", touch_is_finger_in_joystick_zone() ? 1 : 0);
+        reply_int(touch_is_finger_in_joystick_zone() ? 1 : 0);
     }
     else if (strcmp(buf, "LIFT_JOYSTICK_FINGER") == 0) {
-        printf("OK:%d\n", touch_lift_joystick_finger() ? 1 : 0);
+        reply_int(touch_lift_joystick_finger() ? 1 : 0);
     }
     else if (strcmp(buf, "KEEP_ALIVE") == 0) {
-        puts("OK");
+        reply("OK");
     }
     else if (strcmp(buf, "DESTROY") == 0) {
         touch_close();
-        puts("OK");
+        reply("OK");
         g_running = 0;
     }
     else if (strlen(buf) == 0) {
@@ -185,9 +212,9 @@ static void handle_command(const char* cmd) {
     }
     else {
         fprintf(stderr, "Unknown command: %s\n", buf);
-        puts("ERR:unknown command");
+        reply("ERR:unknown command");
     }
-    fflush(stdout);
+    if (!g_quiet) fflush(stdout);
 }
 
 // =========================================================================

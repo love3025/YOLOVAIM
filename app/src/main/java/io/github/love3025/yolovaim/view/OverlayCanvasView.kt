@@ -26,7 +26,17 @@ class OverlayCanvasView(context: Context) : View(context) {
     var showDetectionBox: Boolean = false
     var showCenterDot: Boolean = false
     var showFov: Boolean = false
+
+    // Self-invalidating: the inference loop assigns this every frame from
+    // AimController.effectiveFov, which holds steady once the dynamic-FOV
+    // animation reaches its fixed point. Redrawing is driven by the value
+    // actually changing rather than by the loop ticking.
     var fovRadius: Int = 50
+        set(value) {
+            if (field == value) return
+            field = value
+            if (showFov) postInvalidateOnAnimation()
+        }
 
     fun setGeometry(w: Int, h: Int) {
         if (captureWidth == w && captureHeight == h) return
@@ -98,8 +108,26 @@ class OverlayCanvasView(context: Context) : View(context) {
         canvas.drawLine(r, b - cr, r, b - cornerLen, p)
     }
 
+    /**
+     * Publish a new detection set. Safe to call from the inference thread.
+     *
+     * This deliberately does *not* invalidate unconditionally. The view is a
+     * full-screen TYPE_APPLICATION_OVERLAY that stays attached for the whole
+     * service lifetime, so an invalidate here is never free: it damages the
+     * entire 1080x2400 surface, forcing HWUI to dequeue, clear and queue a
+     * fresh ~10MB buffer that SurfaceFlinger then has to composite as an extra
+     * layer. Driving that off the inference tick meant paying it continuously
+     * even with every display toggle off and not a single box on screen.
+     *
+     * The static elements (capture range, center dot, FOV ring) invalidate
+     * themselves from their own setters, so the only reason to repaint from
+     * here is a change in the boxes that are actually being drawn.
+     */
     fun updateDetections(dets: List<DetectionInfo>) {
+        val wasEmpty = detections.isEmpty()
         detections = dets
+        if (!showDetectionBox) return          // boxes not painted at all
+        if (wasEmpty && dets.isEmpty()) return // nothing drawn before or now
         postInvalidateOnAnimation()
     }
 }
