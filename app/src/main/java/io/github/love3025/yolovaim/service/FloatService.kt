@@ -142,6 +142,7 @@ class FloatService : Service() {
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
     private var recoilTapStrength = 0.5f; private var recoilResetIntervalMs = 300
+    private var recoilSpeed = 0.5f
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -287,6 +288,7 @@ class FloatService : Service() {
         aimController.recoilEnabled = recoilEnabled
         aimController.recoilStrength = recoilStrength
         aimController.recoilTapStrength = recoilTapStrength
+        aimController.recoilSpeed = recoilSpeed
         aimController.recoilResetIntervalMs = recoilResetIntervalMs
 
         // TriggerController
@@ -326,6 +328,7 @@ class FloatService : Service() {
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
         recoilTapStrength = cfg.recoilTapStrength
+        recoilSpeed = cfg.recoilSpeed
         recoilResetIntervalMs = cfg.recoilResetIntervalMs
         ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
         aimMode = cfg.aimMode
@@ -784,6 +787,7 @@ class FloatService : Service() {
         guiPanel.recoilEnabled = cfg.recoilEnabled
         guiPanel.recoilStrength = cfg.recoilStrength
         guiPanel.recoilTapStrength = cfg.recoilTapStrength
+        guiPanel.recoilSpeed = cfg.recoilSpeed
         guiPanel.recoilResetIntervalMs = cfg.recoilResetIntervalMs
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
@@ -911,6 +915,7 @@ class FloatService : Service() {
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
         guiPanel.onRecoilTapStrengthChanged = { recoilTapStrength = it; aimController.recoilTapStrength = it; ConfigManager.updateConfig { recoilTapStrength = it } }
+        guiPanel.onRecoilSpeedChanged = { recoilSpeed = it; aimController.recoilSpeed = it; ConfigManager.updateConfig { recoilSpeed = it } }
         guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
@@ -1136,6 +1141,9 @@ class FloatService : Service() {
             var aliveCtr = 0
             var lastFrameNs = 0L
             var prevFingerOnFire = false
+            // 压枪的下压范围按目标框高取比例。updateRecoil 在帧首调用，
+            // 那时本帧还没选目标，所以用上一帧的框高 —— 差一帧无影响。
+            var lastBoxH = 0f
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
                 val currentRange = guiPanel.range
@@ -1189,7 +1197,7 @@ class FloatService : Service() {
                     val recoilHeld = fingerOnFire || triggerController.triggerFired
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
-                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
+                    aimController.updateRecoil(recoilHeld, fireTaps, lastBoxH, dtSec, System.currentTimeMillis())
 
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
@@ -1294,6 +1302,7 @@ class FloatService : Service() {
                                         val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
                                         if (d < minD) { minD = d; boxH = r.height() }
                                     }
+                                    if (boxH > 0f) lastBoxH = boxH
                                     val classOffset = aimController.classAimOffsets[t.classId] ?: aimController.aimOffsetYRatio
                                     val classBoxRatio = aimController.classBoxAimRatios[t.classId] ?: aimController.boxAimRatio
                                     val aimX = tcx

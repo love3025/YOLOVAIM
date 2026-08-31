@@ -30,9 +30,15 @@ class AimController(
          * TAP_KICK_SCALE 16 让「连点压枪强度 0.5」≈ 每枪 8px。
          * MAX_OFFSET 是防跑飞的安全网(盲射/手指卡住)，正常交火够不到。
          */
-        private const val HOLD_RATE = 90f
-        private const val TAP_KICK_SCALE = 16f
-        private const val MAX_OFFSET = 400f
+        /** 走完整个下压范围的耗时：压枪速度 0% -> 7 秒，50% -> 4 秒，100% -> 1 秒。 */
+        private const val TRAVERSAL_SLOW_SEC = 7f
+        private const val TRAVERSAL_FAST_SEC = 1f
+        /** 连点每一下的量，同样按目标框高度取比例：50% 时约为框高的 4%。 */
+        private const val TAP_KICK_RATIO = 0.08f
+        /** 还没见过任何目标时的框高兜底值，只影响开局盲射那几帧。 */
+        private const val DEFAULT_BOX_H = 180f
+        /** 绝对保险，防止异常框高把偏移推到离谱的值。 */
+        private const val MAX_OFFSET = 1200f
 
         /**
          * Per-frame latency tracing, compiled out by default.
@@ -98,6 +104,7 @@ class AimController(
     var recoilEnabled = false
     var recoilStrength = 0.5f   // 0.0 ~ 1.0
     var recoilTapStrength = 0.5f      // 连点压枪强度 0.0 ~ 1.0，0 = 关闭
+    var recoilSpeed = 0.5f            // 压枪速度 0.0 ~ 1.0，决定多久走完下压范围
     var recoilResetIntervalMs = 300   // 松开开火区超过此时长才开始回落；0 = 立即重置
     private var recoilOffsetY = 0f
     private var lastFireMs = 0L
@@ -461,10 +468,18 @@ class AimController(
     /**
      * 压枪状态机 —— 必须每推理帧调用一次，且与「有没有目标」无关。
      *
-     * 时间基而不是帧基：原来是 `recoilStrength * 3f` 每帧固定量，30fps 按住
-     * 一秒下压 45px、60fps 就是 90px。`4ee9e9e` 提帧之后压枪同比变快，
-     * recoilStrength 得跟着重调。90f = 30 × 3，以 30fps 为换算基准，
-     * 因此 30fps 下手感与改前一致，60fps 不再翻倍。
+     * 强度与速度是两个维度，必须分开：
+     *  - **压枪强度 = 下压范围**，按目标框高度取比例（与 aimOffsetYRatio /
+     *    boxAimRatio 一致）。瞄头时 50% 约压到身体，100% 约压到脚。
+     *  - **压枪速度 = 走完这段范围要多久**。
+     *
+     * 为什么速度必须独立出来：枪械后坐力大时，开火头 1-2 秒枪口爬升快过压枪，
+     * 准星会先跑到头部上方，等后坐力见顶才开始往下走，整个过程比应有的多花
+     * 1-3 秒。这时候调强度没用 —— 强度只是把终点放得更低，不改变到达终点的
+     * 快慢，甚至因为范围变大而更慢。要压住前期，得让它走得更快。
+     *
+     * 时间基而不是帧基：原来是每帧固定量，30fps 按住一秒下压 45px、60fps 就是
+     * 90px，`4ee9e9e` 提帧之后压枪同比变快。现在按 dt 累加，帧率无关。
      *
      * 松手后不立即清零，而是超过 recoilResetIntervalMs 才开始衰减：
      *  - 半自动连点的枪与枪之间（松手 100-200ms）不该被清零，否则每枪都从 0 压起
@@ -478,12 +493,18 @@ class AimController(
      * 注意这里不看 aimbotOn / holdToAimActive：玩家在开火，游戏内枪口就在爬升，
      * 这与自瞄有没有接管无关。等自瞄再接手时，偏移量应当反映真实的累计爬升。
      */
-    fun updateRecoil(held: Boolean, taps: Int, dtSec: Float, nowMs: Long) {
+    fun updateRecoil(held: Boolean, taps: Int, boxH: Float, dtSec: Float, nowMs: Long) {
         if (!recoilEnabled) { recoilOffsetY = 0f; pendingKick = 0f; return }
 
+        // 下压范围。boxH 是上一帧选中目标的框高（差一帧无所谓）；开局还没见过
+        // 目标时用兜底值，免得盲射完全不压。
+        val h = if (boxH > 0f) boxH else DEFAULT_BOX_H
+        val range = (recoilStrength * h).coerceAtMost(MAX_OFFSET)
+
         // 连点：每检测到一次按下，加一份固定量。与按住多久无关。
+        // 同样按框高取比例，和长按用同一套心智模型。
         if (taps > 0 && recoilTapStrength > 0f) {
-            pendingKick += recoilTapStrength * TAP_KICK_SCALE * taps
+            pendingKick += recoilTapStrength * TAP_KICK_RATIO * h * taps
             lastFireMs = nowMs
         }
         // kick 摊到之后几帧释放而不是一帧打满：它进的是 PID 的目标值，而 Y 轴的
@@ -496,9 +517,11 @@ class AimController(
             if (pendingKick < 0.5f) { recoilOffsetY += pendingKick; pendingKick = 0f }
         }
 
-        // 长按：按住时按时间连续爬升。
+        // 长按：以恒定速度走向 range。恒速而不是指数逼近 —— 后者末段无限慢，
+        // "多久压到脚"就没法定义了，也不符合真实枪械先爬升后见顶的形状。
         if (held) {
-            recoilOffsetY += recoilStrength * HOLD_RATE * dtSec
+            val sec = TRAVERSAL_SLOW_SEC + (TRAVERSAL_FAST_SEC - TRAVERSAL_SLOW_SEC) * recoilSpeed
+            recoilOffsetY += (range / sec) * dtSec
             lastFireMs = nowMs
         } else if (recoilResetIntervalMs <= 0) {
             // 间隔 = 0：松开开火区立即重置，不走衰减。
@@ -510,9 +533,8 @@ class AimController(
             recoilOffsetY *= Math.pow(0.7, (dtSec * 30f).toDouble()).toFloat()
             if (recoilOffsetY < 1f) recoilOffsetY = 0f
         }
-        // 上限是防跑飞的安全网，不是可调项：真实一个弹匣打完也就 2-3 秒，
-        // 长按压枪强度 × 持续时间才是实际决定压多少的东西，上限基本不会碰到。
-        recoilOffsetY = recoilOffsetY.coerceIn(0f, MAX_OFFSET)
+        // 终点就是 range 本身，不需要另一个"上限"参数。
+        recoilOffsetY = recoilOffsetY.coerceIn(0f, range)
     }
 
     fun resetRecoil() {
