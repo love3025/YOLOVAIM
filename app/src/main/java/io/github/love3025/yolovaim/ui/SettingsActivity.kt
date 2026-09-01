@@ -103,6 +103,24 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
+        // === 防捕获 section ===
+        content.addView(createSectionHeader("防捕获"))
+
+        // 防录屏开关
+        val hudRow = createSwitchRow(
+            title = "防录屏",
+            subtitle = "检测框、FOV 圈等显示元素画在防捕获层上，录屏 / 截屏不可见。" +
+                "关闭后使用普通悬浮窗，效果与关闭前一致但会被录进画面"
+        )
+        val hudSwitch = hudRow.tag as MaterialSwitch
+        hudSwitch.isChecked = ConfigManager.getConfig().useNativeHud
+        content.addView(hudRow)
+
+        hudSwitch.setOnCheckedChangeListener { _, isChecked ->
+            ConfigManager.updateConfig { useNativeHud = isChecked }
+            notifyServiceIfRunning("HUD_PREF_CHANGED")
+        }
+
         scrollView.addView(content)
         root.addView(scrollView)
         return root
@@ -218,14 +236,17 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun reloadModelIfServiceRunning() {
+        notifyServiceIfRunning("RELOAD_MODEL")
+    }
+
+    /** 服务在跑就发一个 action intent,让运行中的 FloatService 应用设置变更。 */
+    private fun notifyServiceIfRunning(intentAction: String) {
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val running = am.getRunningServices(100).any {
             it.service.className == FloatService::class.java.name
         }
         if (running) {
-            startForegroundService(Intent(this, FloatService::class.java).apply {
-                action = "RELOAD_MODEL"
-            })
+            startForegroundService(Intent(this, FloatService::class.java).setAction(intentAction))
         }
     }
 

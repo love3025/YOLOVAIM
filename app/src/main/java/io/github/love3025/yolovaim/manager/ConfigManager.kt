@@ -61,7 +61,8 @@ data class AppConfig(
     var cpuThreadCount: Int = 4,
     var touchMethodIndex: Int = 0,  // 0=Uinput, 1=InputManager
     var kf: Float = 0.05f,          // PID feedforward gain (F term, 0.01-0.20)
-    var showInferInfo: Boolean = false  // render preprocess/infer/postprocess time + det count at top of overlay
+    var showInferInfo: Boolean = false,  // render preprocess/infer/postprocess time + det count at top of overlay
+    var useNativeHud: Boolean = true     // 防捕获 native HUD;false = 强制走普通悬浮窗路线(会被录屏捕获)
 )
 
 object ConfigManager {
@@ -134,7 +135,8 @@ object ConfigManager {
                         cpuThreadCount = obj.optInt("cpuThreadCount", 4),
                         touchMethodIndex = obj.optInt("touchMethodIndex", 0),
                         kf = obj.optDouble("kf", 0.05).toFloat(),
-                        showInferInfo = obj.optBoolean("showInferInfo", false)
+                        showInferInfo = obj.optBoolean("showInferInfo", false),
+                        useNativeHud = obj.optBoolean("useNativeHud", true)
                     )
                 }
             }
@@ -202,6 +204,7 @@ object ConfigManager {
                     put("touchMethodIndex", config.touchMethodIndex)
                     put("kf", config.kf.toDouble())
                     put("showInferInfo", config.showInferInfo)
+                    put("useNativeHud", config.useNativeHud)
                 }
                 file.writeText(obj.toString(2))
             }

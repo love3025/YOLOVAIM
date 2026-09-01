@@ -174,9 +174,8 @@ class FloatService : Service() {
     // 推理热路径上的值变门闩:值没变不发 IPC
     private var lastHudFov = -1
     private var hudBoxesSent = false
-    // 推理信息文字:同文本跳过 + 2Hz 节流(数值每帧只变几个 ms,足够)
+    // 推理信息文字:同文本跳过(与兜底 setInferInfo 的门闩一致,不做时间节流)
     private var lastHudInfoText: String? = null
-    private var lastHudInfoSentAt = 0L
     private val hudInfoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFEB3B.toInt() // OverlayManager TextView 同款浅黄
         typeface = Typeface.DEFAULT_BOLD
@@ -412,6 +411,18 @@ class FloatService : Service() {
             }
             return START_STICKY
         }
+        if (intent?.action == "HUD_PREF_CHANGED") {
+            // 设置页"防录屏"开关切换。开关只决定显示层走哪条路线,
+            // 不触碰推理 / 压枪 / 扳机等任何其他逻辑。
+            val enabled = ConfigManager.getConfig().useNativeHud
+            Log.i(TAG, "收到HUD_PREF_CHANGED, useNativeHud=$enabled, 当前hudNative=$hudNative")
+            if (enabled) {
+                if (!hudNative) setupHud() // 关→开:激活 native HUD,撤掉兜底渲染
+            } else {
+                if (hudNative) hudFallBack("user disabled 防录屏") // 开→关:关 layer,恢复原路线
+            }
+            return START_STICKY
+        }
         if (intent?.action == "SYNC_MODEL") {
             val idx = ProjectionHolder.selectedModelIndex
             if (idx != lastModelIndex) {
@@ -551,6 +562,14 @@ class FloatService : Service() {
      * 并撤掉兜底渲染,再排一次采集帧自检。
      */
     private fun setupHud() {
+        // 用户在设置页关掉"防录屏" → 强制走原 OverlayCanvasView 路线,
+        // 不再尝试激活(也不吃无 root / HUD_ON 失败的自动回退)。
+        if (!ConfigManager.getConfig().useNativeHud) {
+            hudNative = false
+            Log.i(TAG, "HUD: disabled by user (防录屏开关关闭), using fallback renderer")
+            updateHudDiagnostics()
+            return
+        }
         val client = touchService.hud()
         if (client == null) {
             Log.i(TAG, "HUD: root daemon unavailable, using fallback renderer")
@@ -623,7 +642,11 @@ class FloatService : Service() {
     @Volatile private var hudDiagMode = "unknown"
 
     private fun updateHudDiagnostics() {
-        hudDiagMode = if (hudNative) "native" else "fallback"
+        hudDiagMode = when {
+            !ConfigManager.getConfig().useNativeHud -> "off"
+            hudNative -> "native"
+            else -> "fallback"
+        }
         mainHandler.post {
             if (this::guiPanel.isInitialized) guiPanel.updateHudMode(hudDiagMode)
         }
@@ -671,10 +694,10 @@ class FloatService : Service() {
 
     private fun pushHudInfoText(text: String) {
         if (!showInferInfo) return
-        if (text == lastHudInfoText) return // 同文本跳过(照搬 setInferInfo 的门闩)
-        val now = SystemClock.uptimeMillis()
-        if (now - lastHudInfoSentAt < 500) return // 2Hz 节流
-        lastHudInfoSentAt = now
+        if (text == lastHudInfoText) return // 同文本跳过 —— 与兜底 setInferInfo 的门闩一致
+        // 不做时间节流:兜底 TextView 每帧刷新,native 路径也必须每帧,
+        // 否则两条路线的推理信息刷新率不同(防录屏只该改变"是否被录到",
+        // 不该改变任何显示效果)。
         lastHudInfoText = text
         val client = hud() ?: return
         try {
