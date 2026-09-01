@@ -28,6 +28,21 @@
  *     KEEP_ALIVE
  *     DESTROY
  *
+ *   HUD (anti-capture overlay, see src/hud/):
+ *     HUD_ON                       (replies OK / ERR:hud <rc>; one-shot setup)
+ *     HUD_OFF
+ *     HUD_TOGGLE <captureRange|fov|box|centerDot|inferInfo> <0|1>
+ *     HUD_GEO <w> <h>              capture-space size (MediaProjection frame)
+ *     HUD_FOV <r>
+ *     HUD_RANGE <r>
+ *     HUD_BOXES <n> <x1 y1 x2 y2>...   (n <= 16, int coords)
+ *     HUD_TEXT_BMP <w> <h>         begin text bitmap upload
+ *     HUD_TEXT_ROW <y> <n> <x> <len> <argb-hex> [<x> <len> <argb-hex>...]
+ *                                  n horizontal runs of identical pixels
+ *     HUD_TEXT_END                 commit text bitmap
+ *     All HUD_* except HUD_ON are meant to be sent with the '!' prefix:
+ *     they never produce output and never block the sender.
+ *
  *   Responses (stdout, one per line):
  *     OK
  *     OK:<value>
@@ -50,6 +65,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include "touch_core.h"
+#include "../hud/hud_renderer.h"
 
 // Screen params (set via commands before OPEN_UINPUT)
 static int g_screen_w = 0;
@@ -72,7 +88,7 @@ static void reply_int(int v) {
 // =========================================================================
 
 static void handle_command(const char* cmd) {
-    char buf[1024];
+    char buf[4096];
     strncpy(buf, cmd, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
     char* nl = strchr(buf, '\n');
@@ -206,6 +222,78 @@ static void handle_command(const char* cmd) {
     else if (strcmp(buf, "KEEP_ALIVE") == 0) {
         reply("OK");
     }
+    else if (strcmp(buf, "HUD_ON") == 0) {
+        // Blocking setup command (rare, not on the inference hot path), so it
+        // keeps its reply: the client uses OK / ERR to decide whether the
+        // native HUD is viable or the fallback renderer must stay up.
+        int rc = hud::renderer_start();
+        if (0 == rc) {
+            reply("OK");
+        } else {
+            char msg[48];
+            snprintf(msg, sizeof(msg), "ERR:hud %d", rc);
+            reply(msg);
+        }
+    }
+    else if (strcmp(buf, "HUD_OFF") == 0) {
+        hud::renderer_stop();
+        reply("OK");
+    }
+    else if (strncmp(buf, "HUD_TOGGLE ", 10) == 0) {
+        char what[32] = {0};
+        int on = 0;
+        if (sscanf(buf + 10, "%31s %d", what, &on) == 2)
+            hud::set_toggle(what, on);
+    }
+    else if (strncmp(buf, "HUD_GEO ", 8) == 0) {
+        int w, h;
+        if (sscanf(buf + 8, "%d %d", &w, &h) == 2)
+            hud::set_geo(w, h);
+    }
+    else if (strncmp(buf, "HUD_FOV ", 8) == 0) {
+        hud::set_fov(atoi(buf + 8));
+    }
+    else if (strncmp(buf, "HUD_RANGE ", 10) == 0) {
+        hud::set_range(atoi(buf + 10));
+    }
+    else if (strncmp(buf, "HUD_BOXES ", 10) == 0) {
+        char *p = buf + 10;
+        char *end = NULL;
+        long n = strtol(p, &end, 10);
+        p = end;
+        if (n < 0) n = 0;
+        if (n > 16) n = 16;
+        int coords[64];
+        for (int i = 0; i < n * 4 && i < 64; i++) {
+            long v = strtol(p, &end, 10);
+            p = end;
+            coords[i] = (int)v;
+        }
+        hud::set_boxes((int)n, coords);
+    }
+    else if (strncmp(buf, "HUD_TEXT_BMP ", 13) == 0) {
+        int w, h;
+        if (sscanf(buf + 13, "%d %d", &w, &h) == 2)
+            hud::text_begin(w, h);
+    }
+    else if (strncmp(buf, "HUD_TEXT_ROW ", 13) == 0) {
+        // HUD_TEXT_ROW <y> <n> <x> <len> <argb-hex> ...
+        char *p = buf + 13;
+        char *end = NULL;
+        long y = strtol(p, &end, 10); p = end;
+        long n = strtol(p, &end, 10); p = end;
+        if (n < 0) n = 0;
+        if (n > 24) n = 24; // 与 Kotlin 端分块上限一致
+        for (int i = 0; i < n; i++) {
+            long x = strtol(p, &end, 10); p = end;
+            long len = strtol(p, &end, 10); p = end;
+            unsigned long argb = strtoul(p, &end, 16); p = end;
+            hud::text_run((int)y, (int)x, (int)len, (uint32_t)argb);
+        }
+    }
+    else if (strcmp(buf, "HUD_TEXT_END") == 0) {
+        hud::text_end();
+    }
     else if (strcmp(buf, "DESTROY") == 0) {
         touch_close();
         reply("OK");
@@ -232,7 +320,11 @@ int main() {
     puts("READY");
     fflush(stdout);
 
-    char line[1024];
+    // 4096: HUD_TEXT_ROW / HUD_BOXES lines can reach a few hundred chars.
+    // A line longer than the buffer would split mid-command and desync the
+    // client's reply stream, so keep this comfortably above what the Kotlin
+    // side's chunking (max ~700 chars/line) can produce.
+    char line[4096];
     while (g_running) {
         if (fgets(line, sizeof(line), stdin) == NULL) {
             break;
@@ -240,6 +332,7 @@ int main() {
         handle_command(line);
     }
 
+    hud::renderer_stop();
     touch_close();
     return 0;
 }

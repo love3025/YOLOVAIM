@@ -9,6 +9,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
+import android.widget.TextView
 import kotlin.math.roundToInt
 import android.widget.ScrollView
 import com.google.android.material.button.MaterialButton
@@ -129,6 +130,17 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     private data class TabDef(val label: String)
     private val tabs = listOf(TabDef("自瞄"), TabDef("扳机"), TabDef("防闪"), TabDef("模型"), TabDef("系统"))
     var activeTab = 0
+
+    // 防捕获 HUD 诊断(不显眼入口,方案 §6.4):系统 tab 底部一行小字,
+    // 显示当前渲染路径 native(root daemon 防捕获 layer)/ fallback
+    // (OverlayCanvasView 悬浮窗)。
+    var hudMode = "unknown"
+    private var hudModeText: TextView? = null
+
+    fun setHudMode(mode: String) {
+        hudMode = mode
+        hudModeText?.text = "HUD: $mode"
+    }
     private lateinit var contentContainer: LinearLayout
     private var switching = false
 
@@ -547,6 +559,15 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = showInferInfo; setOnCheckedChangeListener { _, c -> showInferInfo = c; onShowInferInfoChanged?.invoke(c) } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "屏幕上方显示推理时长/预处理/后处理耗时及检测数"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(MaterialTextView(context).apply {
+            text = "HUD: $hudMode"
+            textSize = 9f
+            setTextColor(clOnSurfaceVariant)
+            alpha = 0.7f
+            hudModeText = this
+        })
     }
 
     private fun stepSizeForFmt(fmt: String): Float {

@@ -9,7 +9,7 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import io.github.love3025.yolovaim.model.TouchMethod
 
-open class RootInjectorClient(private val context: Context) : TouchInjectorInterface {
+open class RootInjectorClient(private val context: Context) : TouchInjectorInterface, HudClient {
     companion object {
         private const val TAG = "RootInjector"
         private const val LAT_TAG = "YolovaimLatency"
@@ -197,6 +197,78 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
 
     protected fun sendOk(cmd: String): Boolean = execOk(cmd)
     protected fun sendCmd(cmd: String): String? = execCmd(cmd)
+
+    // ================= HudClient(防捕获 native HUD)=================
+    // 协议见 root_daemon.cpp 头部注释。除 hudOn 外全部走 execNoReply
+    // ('!' 前缀):这些调用出现在推理热路径上,不能阻塞等回话。
+
+    override fun hudOn(): Boolean {
+        val resp = execCmd("HUD_ON", 3000L) // layer 创建含 binder 往返,给宽裕超时
+        return resp?.startsWith("OK") == true
+    }
+
+    override fun hudOff() {
+        execNoReply("HUD_OFF")
+    }
+
+    override fun hudToggle(what: String, on: Boolean) {
+        execNoReply("HUD_TOGGLE $what ${if (on) 1 else 0}")
+    }
+
+    override fun hudGeo(w: Int, h: Int) {
+        execNoReply("HUD_GEO $w $h")
+    }
+
+    override fun hudFov(r: Int) {
+        execNoReply("HUD_FOV $r")
+    }
+
+    override fun hudRange(r: Int) {
+        execNoReply("HUD_RANGE $r")
+    }
+
+    override fun hudBoxes(rects: IntArray) {
+        val n = rects.size / 4
+        // 16 框上限与 daemon 端一致;每行 ~300 字符,远低于 4096 的行缓冲
+        val sb = StringBuilder(32 + n * 24)
+        sb.append("HUD_BOXES ").append(n)
+        for (v in rects) sb.append(' ').append(v)
+        execNoReply(sb.toString())
+    }
+
+    override fun hudTextBmp(w: Int, h: Int, pixels: IntArray) {
+        // 逐行 RLE,透明像素不传输;一行 run 过多时分块续写(daemon 端
+        // 每个 run 自带 x 偏移,天然支持分块)。
+        execNoReply("HUD_TEXT_BMP $w $h")
+        val runs = ArrayList<Int>(256) // 交替 [x, len, argb]
+        for (y in 0 until h) {
+            runs.clear()
+            val row = y * w
+            var x = 0
+            while (x < w) {
+                val px = pixels[row + x]
+                if (px ushr 24 == 0) { x++; continue } // 透明跳过
+                var len = 1
+                while (x + len < w && pixels[row + x + len] == px) len++
+                runs.add(x); runs.add(len); runs.add(px)
+                x += len
+            }
+            var i = 0
+            while (i < runs.size) {
+                val sb = StringBuilder(128)
+                val end = minOf(runs.size, i + 24 * 3) // 每行最多 24 段,协议两端一致
+                sb.append("HUD_TEXT_ROW ").append(y).append(' ').append((end - i) / 3)
+                while (i < end) {
+                    sb.append(' ').append(runs[i])                     // x
+                      .append(' ').append(runs[i + 1])                 // len
+                      .append(' ').append("%08X".format(runs[i + 2])) // argb
+                    i += 3
+                }
+                execNoReply(sb.toString())
+            }
+        }
+        execNoReply("HUD_TEXT_END")
+    }
 
     override fun tap(x: Int, y: Int) {
         execOk("DOWN $x $y")

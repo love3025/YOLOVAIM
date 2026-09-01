@@ -47,11 +47,18 @@ add_library(uinput_inject SHARED src/injection/uinput_inject.cpp)
 target_link_libraries(uinput_inject touch_core android log)
 
 # Root daemon (standalone binary for su execution, packaged as .so for Gradle)
-add_executable(root_daemon src/daemon/root_daemon.cpp)
-target_include_directories(root_daemon PRIVATE src/injection)
-target_link_libraries(root_daemon touch_core android log)
+# The HUD module is compiled in: it talks to SurfaceFlinger through runtime
+# dlopen/dlsym, so there is no link-time dependency on libgui.
+add_executable(root_daemon
+    src/daemon/root_daemon.cpp
+    src/hud/hud_surface.cpp
+    src/hud/hud_renderer.cpp)
+target_include_directories(root_daemon PRIVATE src/injection src/hud)
+target_link_libraries(root_daemon touch_core android log dl)
 set_target_properties(root_daemon PROPERTIES
     OUTPUT_NAME "libroot_daemon.so"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
 )
 
 # InputManager evdev reader (for InputManager injection mode)

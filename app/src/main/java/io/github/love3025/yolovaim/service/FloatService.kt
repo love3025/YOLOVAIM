@@ -33,6 +33,7 @@ import io.github.love3025.yolovaim.model.AimingState
 import io.github.love3025.yolovaim.model.AreaConfig
 import io.github.love3025.yolovaim.model.BezierMover
 import io.github.love3025.yolovaim.injector.InjectorCallback
+import io.github.love3025.yolovaim.injector.HudClient
 import io.github.love3025.yolovaim.inference.JniCallBack
 import io.github.love3025.yolovaim.util.ProjectionHolder
 
@@ -155,6 +156,27 @@ class FloatService : Service() {
     private var dynamicFov = false
     private var fovZoomDelay = 0
     private var showInferInfo = false
+    private var showDetectionBox = false
+
+    // ====================== 防捕获 native HUD ======================
+    // true = root daemon 的防捕获 layer 已激活,五项纯显示元素走 IPC;
+    // false = OverlayCanvasView + OverlayManager TextView 兜底(无 root /
+    // HUD_ON 失败 / 自检失败,改进方案.md §6)。
+    @Volatile private var hudNative = false
+    // 首次启用自检:HUD_ON 成功不代表 AUTO_MIRROR 采集路径也排除该 layer
+    // (demo 只验证过截屏),要在真实采集帧上找 HUD 像素验证。
+    @Volatile private var hudSelfCheckPending = false
+    private var hudSelfCheckFrames = 0
+    // 推理热路径上的值变门闩:值没变不发 IPC
+    private var lastHudFov = -1
+    private var hudBoxesSent = false
+    // 推理信息文字:同文本跳过 + 2Hz 节流(数值每帧只变几个 ms,足够)
+    private var lastHudInfoText: String? = null
+    private var lastHudInfoSentAt = 0L
+    private val hudInfoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFEB3B.toInt() // OverlayManager TextView 同款浅黄
+        typeface = Typeface.DEFAULT_BOLD
+    }
 
     // EMA-smoothed fps derived from each frame's full inference budget
     // (preproc + invoke + postproc). EMA keeps the displayed number from
@@ -256,7 +278,8 @@ class FloatService : Service() {
         // the user gets a real TextView instead of Canvas.drawText inside the
         // full-screen overlay (which can be clipped by status-bar insets).
         // InferenceManager marshals the callback to the main thread for us.
-        inferenceManager.onInferInfoUpdate = { text -> overlayManager.setInferInfo(text) }
+        // (HUD 激活时同一条入口改走 pushInferInfo → daemon 位图。)
+        inferenceManager.onInferInfoUpdate = { text -> pushInferInfo(text) }
 
         // Load config to controllers
         loadConfigToControllers()
@@ -341,6 +364,7 @@ class FloatService : Service() {
         dynamicFov = cfg.dynamicFov
         fovZoomDelay = cfg.fovZoomDelay.coerceIn(0, 100)
         showInferInfo = cfg.showInferInfo
+        showDetectionBox = cfg.showDetectionBox
         touchDisplayEnabled = cfg.aimTouchDisplay
         cachedRangePx = ((cfg.range.coerceIn(48, 800) + 8) / 16) * 16
         aimbotOn.set(cfg.aimbotEnabled)
@@ -452,6 +476,9 @@ class FloatService : Service() {
     }
 
     private fun cleanupViews() {
+        // native HUD 的 layer 生命周期跟着 daemon,但显式关掉干净:
+        // 长驻的空 layer 也占合成开销(改进方案.md §5.2)
+        try { if (hudNative) { hud()?.hudOff(); hudNative = false; hudSelfCheckPending = false } } catch (_: Exception) {}
         try { if (ballAdded) { wm.removeView(ballView); ballAdded = false } } catch (_: Exception) {}
         try { if (overlayAdded) { wm.removeView(overlayView); overlayAdded = false } } catch (_: Exception) {}
         try { if (guiAdded) { wm.removeView(guiPanel); guiAdded = false; guiVisible = false } } catch (_: Exception) {}
@@ -506,6 +533,249 @@ class FloatService : Service() {
         overlayManager.setupInferInfoView()
     }
 
+    // ====================== 防捕获 native HUD ======================
+    // 数据流:推理线程 → 这里 publish* → RootInjectorClient 行协议('!' 无
+    // 回复)→ root_daemon HUD 模块 → 防捕获 layer 绘制。物理屏可见,
+    // 采集合成(MediaProjection/截屏/录屏)排除 —— 推理输入不再被自身
+    // UI 污染(改进方案.md §1 的正反馈回路由此消除)。
+
+    private fun hud(): HudClient? = if (hudNative) touchService.hud() else null
+
+    /**
+     * 注入连接建立后调用(初始连接与重连共用)。尝试激活 native HUD;
+     * 失败或无 root → 保持 OverlayCanvasView 兜底。成功 → 重放全部状态
+     * 并撤掉兜底渲染,再排一次采集帧自检。
+     */
+    private fun setupHud() {
+        val client = touchService.hud()
+        if (client == null) {
+            Log.i(TAG, "HUD: root daemon unavailable, using fallback renderer")
+            hudNative = false
+            updateHudDiagnostics()
+            return
+        }
+        val ok = try { client.hudOn() } catch (e: Exception) {
+            Log.w(TAG, "HUD: hudOn threw: ${e.message}"); false
+        }
+        hudNative = ok
+        if (ok) {
+            Log.i(TAG, "HUD: native anti-capture layer active")
+            replayHudState(client)
+            hudSelfCheckPending = true
+            hudSelfCheckFrames = 0
+            lastHudFov = -1
+            hudBoxesSent = false
+            lastHudInfoText = null
+            mainHandler.post {
+                // 撤掉兜底渲染:两套叠加同屏会互相污染(兜底元素烧进采集帧)
+                try { if (overlayAdded) { wm.removeView(overlayView); overlayAdded = false } } catch (_: Exception) {}
+                overlayManager.setInferInfo("")
+                updateHudDiagnostics()
+            }
+        } else {
+            Log.w(TAG, "HUD: HUD_ON failed (symbol miss or layer creation), using fallback renderer")
+            updateHudDiagnostics()
+        }
+    }
+
+    /** daemon 重连/重启后的状态重放:开关 + 几何 + 当前值。 */
+    private fun replayHudState(client: HudClient) {
+        val cfg = ConfigManager.getConfig()
+        client.hudToggle("captureRange", cfg.showCaptureRange)
+        client.hudToggle("box", cfg.showDetectionBox)
+        client.hudToggle("centerDot", cfg.showCenterDot)
+        client.hudToggle("fov", cfg.showFov)
+        client.hudToggle("inferInfo", cfg.showInferInfo)
+        client.hudGeo(captureW, captureH)
+        client.hudRange(cfg.range.coerceIn(50, 800))
+        val fov = aimController.effectiveFov
+        lastHudFov = fov
+        client.hudFov(fov)
+    }
+
+    /** native HUD 失效(自检失败等)时恢复兜底渲染。 */
+    private fun hudFallBack(reason: String) {
+        hudNative = false
+        hudSelfCheckPending = false
+        try { touchService.hud()?.hudOff() } catch (_: Exception) {}
+        Log.w(TAG, "HUD: fallback ($reason)")
+        mainHandler.post {
+            try {
+                if (!overlayAdded && overlayParams != null) {
+                    wm.addView(overlayView, overlayParams)
+                    overlayAdded = true
+                }
+            } catch (e: Exception) { Log.e(TAG, "HUD fallback addView: ${e.message}") }
+            updateHudDiagnostics()
+        }
+    }
+
+    /** GUI 面板的诊断入口:系统 tab 一行小字显示当前 HUD 模式。 */
+    private fun updateHudDiagnostics() {
+        val mode = if (hudNative) "native" else "fallback"
+        mainHandler.post {
+            if (this::guiPanel.isInitialized) guiPanel.setHudMode(mode)
+        }
+    }
+
+    /** 检测框发布:native HUD 或兜底 canvas,二选一。推理线程调用。 */
+    private fun publishDetections(dets: List<DetectionInfo>) {
+        if (hudNative) sendHudBoxes(dets) else overlayView.updateDetections(dets)
+    }
+
+    private fun sendHudBoxes(dets: List<DetectionInfo>) {
+        if (!showDetectionBox) return // 开关关闭 → 推理热路径零 IPC(验收项)
+        val n = dets.size.coerceAtMost(16) // daemon 端协议上限
+        if (n == 0) {
+            // 清屏也要发一次,否则上一帧的框留在 layer 上
+            if (hudBoxesSent) { hud()?.hudBoxes(IntArray(0)); hudBoxesSent = false }
+            return
+        }
+        val a = IntArray(n * 4)
+        var i = 0
+        for (d in dets) {
+            a[i++] = d.rect.left.toInt(); a[i++] = d.rect.top.toInt()
+            a[i++] = d.rect.right.toInt(); a[i++] = d.rect.bottom.toInt()
+        }
+        hud()?.hudBoxes(a)
+        hudBoxesSent = true
+    }
+
+    /** FOV 半径发布:native 路径值变才发(动态 FOV 动画结束后值恒定)。 */
+    private fun publishFov(r: Int) {
+        if (hudNative) {
+            if (r != lastHudFov) {
+                lastHudFov = r
+                if (showFov) hud()?.hudFov(r)
+            }
+        } else {
+            overlayView.fovRadius = r
+        }
+    }
+
+    /** 推理信息发布:native 路径渲染 Bitmap → RLE IPC;兜底走 TextView。 */
+    private fun pushInferInfo(text: String) {
+        if (hudNative) pushHudInfoText(text) else overlayManager.setInferInfo(text)
+    }
+
+    private fun pushHudInfoText(text: String) {
+        if (!showInferInfo) return
+        if (text == lastHudInfoText) return // 同文本跳过(照搬 setInferInfo 的门闩)
+        val now = SystemClock.uptimeMillis()
+        if (now - lastHudInfoSentAt < 500) return // 2Hz 节流
+        lastHudInfoSentAt = now
+        lastHudInfoText = text
+        val client = hud() ?: return
+        try {
+            // TextView 同款视觉:11sp 粗体浅黄字 + 半透明黑底药丸
+            // (OverlayManager.kt setupInferInfoView 的参数)
+            val density = resources.displayMetrics.density
+            hudInfoPaint.textSize = 11f * density
+            val fm = hudInfoPaint.fontMetrics
+            val padH = (10 * density).toInt(); val padV = (3 * density).toInt()
+            val tw = kotlin.math.ceil(hudInfoPaint.measureText(text)).toInt()
+            val th = kotlin.math.ceil(fm.descent - fm.ascent).toInt()
+            val w = tw + padH * 2; val h = th + padV * 2
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(bmp)
+            c.drawColor(0xCC101010.toInt())
+            c.drawText(text, padH.toFloat(), padV - fm.ascent, hudInfoPaint)
+            val px = IntArray(w * h)
+            bmp.getPixels(px, 0, w, 0, 0, w, h)
+            bmp.recycle()
+            client.hudTextBmp(w, h, px)
+        } catch (e: Exception) {
+            Log.e(TAG, "HUD text render failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 首次启用自检(改进方案.md §6.1):HUD_ON 成功 ≠ 防捕获在
+     * AUTO_MIRROR 采集路径上生效(demo 只验证过系统截屏)。在真实采集帧
+     * 上找 HUD 元素的白像素:找到 = 没生效 → 立即退兜底;对照点也亮 =
+     * 场景太亮无法判定 → 下帧再试(上限 60 帧)。
+     */
+    private fun runHudSelfCheck(hb: android.hardware.HardwareBuffer) {
+        val cfg = ConfigManager.getConfig()
+        val checkDot = cfg.showCenterDot
+        val checkFov = cfg.showFov
+        val checkRange = cfg.showCaptureRange
+        if (!checkDot && !checkFov && !checkRange) {
+            hudSelfCheckPending = false // 没有几何元素在屏上,无从验证
+            return
+        }
+        val hw = try { Bitmap.wrapHardwareBuffer(hb, null) } catch (e: Exception) { null } ?: return
+        val bmp = try { hw.copy(Bitmap.Config.ARGB_8888, false) } catch (e: Exception) { null }
+        hw.recycle()
+        if (bmp == null) return
+        try {
+            val cx = captureW / 2; val cy = captureH / 2
+            fun brightAt(x: Int, y: Int): Boolean {
+                if (x < 0 || y < 0 || x >= captureW || y >= captureH) return false
+                val p = bmp.getPixel(x, y)
+                return ((p shr 16) and 0xFF) > 0xB0 && ((p shr 8) and 0xFF) > 0xB0 && (p and 0xFF) > 0xB0
+            }
+            // 1) 在 HUD 元素应在的位置找白像素
+            var hits = 0; var samples = 0
+            if (checkDot) {
+                for (dy in -8..8) for (dx in -8..8) {
+                    if (dx * dx + dy * dy > 64) continue
+                    samples++
+                    if (brightAt(cx + dx, cy + dy)) hits++
+                }
+            }
+            if (checkFov) {
+                val r = aimController.effectiveFov
+                for ((ox, oy) in listOf(r to 0, -r to 0, 0 to r, 0 to -r)) {
+                    samples++
+                    if (brightAt(cx + ox, cy + oy)) hits++
+                }
+            }
+            if (checkRange) {
+                val half = cfg.range.coerceIn(50, 800)
+                // 四角括号竖线的中点:角点在 (cx±half, cy±half),竖线覆盖
+                // 角点向内 10..36px → 采样 y = cy ± (half-22),x 恰在框边上
+                for (sx in intArrayOf(-1, 1)) for (sy in intArrayOf(-1, 1)) {
+                    val x = cx + sx * half
+                    val y = cy + sy * (half - 22)
+                    for (d in -2..2) { samples++; if (brightAt(x + d, y)) hits++ }
+                }
+            }
+            // 2) 对照点:不在任何 HUD 元素上。同样亮说明场景本身亮,
+            //    本帧判定不可靠
+            var ctrlBright = 0
+            for ((ox, oy) in listOf(captureW / 4 to captureH / 4, -captureW / 4 to -captureH / 4, captureW / 5 to -captureH / 5)) {
+                if (brightAt(cx + ox, cy + oy)) ctrlBright++
+            }
+            if (ctrlBright > 0) {
+                if (++hudSelfCheckFrames >= 60) {
+                    hudSelfCheckPending = false
+                    Log.w(TAG, "HUD self-check inconclusive after 60 frames (scene too bright), keeping native HUD")
+                }
+                return
+            }
+            if (samples > 0 && hits * 100 / samples >= 20) {
+                saveHudSelfCheckFrame(bmp, "fail")
+                Log.e(TAG, "HUD self-check FAILED: HUD pixels visible in capture frame (hits=$hits/$samples)")
+                hudFallBack("self-check: HUD visible in capture frame")
+                return
+            }
+            saveHudSelfCheckFrame(bmp, "pass")
+            hudSelfCheckPending = false
+            Log.i(TAG, "HUD self-check passed: AUTO_MIRROR capture excludes HUD (hits=$hits/$samples)")
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /** 自检证据帧存到 dataset 目录,便于人工复核。 */
+    private fun saveHudSelfCheckFrame(bmp: Bitmap, tag: String) {
+        try {
+            val f = java.io.File(datasetDir, "hud_selfcheck_$tag.jpg")
+            java.io.FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+        } catch (_: Exception) {}
+    }
+
     private fun initTouchInjector() {
         executor.execute {
             touchService.connect(object : InjectorCallback {
@@ -516,6 +786,8 @@ class FloatService : Service() {
                     updateTriggerZone()
                     updateFireZone()
                     updateJoystickZone()
+                    // 防捕获 HUD:root daemon 在线才可能,激活后撤掉兜底渲染
+                    setupHud()
                     Log.d(TAG, "TouchInjector connected, resolution=${deviceAbsMaxX}x${deviceAbsMaxY}, calling init...")
                     try {
                         val initOk = touchService.initRemote()
@@ -548,6 +820,9 @@ class FloatService : Service() {
                 updateTriggerZone()
                 updateFireZone()
                 updateJoystickZone()
+                // daemon 重启会丢 HUD 状态:重连后重放一次(开关+几何+当前值),
+                // 与 zone 配置连接后重放的做法同构(改进方案.md §5.2)
+                setupHud()
                 try {
                     val initOk = touchService.initRemote()
                     Log.d(TAG, "RECONNECT: initRemote=$initOk")
@@ -845,7 +1120,11 @@ class FloatService : Service() {
             Log.d("YolovaimInfer", "开关切换: $on")
         }
         guiPanel.onSpeedChanged = { kp = it; currentSpeed = it; aimController.kp = it; ConfigManager.updateConfig { speed = it } }
-        guiPanel.onRangeChanged = { px -> overlayView.rangeRadius = px; overlayView.postInvalidate(); ConfigManager.updateConfig { range = px } }
+        guiPanel.onRangeChanged = { px ->
+            overlayView.rangeRadius = px // 兜底渲染状态保持同步,随时可切换
+            if (!hudNative) overlayView.postInvalidate() else hud()?.hudRange(px)
+            ConfigManager.updateConfig { range = px }
+        }
         guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it); ConfigManager.updateConfig { confidence = it } }
         guiPanel.onTriggerEnabled = { triggerEnabled = it; triggerController.triggerEnabled = it; ConfigManager.updateConfig { triggerEnabled = it } }
         guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it; triggerController.triggerReactionSpeed = it; ConfigManager.updateConfig { triggerReactionSpeed = it } }
@@ -874,13 +1153,13 @@ class FloatService : Service() {
             aimFov = v
             aimController.aimFov = v
             overlayView.fovRadius = v
-            overlayView.postInvalidate()
+            if (!hudNative) overlayView.postInvalidate() else { lastHudFov = v; if (showFov) hud()?.hudFov(v) }
             ConfigManager.updateConfig { aimFov = v }
         }
         guiPanel.onShowFovChanged = { on ->
             showFov = on
             overlayView.showFov = on
-            overlayView.postInvalidate()
+            if (!hudNative) overlayView.postInvalidate() else hud()?.hudToggle("fov", on)
             ConfigManager.updateConfig { showFov = on }
         }
         guiPanel.onDynamicFovChanged = { on ->
@@ -888,7 +1167,7 @@ class FloatService : Service() {
             aimController.dynamicFov = on
             if (on) aimController.resetDynamicFov()
             overlayView.fovRadius = aimController.effectiveFov
-            overlayView.postInvalidate()
+            if (!hudNative) overlayView.postInvalidate() else publishFov(aimController.effectiveFov)
             ConfigManager.updateConfig { dynamicFov = on }
         }
         guiPanel.onFovZoomDelayChanged = { ms ->
@@ -903,7 +1182,12 @@ class FloatService : Service() {
             // inference loop won't post again once the toggle is off, and a
             // lazy clear would leave the previous frame's stats frozen on
             // screen.
-            if (!on) overlayManager.setInferInfo("")
+            if (hudNative) {
+                hud()?.hudToggle("inferInfo", on)
+                if (!on) lastHudInfoText = null // 重新打开时第一条立即渲染
+            } else {
+                if (!on) overlayManager.setInferInfo("")
+            }
             // Reset the EMA so the first sample after a re-enable is shown
             // verbatim instead of being averaged with a stale value from
             // before the toggle was flipped (models can warm up enough that
@@ -940,17 +1224,20 @@ class FloatService : Service() {
         }
         guiPanel.onShowCaptureRangeChanged = { on ->
             overlayView.showCaptureRange = on
-            overlayView.postInvalidate()
+            if (!hudNative) overlayView.postInvalidate() else hud()?.hudToggle("captureRange", on)
             ConfigManager.updateConfig { showCaptureRange = on }
         }
         guiPanel.onShowDetectionBoxChanged = { on ->
+            showDetectionBox = on
             overlayView.showDetectionBox = on
-            overlayView.postInvalidate()
+            if (!hudNative) overlayView.postInvalidate() else hud()?.hudToggle("box", on)
             ConfigManager.updateConfig { showDetectionBox = on }
         }
         guiPanel.onShowCenterDotChanged = { on ->
+            // 中心点现在真正是独立开关:旧实现的坑(嵌在 showCaptureRange
+            // 的 if 里,单独开画不出来)在两条路径上都不再存在(方案 §5.3)
             overlayView.showCenterDot = on
-            overlayView.postInvalidate()
+            if (!hudNative) overlayView.postInvalidate() else hud()?.hudToggle("centerDot", on)
             ConfigManager.updateConfig { showCenterDot = on }
         }
         guiPanel.onRecordEnabledChanged = { on -> toggleRecording(on) }
@@ -1159,6 +1446,18 @@ class FloatService : Service() {
                 val image = imageReader?.acquireLatestImage()
                 if (image == null) { awaitFrame(); continue }
 
+                // 防捕获 HUD 首次启用自检:在真实采集帧上找 HUD 像素,
+                // 验证 AUTO_MIRROR 路径确实排除了该 layer(改进方案.md §6.1)
+                if (hudSelfCheckPending) {
+                    val hb = try { image.hardwareBuffer } catch (_: Exception) { null }
+                    if (hb != null) {
+                        try { runHudSelfCheck(hb) } catch (e: Exception) {
+                            Log.e(TAG, "HUD self-check error: ${e.message}")
+                            hudSelfCheckPending = false
+                        } finally { hb.close() }
+                    }
+                }
+
                 // Image.getHardwareBuffer() allocates a fresh HardwareBuffer
                 // wrapper (plus two JNI transitions) on every call. Only the
                 // recording and dataset paths need it, and both are off in
@@ -1257,7 +1556,7 @@ class FloatService : Service() {
                             "推理 %.1ffps · 预处理 %.2fms · 后处理 %.2fms · 检测 %d",
                             inferFps, pre, post, count
                         )
-                        mainHandler.post { overlayManager.setInferInfo(text) }
+                        mainHandler.post { pushInferInfo(text) }
                     }
 
                     // 按住激发: 物理手指按在触发区时才能自瞄（提到外层，使 lift 条件也能读到）
@@ -1284,7 +1583,7 @@ class FloatService : Service() {
                             // (it ends in postInvalidateOnAnimation), so the
                             // mainHandler.post hop was a lambda + Message + main
                             // looper wake-up per frame for nothing.
-                            overlayView.updateDetections(lastDetections)
+                            publishDetections(lastDetections)
 
                             if (autoSaveDataset && detCount > 0 && hwBuf != null) {
                                 saveDatasetFrame(hwBuf, result, count)
@@ -1318,10 +1617,10 @@ class FloatService : Service() {
                             // aimbot state — so the FOV can expand back to normal
                             // even after the target is lost or aimbot is toggled off.
                             aimController.updateDynamicFov(target, System.currentTimeMillis())
-                            overlayView.fovRadius = aimController.effectiveFov
+                            publishFov(aimController.effectiveFov)
                         } else {
                             hasDetects.set(false); lastDetections = emptyList()
-                            overlayView.updateDetections(lastDetections)
+                            publishDetections(lastDetections)
                         }
 
                         // 抬起条件：按下虚拟触摸但瞄准条件任一不满足都应释放（修了按住激发中途松手后触摸点卡住的 bug）

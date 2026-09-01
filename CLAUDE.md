@@ -72,7 +72,12 @@ ui/
 └── SettingsActivity.kt          # CPU inference toggle, thread count slider
 
 service/
-├── FloatService.kt              # Foreground service — owns overlays, MediaProjection, inference loop
+├── FloatService.kt              # Foreground service — owns overlays, MediaProjection, inference loop.
+│                                #   Display elements (FOV ring / capture corners / center dot / detection
+│                                #   boxes / infer-info text) render on the daemon's anti-capture layer when
+│                                #   the root path is live (HudClient IPC, '!' fire-and-forget commands),
+│                                #   and fall back to OverlayCanvasView when it is not. A first-frame
+│                                #   self-check verifies the AUTO_MIRROR capture really excludes the layer.
 └── RemoteInjectorService.java   # Shizuku UserService (separate process) — uinput or InputManager
 
 controller/
@@ -133,7 +138,18 @@ src/injection/
 └── uinput_inject.cpp            # JNI wrapper over touch_core
 
 src/daemon/
-└── root_daemon.cpp              # Standalone su daemon, stdin/stdout command protocol (20+ commands)
+└── root_daemon.cpp              # Standalone su daemon, stdin/stdout command protocol (30+ commands, incl. HUD_*)
+
+src/hud/
+├── ANativeWindowCreator.h       # Runtime dlopen/dlsym of libgui private symbols (multi-candidate
+│                                #   symbol resolution — OEM ROMs mangle names differently). Ported
+│                                #   from anti-capture-demo, the only reference verified on a real device.
+├── hud_surface.cpp/.h           # Anti-capture layer lifecycle: create (flags|=0x40 eSkipScreenshot +
+│                                #   setTrustedOverlay + fake parent handle on A12+) / destroy / display info
+└── hud_renderer.cpp/.h          # HUD state + software rendering on a render thread (ANativeWindow_lock).
+                                 #   Physical screen sees the layer; MediaProjection / screenshot / screen
+                                 #   recording composites exclude it → inference input is not polluted by
+                                 #   the app's own overlay elements.
 
 CMakeLists.txt                   # 3 targets: yolovaim (shared), uinput_inject (shared), root_daemon (exec)
                                  # + touch_core (static) shared between injection targets
