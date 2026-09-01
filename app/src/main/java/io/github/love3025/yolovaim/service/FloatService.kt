@@ -614,7 +614,7 @@ class FloatService : Service() {
     private fun updateHudDiagnostics() {
         val mode = if (hudNative) "native" else "fallback"
         mainHandler.post {
-            if (this::guiPanel.isInitialized) guiPanel.setHudMode(mode)
+            if (this::guiPanel.isInitialized) guiPanel.updateHudMode(mode)
         }
     }
 

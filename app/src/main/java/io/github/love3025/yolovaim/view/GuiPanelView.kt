@@ -135,9 +135,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     // 显示当前渲染路径 native(root daemon 防捕获 layer)/ fallback
     // (OverlayCanvasView 悬浮窗)。
     var hudMode = "unknown"
+        private set
     private var hudModeText: TextView? = null
 
-    fun setHudMode(mode: String) {
+    fun updateHudMode(mode: String) {
         hudMode = mode
         hudModeText?.text = "HUD: $mode"
     }
