@@ -92,21 +92,23 @@ struct DrawCtx {
 };
 
 // 采集空间 → layer 空间。方向 1/3 时 layer 尺寸为 (gh, gw)。
+// 翻转轴用 gw-1-x / gh-1-y(不是 gw-x):x=0 是有效坐标,映射到 gw 会
+// 落到 layer 外被裁掉 —— 检测框贴边时会缺 1px。
 // 注意:90° 系两个方向的选取基于 Android 旋转约定推导,真机验收时
 // 若检测框出现镜像/错位,交换 case 1 / case 3 的公式即可。
 static inline void xform(const DrawCtx &c, int x, int y, int *lx, int *ly) {
     switch (c.orientation) {
     case 1:
         *lx = y;
-        *ly = c.gw - x;
+        *ly = c.gw - 1 - x;
         break;
     case 3:
-        *lx = c.gh - y;
+        *lx = c.gh - 1 - y;
         *ly = x;
         break;
     case 2:
-        *lx = c.gw - x;
-        *ly = c.gh - y;
+        *lx = c.gw - 1 - x;
+        *ly = c.gh - 1 - y;
         break;
     default:
         *lx = x;

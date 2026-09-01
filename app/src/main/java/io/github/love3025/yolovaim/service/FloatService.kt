@@ -1714,6 +1714,10 @@ class FloatService : Service() {
             touchService.setOrientationConfig(curW > curH)
             touchService.setResolution(curW, curH, deviceAbsMaxX, deviceAbsMaxY)
             centerX = captureW / 2f; centerY = captureH / 2f
+            // native HUD 不在 WindowManager 里,旋转不会自动适配:重发采集
+            // 几何,daemon 端顺带刷新 SurfaceFlinger 方向并重算坐标变换
+            // (WM 兜底路径由 onConfigurationChanged 里的 updateViewLayout 覆盖)
+            if (hudNative) touchService.hud()?.hudGeo(curW, curH)
             if (wasRunning) startInferLoop()
         }
     }
