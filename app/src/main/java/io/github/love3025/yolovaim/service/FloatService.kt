@@ -1135,20 +1135,18 @@ class FloatService : Service() {
         if (inferRunning.getAndSet(true)) { Log.d(TAG, "infer loop already running"); return }
         broadcastState(2) // INFERENCING
         centerX = captureW / 2f; centerY = captureH / 2f
+        aimController.recoilRefHeight = captureH.toFloat()
         Log.d(TAG, "infer loop started, center=($centerX,$centerY)")
         executor.execute {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             var lastFrameNs = 0L
             var prevFingerOnFire = false
-            // 压枪的下压范围按目标框高取比例。updateRecoil 在帧首调用，
-            // 那时本帧还没选目标，所以用上一帧的框高 —— 差一帧无影响。
-            var lastBoxH = 0f
             // 排障用，只被下面那条每 30 帧一次的日志读取
             var dbgHeld = false; var dbgTaps = 0; var dbgRaw = -1
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
-                if (aliveCtr % 30 == 0) { Log.d(TAG, "recoil on=$recoilEnabled held=$dbgHeld taps=$dbgTaps boxH=$lastBoxH offset=${aimController.recoilOffsetDebug} raw=$dbgRaw") }
+                if (aliveCtr % 30 == 0) { Log.d(TAG, "recoil on=$recoilEnabled held=$dbgHeld taps=$dbgTaps offset=${aimController.recoilOffsetDebug} raw=$dbgRaw") }
                 val currentRange = guiPanel.range
                 if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
 
@@ -1201,7 +1199,7 @@ class FloatService : Service() {
                     dbgHeld = recoilHeld; dbgTaps = fireTaps; dbgRaw = packed
                     // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
                     // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
-                    aimController.updateRecoil(recoilHeld, fireTaps, lastBoxH, dtSec, System.currentTimeMillis())
+                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
 
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
@@ -1306,7 +1304,6 @@ class FloatService : Service() {
                                         val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
                                         if (d < minD) { minD = d; boxH = r.height() }
                                     }
-                                    if (boxH > 0f) lastBoxH = boxH
                                     val classOffset = aimController.classAimOffsets[t.classId] ?: aimController.aimOffsetYRatio
                                     val classBoxRatio = aimController.classBoxAimRatios[t.classId] ?: aimController.boxAimRatio
                                     val aimX = tcx
