@@ -22,23 +22,31 @@ class AimController(
         private const val AREA_INDEX_AIM = 2
 
         /**
-         * 压枪的三个内部标度。都不是可调项 —— 面板上暴露的是 0~1 的强度，
-         * 这里负责把强度换算成像素。
+         * 压枪的内部标度。都不是可调项 —— 面板上暴露的是 0~1 的强度/速度，
+         * 这里负责把它们换算成屏幕像素。
          *
-         * HOLD_RATE 90 = 30 × 3：改时间基之前是「每帧 recoilStrength * 3f」，
-         * 以 30fps 为换算基准，30fps 下手感与改前一致，60fps 不再翻倍。
-         * TAP_KICK_SCALE 16 让「连点压枪强度 0.5」≈ 每枪 8px。
-         * MAX_OFFSET 是防跑飞的安全网(盲射/手指卡住)，正常交火够不到。
+         * **标度必须是屏幕空间，不能按目标框高取比例。** 枪口爬升是镜头的旋转，
+         * 画面上的位移像素数由 FOV 与分辨率决定，与目标远近无关；而框高与距离
+         * 强相关。`7a1e202` 把 range/rate 改成 `strength * boxH` 后，远距离
+         * (实测框高 15~20px) 的上限塌到 17px、速率塌到 2.4px/s，比上游慢 37 倍，
+         * 等于让远处目标自动关掉压枪 —— 而远距离恰恰最需要它。实测日志见
+         * recoil-improvement-plan.md §11。
+         *
+         * HOLD_RATE_* 的锚点：上游 `recoilStrength * 3f` 每帧、以 30fps 换算
+         * 就是 90px/s，那一版实机确认「有明显效果」。故速度 50% 取 90px/s。
          */
-        /** 走完整个下压范围的耗时：压枪速度 0% -> 7 秒，50% -> 4 秒，100% -> 1 秒。 */
-        private const val TRAVERSAL_SLOW_SEC = 7f
-        private const val TRAVERSAL_FAST_SEC = 1f
-        /** 连点每一下的量，同样按目标框高度取比例：50% 时约为框高的 4%。 */
-        private const val TAP_KICK_RATIO = 0.08f
-        /** 还没见过任何目标时的框高兜底值，只影响开局盲射那几帧。 */
-        private const val DEFAULT_BOX_H = 180f
-        /** 绝对保险，防止异常框高把偏移推到离谱的值。 */
-        private const val MAX_OFFSET = 1200f
+        /** 长按下压速率(屏幕 px/s)：速度 0% -> 30，50% -> 90，100% -> 150。 */
+        private const val HOLD_RATE_SLOW = 30f
+        private const val HOLD_RATE_FAST = 150f
+        /**
+         * 下压范围满量程 = 屏幕高度 × 该比例。1080p 上 = 400px，与上游
+         * MAX_OFFSET 一致；用比例而非绝对值，换分辨率不必重调。
+         */
+        private const val RANGE_MAX_RATIO = 0.37f
+        /** 连点每一下的量(屏幕 px)：连点强度 50% -> 每枪 20px。 */
+        private const val TAP_KICK_MAX_PX = 40f
+        /** 绝对保险，防止异常参数把偏移推到离谱的值。 */
+        private const val MAX_OFFSET = 600f
 
         /**
          * Per-frame latency tracing, compiled out by default.
@@ -104,8 +112,13 @@ class AimController(
     var recoilEnabled = false
     var recoilStrength = 0.5f   // 0.0 ~ 1.0
     var recoilTapStrength = 0.5f      // 连点压枪强度 0.0 ~ 1.0，0 = 关闭
-    var recoilSpeed = 0.5f            // 压枪速度 0.0 ~ 1.0，决定多久走完下压范围
+    var recoilSpeed = 0.5f            // 压枪速度 0.0 ~ 1.0，决定下压速率
     var recoilResetIntervalMs = 300   // 松开开火区超过此时长才开始回落；0 = 立即重置
+    /**
+     * 压枪标度的参考高度 = 采集高度(px)。由 FloatService 在建立采集后写入。
+     * 兜底 1080 只在还没建立采集时用得到，那时也不会有推理帧。
+     */
+    var recoilRefHeight = 1080f
     private var recoilOffsetY = 0f
     private var lastFireMs = 0L
     private var pendingKick = 0f
@@ -469,9 +482,12 @@ class AimController(
      * 压枪状态机 —— 必须每推理帧调用一次，且与「有没有目标」无关。
      *
      * 强度与速度是两个维度，必须分开：
-     *  - **压枪强度 = 下压范围**，按目标框高度取比例（与 aimOffsetYRatio /
-     *    boxAimRatio 一致）。瞄头时 50% 约压到身体，100% 约压到脚。
-     *  - **压枪速度 = 走完这段范围要多久**。
+     *  - **压枪强度 = 下压范围**，屏幕高度的比例（100% ≈ 0.37 屏高）。
+     *  - **压枪速度 = 下压速率**，直接是 px/s。
+     *
+     * 两者都是屏幕空间量。不要改回按目标框高取比例 —— 那与
+     * aimOffsetYRatio / boxAimRatio 是不同性质的量：那两个决定"打身体哪个部位"
+     * (该随框高缩放)，压枪对抗的是镜头爬升(与距离无关)。混用会让远距离失效。
      *
      * 为什么速度必须独立出来：枪械后坐力大时，开火头 1-2 秒枪口爬升快过压枪，
      * 准星会先跑到头部上方，等后坐力见顶才开始往下走，整个过程比应有的多花
@@ -493,18 +509,16 @@ class AimController(
      * 注意这里不看 aimbotOn / holdToAimActive：玩家在开火，游戏内枪口就在爬升，
      * 这与自瞄有没有接管无关。等自瞄再接手时，偏移量应当反映真实的累计爬升。
      */
-    fun updateRecoil(held: Boolean, taps: Int, boxH: Float, dtSec: Float, nowMs: Long) {
+    fun updateRecoil(held: Boolean, taps: Int, dtSec: Float, nowMs: Long) {
         if (!recoilEnabled) { recoilOffsetY = 0f; pendingKick = 0f; return }
 
-        // 下压范围。boxH 是上一帧选中目标的框高（差一帧无所谓）；开局还没见过
-        // 目标时用兜底值，免得盲射完全不压。
-        val h = if (boxH > 0f) boxH else DEFAULT_BOX_H
-        val range = (recoilStrength * h).coerceAtMost(MAX_OFFSET)
+        // 下压范围。屏幕空间，不看目标框 —— 见 companion 里的标度说明。
+        val range = (recoilStrength * RANGE_MAX_RATIO * recoilRefHeight)
+            .coerceAtMost(MAX_OFFSET)
 
         // 连点：每检测到一次按下，加一份固定量。与按住多久无关。
-        // 同样按框高取比例，和长按用同一套心智模型。
         if (taps > 0 && recoilTapStrength > 0f) {
-            pendingKick += recoilTapStrength * TAP_KICK_RATIO * h * taps
+            pendingKick += recoilTapStrength * TAP_KICK_MAX_PX * taps
             lastFireMs = nowMs
         }
         // kick 摊到之后几帧释放而不是一帧打满：它进的是 PID 的目标值，而 Y 轴的
@@ -519,16 +533,13 @@ class AimController(
 
         // 长按：恒速下压，到 range 为止。
         //
-        // 速率只由速度决定，用的是整个框高 h 而不是 range —— 这才是真正的解耦。
-        // 之前写成 range/sec，等于强度调低时下降也跟着变慢，两个滑块又绑在一起了；
-        // 而且"多久压到脚"说的是走完整个框高的时间，用 range 的话强度 50% 就变成
-        // 4 秒只走半程，等于又慢一倍。
+        // 速率直接是 px/s，与强度(=范围)彻底无关 —— 两个滑块互不干扰。用绝对
+        // 速率而不是 range/sec：后者强度调低时下降也跟着变慢，等于又把两者绑回去。
         //
-        // 恒速而不是指数逼近：后者末段无限慢，"多久压到脚"无从定义，也不符合真实
-        // 枪械先爬升后见顶的形状。
+        // 恒速而不是指数逼近：后者末段无限慢，且不符合真实枪械先爬升后见顶的形状。
         if (held) {
-            val sec = TRAVERSAL_SLOW_SEC + (TRAVERSAL_FAST_SEC - TRAVERSAL_SLOW_SEC) * recoilSpeed
-            recoilOffsetY += (h / sec) * dtSec
+            val rate = HOLD_RATE_SLOW + (HOLD_RATE_FAST - HOLD_RATE_SLOW) * recoilSpeed
+            recoilOffsetY += rate * dtSec
             lastFireMs = nowMs
         } else if (recoilResetIntervalMs <= 0) {
             // 间隔 = 0：松开开火区立即重置，不走衰减。
