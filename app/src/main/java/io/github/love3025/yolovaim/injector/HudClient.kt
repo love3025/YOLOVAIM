@@ -21,6 +21,13 @@ interface HudClient {
     /** 单项显示开关。what: captureRange | fov | box | centerDot | inferInfo。 */
     fun hudToggle(what: String, on: Boolean)
 
+    /**
+     * 自检模式:开 = layer 只画洋红色检查图案(中心实心圆 + 大圆环),
+     * 关 = 恢复正常元素。上层在采集帧里检索这个颜色判定防捕获是否生效
+     * —— 用白色判据会和游戏自身的准星撞车,首版就栽在这上面。
+     */
+    fun hudCheck(on: Boolean)
+
     /** 采集空间宽高(镜像 MediaProjection 坐标系,旋转后要重发)。 */
     fun hudGeo(w: Int, h: Int)
 

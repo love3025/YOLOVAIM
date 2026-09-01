@@ -31,6 +31,10 @@ void set_geo(int w, int h);
 // 未知 what 忽略并打日志。
 void set_toggle(const char *what, int on);
 
+// 自检模式:开 = 只画洋红色检查图案(中心实心圆 + 大圆环),关 = 恢复
+// 正常元素。用于上层在采集帧里检索该颜色,判定防捕获是否真的生效。
+void set_check_mode(int on);
+
 // FOV 半径 / 截取范围半径,px,采集空间。
 void set_fov(int r);
 void set_range(int r);

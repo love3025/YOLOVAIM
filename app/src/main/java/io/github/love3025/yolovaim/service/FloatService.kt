@@ -164,9 +164,13 @@ class FloatService : Service() {
     // HUD_ON 失败 / 自检失败,改进方案.md §6)。
     @Volatile private var hudNative = false
     // 首次启用自检:HUD_ON 成功不代表 AUTO_MIRROR 采集路径也排除该 layer
-    // (demo 只验证过截屏),要在真实采集帧上找 HUD 像素验证。
+    // (demo 只验证过截屏),要在真实采集帧上找检查图案像素验证。
+    // 判据是洋红色(daemon 端 HUD_CHECK_ON 画的图案)而不是白色 —— 白色
+    // 会和游戏自身的屏幕中心准星撞车,首版在真机上就是这么误判回退的。
     @Volatile private var hudSelfCheckPending = false
-    private var hudSelfCheckFrames = 0
+    private var hudCheckStage = 0    // 0=idle 1=图案已下发,采样中
+    private var hudCheckFrames = 0
+    private var hudCheckMaxHits = 0
     // 推理热路径上的值变门闩:值没变不发 IPC
     private var lastHudFov = -1
     private var hudBoxesSent = false
@@ -478,7 +482,7 @@ class FloatService : Service() {
     private fun cleanupViews() {
         // native HUD 的 layer 生命周期跟着 daemon,但显式关掉干净:
         // 长驻的空 layer 也占合成开销(改进方案.md §5.2)
-        try { if (hudNative) { hud()?.hudOff(); hudNative = false; hudSelfCheckPending = false } } catch (_: Exception) {}
+        try { if (hudNative) { hud()?.hudOff(); hudNative = false; hudSelfCheckPending = false; hudCheckStage = 0 } } catch (_: Exception) {}
         try { if (ballAdded) { wm.removeView(ballView); ballAdded = false } } catch (_: Exception) {}
         try { if (overlayAdded) { wm.removeView(overlayView); overlayAdded = false } } catch (_: Exception) {}
         try { if (guiAdded) { wm.removeView(guiPanel); guiAdded = false; guiVisible = false } } catch (_: Exception) {}
@@ -562,7 +566,9 @@ class FloatService : Service() {
             Log.i(TAG, "HUD: native anti-capture layer active")
             replayHudState(client)
             hudSelfCheckPending = true
-            hudSelfCheckFrames = 0
+            hudCheckStage = 0
+            hudCheckFrames = 0
+            hudCheckMaxHits = 0
             lastHudFov = -1
             hudBoxesSent = false
             lastHudInfoText = null
@@ -597,6 +603,7 @@ class FloatService : Service() {
     private fun hudFallBack(reason: String) {
         hudNative = false
         hudSelfCheckPending = false
+        hudCheckStage = 0
         try { touchService.hud()?.hudOff() } catch (_: Exception) {}
         Log.w(TAG, "HUD: fallback ($reason)")
         mainHandler.post {
@@ -691,18 +698,21 @@ class FloatService : Service() {
 
     /**
      * 首次启用自检(改进方案.md §6.1):HUD_ON 成功 ≠ 防捕获在
-     * AUTO_MIRROR 采集路径上生效(demo 只验证过系统截屏)。在真实采集帧
-     * 上找 HUD 元素的白像素:找到 = 没生效 → 立即退兜底;对照点也亮 =
-     * 场景太亮无法判定 → 下帧再试(上限 60 帧)。
+     * AUTO_MIRROR 采集路径上生效(demo 只验证过系统截屏)。
+     *
+     * 流程:下发 HUD_CHECK_ON → daemon 在 layer 上画洋红检查图案(中心
+     * r=12 实心圆 + 半屏 1/4 圆环)→ 连续 3 个采集帧检索该颜色 →
+     * 出现 = 没生效 → 立即退兜底;3 帧都没有 = 通过。洋红色游戏画面
+     * 不会天然出现,首版"白像素"判据被游戏自己的中心准星打爆过。
      */
     private fun runHudSelfCheck(hb: android.hardware.HardwareBuffer) {
-        val cfg = ConfigManager.getConfig()
-        val checkDot = cfg.showCenterDot
-        val checkFov = cfg.showFov
-        val checkRange = cfg.showCaptureRange
-        if (!checkDot && !checkFov && !checkRange) {
-            hudSelfCheckPending = false // 没有几何元素在屏上,无从验证
-            return
+        val client = hud() ?: run { hudSelfCheckPending = false; return }
+        if (hudCheckStage == 0) {
+            client.hudCheck(true)
+            hudCheckStage = 1
+            hudCheckFrames = 0
+            hudCheckMaxHits = 0
+            return // 图案要等下一帧才出现在采集里
         }
         val hw = try { Bitmap.wrapHardwareBuffer(hb, null) } catch (e: Exception) { null } ?: return
         val bmp = try { hw.copy(Bitmap.Config.ARGB_8888, false) } catch (e: Exception) { null }
@@ -710,59 +720,39 @@ class FloatService : Service() {
         if (bmp == null) return
         try {
             val cx = captureW / 2; val cy = captureH / 2
-            fun brightAt(x: Int, y: Int): Boolean {
+            val ringR = minOf(captureW, captureH) / 4
+            fun magentaAt(x: Int, y: Int): Boolean {
                 if (x < 0 || y < 0 || x >= captureW || y >= captureH) return false
                 val p = bmp.getPixel(x, y)
-                return ((p shr 16) and 0xFF) > 0xB0 && ((p shr 8) and 0xFF) > 0xB0 && (p and 0xFF) > 0xB0
+                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                return r > 200 && g < 90 && b > 200
             }
-            // 1) 在 HUD 元素应在的位置找白像素
-            var hits = 0; var samples = 0
-            if (checkDot) {
-                for (dy in -8..8) for (dx in -8..8) {
-                    if (dx * dx + dy * dy > 64) continue
-                    samples++
-                    if (brightAt(cx + dx, cy + dy)) hits++
+            var hits = 0
+            // 中心实心圆 r=12:隔行采样避免整圆 ~450 次取像素
+            for (dy in -12..12 step 2) for (dx in -12..12 step 2)
+                if (dx * dx + dy * dy <= 144 && magentaAt(cx + dx, cy + dy)) hits++
+            // 大圆环(4px 粗):16 个角度 × 径向 ±2
+            for (i in 0 until 16) {
+                val a = Math.PI * 2.0 * i / 16.0
+                val ux = kotlin.math.cos(a).toFloat(); val uy = kotlin.math.sin(a).toFloat()
+                for (d in -2..2)
+                    if (magentaAt(cx + (ux * (ringR + d)).toInt(), cy + (uy * (ringR + d)).toInt())) hits++
+            }
+            if (hits > hudCheckMaxHits) hudCheckMaxHits = hits
+            hudCheckFrames++
+            if (hudCheckFrames >= 3) {
+                client.hudCheck(false)
+                if (hudCheckMaxHits >= 4) {
+                    saveHudSelfCheckFrame(bmp, "fail")
+                    Log.e(TAG, "HUD self-check FAILED: magenta pattern visible in capture (maxHits=$hudCheckMaxHits)")
+                    hudFallBack("self-check: check pattern visible in capture frame")
+                } else {
+                    saveHudSelfCheckFrame(bmp, "pass")
+                    Log.i(TAG, "HUD self-check passed: AUTO_MIRROR capture excludes HUD (maxHits=$hudCheckMaxHits)")
                 }
+                hudSelfCheckPending = false
+                hudCheckStage = 0
             }
-            if (checkFov) {
-                val r = aimController.effectiveFov
-                for ((ox, oy) in listOf(r to 0, -r to 0, 0 to r, 0 to -r)) {
-                    samples++
-                    if (brightAt(cx + ox, cy + oy)) hits++
-                }
-            }
-            if (checkRange) {
-                val half = cfg.range.coerceIn(50, 800)
-                // 四角括号竖线的中点:角点在 (cx±half, cy±half),竖线覆盖
-                // 角点向内 10..36px → 采样 y = cy ± (half-22),x 恰在框边上
-                for (sx in intArrayOf(-1, 1)) for (sy in intArrayOf(-1, 1)) {
-                    val x = cx + sx * half
-                    val y = cy + sy * (half - 22)
-                    for (d in -2..2) { samples++; if (brightAt(x + d, y)) hits++ }
-                }
-            }
-            // 2) 对照点:不在任何 HUD 元素上。同样亮说明场景本身亮,
-            //    本帧判定不可靠
-            var ctrlBright = 0
-            for ((ox, oy) in listOf(captureW / 4 to captureH / 4, -captureW / 4 to -captureH / 4, captureW / 5 to -captureH / 5)) {
-                if (brightAt(cx + ox, cy + oy)) ctrlBright++
-            }
-            if (ctrlBright > 0) {
-                if (++hudSelfCheckFrames >= 60) {
-                    hudSelfCheckPending = false
-                    Log.w(TAG, "HUD self-check inconclusive after 60 frames (scene too bright), keeping native HUD")
-                }
-                return
-            }
-            if (samples > 0 && hits * 100 / samples >= 20) {
-                saveHudSelfCheckFrame(bmp, "fail")
-                Log.e(TAG, "HUD self-check FAILED: HUD pixels visible in capture frame (hits=$hits/$samples)")
-                hudFallBack("self-check: HUD visible in capture frame")
-                return
-            }
-            saveHudSelfCheckFrame(bmp, "pass")
-            hudSelfCheckPending = false
-            Log.i(TAG, "HUD self-check passed: AUTO_MIRROR capture excludes HUD (hits=$hits/$samples)")
         } finally {
             bmp.recycle()
         }
@@ -1454,6 +1444,8 @@ class FloatService : Service() {
                         try { runHudSelfCheck(hb) } catch (e: Exception) {
                             Log.e(TAG, "HUD self-check error: ${e.message}")
                             hudSelfCheckPending = false
+                            hudCheckStage = 0
+                            try { hud()?.hudCheck(false) } catch (_: Exception) {} // 图案不能留在屏上
                         } finally { hb.close() }
                     }
                 }

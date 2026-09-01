@@ -46,6 +46,11 @@ struct HudState {
     bool showDot = false;
     bool showInfo = false;
 
+    // 自检模式:无视正常开关,只画洋红色检查图案(中心实心圆 + 大圆环)。
+    // 用游戏画面不可能出现的颜色做判据,避免与游戏自身 UI(比如屏幕
+    // 中心的准星)撞车 —— 首版用"白像素"判据就栽在这上面。
+    bool checkMode = false;
+
     int geoW = 0; // 采集空间宽高(MediaProjection 坐标系)
     int geoH = 0;
     int orientation = 0;
@@ -122,10 +127,12 @@ static inline void plot(const DrawCtx &c, int x, int y, uint32_t rgba) {
     row[lx] = rgba;
 }
 
-// ARGB(0xAARRGGBB)→ 内存小端 RGBA(0xAABBGGRR)
+// ARGB(0xAARRGGBB)→ 内存小端 RGBA(0xAABBGGRR):
+// A、G 字节位置不动,R 和 B 交换。真机抓过一次反例:写成字节旋转
+// (整体移 8 位)会把黑底 0xCC101010 变成粉底、黄字 0xFFFFEB3B 变成
+// 白字 —— 推理信息条在物理屏上就是从那时开始颜色全错的。
 static inline uint32_t argb_to_rgba(uint32_t v) {
-    return ((v & 0xFF000000u) >> 24) | ((v & 0x00FF0000u) >> 8) |
-           ((v & 0x0000FF00u) << 8) | ((v & 0x000000FFu) << 24);
+    return (v & 0xFF00FF00u) | ((v >> 16) & 0x000000FFu) | ((v & 0x000000FFu) << 16);
 }
 
 static void hline(const DrawCtx &c, int x1, int x2, int y, int thickness, uint32_t rgba) {
@@ -223,7 +230,17 @@ static void render(const HudState &s) {
 
     bool any = s.showFov || s.showRange || s.showBox || s.showDot ||
                (s.showInfo && s.textValid && !s.text.empty());
-    if (any) {
+    if (s.checkMode) {
+        // 自检图案:洋红(0xFFFF00FF,ARGB/RGBA 数值相同),游戏画面
+        // 不会天然出现;中心 r=12 实心圆 + 半屏 1/4 大圆环,采样容易
+        DrawCtx ctx{&buf, s.orientation, s.geoW, s.geoH};
+        const int cx = s.geoW / 2;
+        const int cy = s.geoH / 2;
+        const uint32_t magenta = 0xFFFF00FFu;
+        fill_circle(ctx, cx, cy, 12, magenta);
+        int r = (s.geoW < s.geoH ? s.geoW : s.geoH) / 4;
+        circle(ctx, cx, cy, static_cast<float>(r), 4, magenta);
+    } else if (any) {
         DrawCtx ctx{&buf, s.orientation, s.geoW, s.geoH};
         const int cx = s.geoW / 2;
         const int cy = s.geoH / 2;
@@ -380,6 +397,15 @@ void set_toggle(const char *what, int on) {
     if (*target == (on != 0))
         return;
     *target = (on != 0);
+    g_dirty = true;
+    g_cv.notify_all();
+}
+
+void set_check_mode(int on) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (g_state.checkMode == (on != 0))
+        return;
+    g_state.checkMode = (on != 0);
     g_dirty = true;
     g_cv.notify_all();
 }

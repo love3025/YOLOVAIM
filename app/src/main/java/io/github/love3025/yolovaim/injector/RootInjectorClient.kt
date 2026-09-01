@@ -215,6 +215,10 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         execNoReply("HUD_TOGGLE $what ${if (on) 1 else 0}")
     }
 
+    override fun hudCheck(on: Boolean) {
+        execNoReply(if (on) "HUD_CHECK_ON" else "HUD_CHECK_OFF")
+    }
+
     override fun hudGeo(w: Int, h: Int) {
         execNoReply("HUD_GEO $w $h")
     }

@@ -32,6 +32,7 @@
  *     HUD_ON                       (replies OK / ERR:hud <rc>; one-shot setup)
  *     HUD_OFF
  *     HUD_TOGGLE <captureRange|fov|box|centerDot|inferInfo> <0|1>
+ *     HUD_CHECK_ON / HUD_CHECK_OFF   self-check pattern (magenta dot+ring)
  *     HUD_GEO <w> <h>              capture-space size (MediaProjection frame)
  *     HUD_FOV <r>
  *     HUD_RANGE <r>
@@ -244,6 +245,12 @@ static void handle_command(const char* cmd) {
         int on = 0;
         if (sscanf(buf + 10, "%31s %d", what, &on) == 2)
             hud::set_toggle(what, on);
+    }
+    else if (strcmp(buf, "HUD_CHECK_ON") == 0) {
+        hud::set_check_mode(1);
+    }
+    else if (strcmp(buf, "HUD_CHECK_OFF") == 0) {
+        hud::set_check_mode(0);
     }
     else if (strncmp(buf, "HUD_GEO ", 8) == 0) {
         int w, h;
