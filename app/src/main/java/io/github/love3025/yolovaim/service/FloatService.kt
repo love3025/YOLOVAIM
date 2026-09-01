@@ -617,11 +617,15 @@ class FloatService : Service() {
         }
     }
 
-    /** GUI 面板的诊断入口:系统 tab 一行小字显示当前 HUD 模式。 */
+    // GUI 面板的诊断入口:系统 tab 一行小字显示当前 HUD 模式。
+    // 模式存服务侧字段:触摸连接回调(诊断首次更新发生在这里)远早于
+    // GUI 面板创建,只更新面板会把模式丢掉,面板建成后就永远是 unknown。
+    @Volatile private var hudDiagMode = "unknown"
+
     private fun updateHudDiagnostics() {
-        val mode = if (hudNative) "native" else "fallback"
+        hudDiagMode = if (hudNative) "native" else "fallback"
         mainHandler.post {
-            if (this::guiPanel.isInitialized) guiPanel.updateHudMode(mode)
+            if (this::guiPanel.isInitialized) guiPanel.updateHudMode(hudDiagMode)
         }
     }
 
@@ -1029,6 +1033,7 @@ class FloatService : Service() {
             guiPanel.fovZoomDelay = fovZoomDelay
             guiPanel.showInferInfo = showInferInfo
             guiPanel.buildUI()
+            guiPanel.updateHudMode(hudDiagMode)
             guiPanel.visibility = View.VISIBLE; guiPanel.alpha = 0f; guiPanel.scaleX = 0.85f; guiPanel.scaleY = 0.85f
             guiPanel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(200).start(); guiVisible = true; return
         }
@@ -1099,6 +1104,7 @@ class FloatService : Service() {
         guiPanel.classTriggerOffsets = classTriggerOffsets.toMutableMap()
         guiPanel.triggerClasses = triggerClasses.toMutableSet()
         guiPanel.buildUI()
+        guiPanel.updateHudMode(hudDiagMode) // 面板后于连接建立,诊断值从这里补上
         val panelH = (screenHeight * 0.68f).toInt()
         guiParams = makeParams((280 * resources.displayMetrics.density).toInt(), panelH, WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL).apply { gravity = Gravity.TOP or Gravity.START; x = 60; y = 200 }
         guiPanel.onClose = { hideGui() }
