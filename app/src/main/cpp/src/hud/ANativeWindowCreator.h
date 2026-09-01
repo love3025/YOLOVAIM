@@ -197,6 +197,7 @@ namespace android {
 
             void (*SurfaceComposerClient__Transaction__Constructor)(void *thiz) = nullptr;
             void *(*SurfaceComposerClient__Transaction__SetLayer)(void *thiz, StrongPointer<void> &surfaceControl, int32_t z) = nullptr;
+            void *(*SurfaceComposerClient__Transaction__SetPosition)(void *thiz, StrongPointer<void> &surfaceControl, float x, float y) = nullptr;
             void *(*SurfaceComposerClient__Transaction__SetTrustedOverlay)(void *thiz, StrongPointer<void> &surfaceControl, bool isTrustedOverlay) = nullptr;
             int32_t (*SurfaceComposerClient__Transaction__Apply)(void *thiz, bool synchronous, bool oneWay) = nullptr;
 
@@ -301,6 +302,7 @@ namespace android {
 
                 ResolveMethod(SurfaceComposerClient__Transaction, Constructor, libgui, "_ZN7android21SurfaceComposerClient11TransactionC2Ev");
                 ResolveMethod(SurfaceComposerClient__Transaction, SetLayer, libgui, "_ZN7android21SurfaceComposerClient11Transaction8setLayerERKNS_2spINS_14SurfaceControlEEEi");
+                ResolveMethod(SurfaceComposerClient__Transaction, SetPosition, libgui, "_ZN7android21SurfaceComposerClient11Transaction11setPositionERKNS_2spINS_14SurfaceControlEEEff");
                 ResolveMethod(SurfaceComposerClient__Transaction, SetTrustedOverlay, libgui, "_ZN7android21SurfaceComposerClient11Transaction17setTrustedOverlayERKNS_2spINS_14SurfaceControlEEEb");
                 ResolveMethod(SurfaceComposerClient__Transaction, Apply, libgui, "_ZN7android21SurfaceComposerClient11Transaction5applyEbb");
 
@@ -337,6 +339,7 @@ namespace android {
                     nullptr == SurfaceComposerClient__Constructor ||
                     nullptr == SurfaceComposerClient__Transaction__Constructor ||
                     nullptr == SurfaceComposerClient__Transaction__SetLayer ||
+                    nullptr == SurfaceComposerClient__Transaction__SetPosition ||
                     nullptr == SurfaceComposerClient__Transaction__Apply ||
                     nullptr == SurfaceControl__GetSurface || nullptr == SurfaceControl__DisConnect)
                     return false;
@@ -471,7 +474,7 @@ namespace android {
                 Functionals::GetInstance().RefBase__IncStrong(data, this);
             }
 
-            SurfaceControl CreateSurface(const char *name, int32_t width, int32_t height, bool skipScrenshot, int32_t z = 0) {
+            SurfaceControl CreateSurface(const char *name, int32_t width, int32_t height, bool skipScrenshot, int32_t z = 0, float x = 0.f, float y = 0.f) {
                 void *parentHandle = nullptr;
                 String8 windowName(name);
                 LayerMetadata layerMetadata;
@@ -508,6 +511,7 @@ namespace android {
                     SurfaceComposerClientTransaction transaction;
                     StrongPointer<void> surfaceControl(result);
                     transaction.SetLayer(surfaceControl, z);
+                    transaction.SetPosition(surfaceControl, x, y);
                     if (12 <= Functionals::GetInstance().systemVersion) {
                         transaction.SetTrustedOverlay(surfaceControl, true);
                     }
@@ -597,6 +601,18 @@ namespace android {
             return local_displayInfo;
         }
 
+        // Create a layer at an explicit position (layer-stack space). A content-sized
+        // layer costs far less to write/composite than a full-screen one — the HUD's
+        // anti-jank design depends on this.
+        static ANativeWindow *Create(const char *name, int32_t width, int32_t height, bool skipScrenshot_, int32_t z, float x, float y) {
+            auto &surfaceComposerClient = GetComposerInstance();
+            auto surfaceControl = surfaceComposerClient.CreateSurface(name, width, height, skipScrenshot_, z, x, y);
+            auto nativeWindow = reinterpret_cast<ANativeWindow *>(surfaceControl.GetSurface());
+
+            m_cachedSurfaceControl.emplace(nativeWindow, std::move(surfaceControl));
+            return nativeWindow;
+        }
+
         static ANativeWindow *Create(const char *name, int32_t width = -1, int32_t height = -1, bool skipScrenshot_ = false, int32_t z = 0) {
             auto &surfaceComposerClient = GetComposerInstance();
             while (-1 == width || -1 == height) {
@@ -611,7 +627,7 @@ namespace android {
                 break;
             }
 
-            auto surfaceControl = surfaceComposerClient.CreateSurface(name, width, height, skipScrenshot_, z);
+            auto surfaceControl = surfaceComposerClient.CreateSurface(name, width, height, skipScrenshot_, z, 0.f, 0.f);
             auto nativeWindow = reinterpret_cast<ANativeWindow *>(surfaceControl.GetSurface());
 
             m_cachedSurfaceControl.emplace(nativeWindow, std::move(surfaceControl));

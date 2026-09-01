@@ -7,15 +7,21 @@
  *   中心点      4px 半径实心圆,白 0xAA
  *   检测框      2px 描边,白 0x99
  *   推理信息    顶部居中 blit Kotlin 传来的 ARGB 位图
- * 用户在物理屏上看到的应与迁移前基本一致(改进方案.md §7)。
  *
  * 坐标系:真机 dumpsys SurfaceFlinger 实证(RMX3366 / A13,横屏时
  * layerStackSpace=2400x1080 而 framebufferSpace=1080x2400+ROTATION_90):
  * layer 生活在 layer-stack 逻辑空间,该空间**跟随屏幕旋转**,旋转发生在
  * layer-stack → framebuffer 之间。而 MediaProjection 采集帧也是逻辑
- * 方向 —— 所以采集坐标 == layer 坐标,恒等映射,无需任何旋转变换。
- * 旋转要处理的只有一件事:layer 尺寸烙定于创建时,几何尺寸变化时
- * 在渲染线程里销毁重建。
+ * 方向 —— 所以采集坐标 == layer 坐标,恒等映射,无需旋转变换。
+ *
+ * 性能设计(真机教训):全屏 layer 按推理帧率整屏重写会让游戏明显卡顿
+ * —— 每帧 2400x1080x4B≈10MB 的清屏写入 + 提交,~40fps 就是 400MB/s
+ * 内存写流量,和游戏抢带宽;且三缓冲下不能"只清脏区"(buffer 轮换会带
+ * 出 3 帧前的残影)。因此:
+ *   1. 几何内容只占屏幕中心一块 → layer 缩成中心方块(面积 ~1/4)
+ *   2. 推理信息是顶部小条且只 2Hz 更新 → 独立小 layer(~960x120)
+ *   3. 全部开关关闭 → 干脆销毁 layer,连静态合成开销都不留
+ *   4. 渲染线程降优先级,绝不和游戏抢大核
  */
 
 #include "hud_renderer.h"
@@ -28,6 +34,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <sys/resource.h>
 #include <thread>
 #include <vector>
 
@@ -42,6 +49,10 @@ namespace hud {
 
 static const int MAX_BOXES = 16;
 
+// 几何 layer 相对内容包围盒的固定余量:覆盖"目标中心在截取圈内、
+// 检测框边缘越出圈外"的常见情况
+static const int RANGE_MARGIN = 320;
+
 struct HudState {
     bool showFov = false;
     bool showRange = false;
@@ -52,6 +63,7 @@ struct HudState {
     // 自检模式:无视正常开关,只画洋红色检查图案(中心实心圆 + 大圆环)。
     // 用游戏画面不可能出现的颜色做判据,避免与游戏自身 UI(比如屏幕
     // 中心的准星)撞车 —— 首版用"白像素"判据就栽在这上面。
+    // 自检图案覆盖大半个屏,强制几何 layer 临时扩为全屏。
     bool checkMode = false;
 
     int geoW = 0; // 采集空间宽高(MediaProjection 坐标系,= layer-stack 空间)
@@ -77,7 +89,7 @@ static bool g_dirty = false;
 static std::thread g_render_thread;
 static HudState g_state;
 
-// 文字位图的待写入缓冲(begin→row*→end 期间 accumulate,不参与渲染)
+// 文字位图的待写入缓冲(begin→run*→end 期间 accumulate,不参与渲染)
 static std::vector<uint32_t> g_text_pending;
 static int g_text_pending_w = 0;
 static int g_text_pending_h = 0;
@@ -89,23 +101,17 @@ static bool g_text_in_begin = false;
 
 struct DrawCtx {
     ANativeWindow_Buffer *buf;
-    int gw, gh; // 采集空间尺寸(== layer-stack 尺寸,恒等映射)
+    int gw, gh;   // 采集空间尺寸(== layer-stack 尺寸,恒等映射)
+    int ox, oy;   // 当前 layer 左上角在采集空间的位置(元素画进小 layer 的偏移)
 };
 
-// 采集空间 → layer 空间:恒等。见文件头注释 —— layer-stack 空间跟随
-// 屏幕旋转,旋转发生在 layer-stack → framebuffer 之间,与采集/绘制
-// 坐标无关。保留函数是为把这一结论钉在调用点上。
-static inline void xform(const DrawCtx &c, int x, int y, int *lx, int *ly) {
-    (void)c;
-    *lx = x;
-    *ly = y;
-}
-
+// 采集空间 → layer 内部像素:恒等映射 + 平移到 layer 原点。
+// 旋转结论见文件头:layer-stack 空间跟随屏幕旋转,与采集坐标一致。
 static inline void plot(const DrawCtx &c, int x, int y, uint32_t rgba) {
     if (x < 0 || y < 0 || x >= c.gw || y >= c.gh)
         return;
-    int lx, ly;
-    xform(c, x, y, &lx, &ly);
+    int lx = x - c.ox;
+    int ly = y - c.oy;
     if (lx < 0 || ly < 0 || lx >= c.buf->width || ly >= c.buf->height)
         return;
     uint32_t *row = reinterpret_cast<uint32_t *>(c.buf->bits) +
@@ -180,11 +186,10 @@ static void corner_box(const DrawCtx &c, int l, int t, int r, int b, uint32_t rg
     vline(c, r, b - len, b - cr, th, rgba);
 }
 
-static void blit_text(const DrawCtx &c, const HudState &s) {
+// 文字位图 blit 到采集空间 (x0,y0)(由 plot 平移进文字 layer)。
+static void blit_text(const DrawCtx &c, const HudState &s, int x0, int y0) {
     if (!s.textValid || s.textW <= 0 || s.textH <= 0)
         return;
-    int x0 = (s.geoW - s.textW) / 2;
-    int y0 = 40; // 顶部居中,约等于旧 TextView(dp(12)+状态栏)的落点
     for (int y = 0; y < s.textH; y++) {
         const uint32_t *src = s.text.data() + static_cast<size_t>(y) * s.textW;
         for (int x = 0; x < s.textW; x++) {
@@ -194,33 +199,60 @@ static void blit_text(const DrawCtx &c, const HudState &s) {
     }
 }
 
-static void render(const HudState &s) {
-    // layer 尺寸烙定于创建时(方案 §3.3)。几何尺寸变化(旋转)时在渲染
-    // 线程里销毁重建:surface_create 用当前 layer-stack 尺寸,重建后与
-    // 新几何一致。重建失败则放弃本帧渲染。
-    int lw = 0, lh = 0;
-    surface_layer_dims(&lw, &lh);
-    if (lw != s.geoW || lh != s.geoH) {
-        ALOG(ANDROID_LOG_INFO, "geo changed %dx%d -> %dx%d, recreating layer",
-             lw, lh, s.geoW, s.geoH);
-        surface_destroy();
-        if (0 != surface_create()) {
-            ALOG(ANDROID_LOG_ERROR, "layer recreation failed, skip frame");
-            return;
+// =========================================================================
+// layer 管理(渲染线程私有,无需加锁)
+// =========================================================================
+
+static HudSurface g_geo;  // 几何内容方块(中心)
+static HudSurface g_text; // 推理信息文字条(顶部)
+static int g_geo_created_gw = 0, g_geo_created_gh = 0; // 几何 layer 创建时的采集几何
+static int g_text_created_gw = 0;                      // 文字 layer 创建时的采集几何
+static bool g_check_fullscreen = false;                // 当前几何 layer 是否为自检扩成全屏
+
+// 几何 layer 的期望尺寸:包住所有可能画的东西;超出当前 layer 时长大,
+// 大幅缩小时收编(滞回,防检测框抖动导致重建抖动)。
+static void desired_geo_dims(const HudState &s, int *w, int *h) {
+    if (s.checkMode) { // 自检图案是 min/4 半径的大圆环,直接要全屏
+        *w = s.geoW;
+        *h = s.geoH;
+        return;
+    }
+    const int cx = s.geoW / 2, cy = s.geoH / 2;
+    int hw = 32, hh = 32; // 中心到 layer 边的半宽/半高
+    if (s.showRange) {
+        hw = s.rangeRadius + RANGE_MARGIN;
+        hh = s.rangeRadius + RANGE_MARGIN;
+    }
+    if (s.showFov && s.fovRadius + 16 > hw) {
+        hw = s.fovRadius + 16;
+        hh = s.fovRadius + 16;
+    }
+    if (s.showBox) {
+        for (int i = 0; i < s.nBoxes; i++) {
+            const int *b = s.boxes[i];
+            int bx = b[0] < b[2] ? b[2] : b[0]; // 离中心更远的边
+            int by = b[1] < b[3] ? b[3] : b[1];
+            int ex = bx - cx;
+            if (ex < 0) ex = -ex;
+            int ey = by - cy;
+            if (ey < 0) ey = -ey;
+            if (ex + 2 > hw) hw = ex + 2;
+            if (ey + 2 > hh) hh = ey + 2;
         }
     }
+    *w = s.geoW < hw * 2 ? s.geoW : hw * 2;
+    *h = s.geoH < hh * 2 ? s.geoH : hh * 2;
+}
 
-    ANativeWindow *w = surface_window();
-    if (nullptr == w)
-        return;
-
+// 清屏 + 回调绘制 + 提交一个 layer。draw_ctx 已含该 layer 的原点。
+static bool present_layer(HudSurface *s, const DrawCtx &ctx, void (*draw_fn)(const DrawCtx &, const HudState &), const HudState &st) {
     ANativeWindow_Buffer buf{};
-    if (0 != ANativeWindow_lock(w, &buf, nullptr)) {
-        ALOG(ANDROID_LOG_ERROR, "render: ANativeWindow_lock failed fmt=%d", buf.format);
-        return;
+    if (0 != ANativeWindow_lock(s->win, &buf, nullptr)) {
+        ALOG(ANDROID_LOG_ERROR, "render: lock failed (%dx%d)", s->w, s->h);
+        return false;
     }
-
-    // 清屏:格式带 alpha 时全透明,否则退化为黑底(实测要点,方案 §3.3)
+    // 清屏:格式带 alpha 时全透明,否则退化为黑底(实测要点,方案 §3.3)。
+    // layer 已经缩到内容大小,这里的全清是几 MB 而不是 10MB。
     uint32_t bg = (buf.format == 1 /* WINDOW_FORMAT_RGBA_8888 */) ? 0u : 0xFF000000u;
     uint32_t *bits = reinterpret_cast<uint32_t *>(buf.bits);
     for (int y = 0; y < buf.height; ++y) {
@@ -228,65 +260,130 @@ static void render(const HudState &s) {
         for (int x = 0; x < buf.width; ++x)
             row[x] = bg;
     }
+    DrawCtx local = ctx;
+    local.buf = &buf;
+    if (draw_fn)
+        draw_fn(local, st);
+    if (0 != ANativeWindow_unlockAndPost(s->win)) {
+        ALOG(ANDROID_LOG_ERROR, "render: unlockAndPost failed (%dx%d)", s->w, s->h);
+        return false;
+    }
+    return true;
+}
 
-    bool any = s.showFov || s.showRange || s.showBox || s.showDot ||
-               (s.showInfo && s.textValid && !s.text.empty());
+// ---- 两个 layer 各自的绘制函数 ----
+
+static void draw_geometry(const DrawCtx &ctx, const HudState &s) {
+    const int cx = s.geoW / 2;
+    const int cy = s.geoH / 2;
+
+    // 颜色对齐 OverlayCanvasView 的 Paint:
+    // corner=不透明白,fov/dot=0xAA 白,box=0x99 白(灰阶+对称
+    // alpha 下 RGBA 与 ARGB 数值恰好相同,直接写)
+    const uint32_t colCorner = 0xFFFFFFFFu;
+    const uint32_t colFov = 0xAAFFFFFFu;
+    const uint32_t colDot = 0xAAFFFFFFu;
+    const uint32_t colBox = 0x99FFFFFFu;
+
     if (s.checkMode) {
         // 自检图案:洋红(0xFFFF00FF,ARGB/RGBA 数值相同),游戏画面
-        // 不会天然出现;中心 r=12 实心圆 + 半屏 1/4 大圆环,采样容易
-        DrawCtx ctx{&buf, s.geoW, s.geoH};
-        const int cx = s.geoW / 2;
-        const int cy = s.geoH / 2;
+        // 不会天然出现;中心 r=12 实心圆 + 半屏 1/4 圆环,采样容易
         const uint32_t magenta = 0xFFFF00FFu;
         fill_circle(ctx, cx, cy, 12, magenta);
         int r = (s.geoW < s.geoH ? s.geoW : s.geoH) / 4;
         circle(ctx, cx, cy, static_cast<float>(r), 4, magenta);
-    } else if (any) {
-        DrawCtx ctx{&buf, s.geoW, s.geoH};
-        const int cx = s.geoW / 2;
-        const int cy = s.geoH / 2;
-
-        // 颜色对齐 OverlayCanvasView 的 Paint:
-        // corner=不透明白,fov/dot=0xAA 白,box=0x99 白(灰阶+对称
-        // alpha 下 RGBA 与 ARGB 数值恰好相同,直接写)
-        const uint32_t colCorner = 0xFFFFFFFFu;
-        const uint32_t colFov = 0xAAFFFFFFu;
-        const uint32_t colDot = 0xAAFFFFFFu;
-        const uint32_t colBox = 0x99FFFFFFu;
-
-        // 中心点是独立开关(顺手修掉旧实现嵌在 showCaptureRange
-        // if 里的坑,方案 §5.3)
-        if (s.showDot)
-            fill_circle(ctx, cx, cy, 4, colDot);
-
-        if (s.showRange) {
-            int half = s.rangeRadius;
-            corner_box(ctx, cx - half, cy - half, cx + half, cy + half, colCorner);
-        }
-
-        if (s.showFov && s.fovRadius > 0)
-            circle(ctx, cx, cy, static_cast<float>(s.fovRadius), 2, colFov);
-
-        if (s.showBox) {
-            for (int i = 0; i < s.nBoxes; i++) {
-                const int *b = s.boxes[i];
-                const int th = 2;
-                hline(ctx, b[0], b[2], b[1], th, colBox);
-                hline(ctx, b[0], b[2], b[3], th, colBox);
-                vline(ctx, b[0], b[1], b[3], th, colBox);
-                vline(ctx, b[2], b[1], b[3], th, colBox);
-            }
-        }
-
-        if (s.showInfo)
-            blit_text(ctx, s);
+        return;
     }
 
-    if (0 != ANativeWindow_unlockAndPost(w))
-        ALOG(ANDROID_LOG_ERROR, "render: unlockAndPost failed");
+    // 中心点是独立开关(顺手修掉旧实现嵌在 showCaptureRange
+    // if 里的坑,方案 §5.3)
+    if (s.showDot)
+        fill_circle(ctx, cx, cy, 4, colDot);
+
+    if (s.showRange) {
+        int half = s.rangeRadius;
+        corner_box(ctx, cx - half, cy - half, cx + half, cy + half, colCorner);
+    }
+
+    if (s.showFov && s.fovRadius > 0)
+        circle(ctx, cx, cy, static_cast<float>(s.fovRadius), 2, colFov);
+
+    if (s.showBox) {
+        for (int i = 0; i < s.nBoxes; i++) {
+            const int *b = s.boxes[i];
+            const int th = 2;
+            hline(ctx, b[0], b[2], b[1], th, colBox);
+            hline(ctx, b[0], b[2], b[3], th, colBox);
+            vline(ctx, b[0], b[1], b[3], th, colBox);
+            vline(ctx, b[2], b[1], b[3], th, colBox);
+        }
+    }
+}
+
+static void draw_text(const DrawCtx &ctx, const HudState &s) {
+    // 顶部居中,与旧 TextView(dp(12)+状态栏)的落点对齐
+    blit_text(ctx, s, (s.geoW - s.textW) / 2, 40);
+}
+
+static void render(const HudState &s) {
+    if (s.geoW <= 0 || s.geoH <= 0)
+        return;
+
+    const int cx = s.geoW / 2, cy = s.geoH / 2;
+    const bool geoContent = s.checkMode || s.showFov || s.showRange || s.showBox || s.showDot;
+
+    if (geoContent) {
+        int w, h;
+        desired_geo_dims(s, &w, &h);
+        // 重建判定:不存在 / 采集几何变了(旋转) / 内容超出 / 大幅缩小 / 自检切换
+        bool need = !g_geo.win ||
+                    g_geo_created_gw != s.geoW || g_geo_created_gh != s.geoH ||
+                    w > g_geo.w || h > g_geo.h ||
+                    (w * 3 < g_geo.w * 2 && h * 3 < g_geo.h * 2) ||
+                    g_check_fullscreen != s.checkMode;
+        if (need) {
+            surface_destroy(&g_geo);
+            // 长大时多留 128px 余量:检测框在尺寸边界附近抖动时,
+            // 避免每帧"超一点→重建"的反复重建闪烁
+            int cw = w, ch = h;
+            if (!s.checkMode) {
+                if (cw < s.geoW) cw += 128;
+                if (ch < s.geoH) ch += 128;
+            }
+            if (0 != surface_create(&g_geo, cw, ch, cx - cw / 2, cy - ch / 2, "YolovaimHUD"))
+                return; // 本帧放弃,下帧重试
+            g_geo_created_gw = s.geoW;
+            g_geo_created_gh = s.geoH;
+            g_check_fullscreen = s.checkMode;
+        }
+        DrawCtx ctx{nullptr, s.geoW, s.geoH, g_geo.x, g_geo.y};
+        present_layer(&g_geo, ctx, draw_geometry, s);
+    } else if (g_geo.win) {
+        // 无几何内容直接撤层:连静态 layer 的合成/带宽都不留
+        surface_destroy(&g_geo);
+        g_check_fullscreen = false;
+    }
+
+    const bool textContent = s.showInfo && s.textValid && !s.text.empty();
+    if (textContent) {
+        const int tw = s.geoW < 960 ? s.geoW : 960;
+        const int th = 120;
+        if (!g_text.win || g_text_created_gw != s.geoW || g_text.w != tw) {
+            surface_destroy(&g_text);
+            if (0 != surface_create(&g_text, tw, th, (s.geoW - tw) / 2, 24, "YolovaimHUDText"))
+                return;
+            g_text_created_gw = s.geoW;
+        }
+        DrawCtx ctx{nullptr, s.geoW, s.geoH, g_text.x, g_text.y};
+        present_layer(&g_text, ctx, draw_text, s);
+    } else if (g_text.win) {
+        surface_destroy(&g_text);
+    }
 }
 
 static void render_thread_func() {
+    // HUD 是纯显示,比游戏/注入都次要:降优先级,绝不抢大核
+    setpriority(PRIO_PROCESS, 0, 10);
     while (true) {
         HudState local;
         {
@@ -312,23 +409,36 @@ int renderer_start() {
             return 0;
     }
 
-    int rc = surface_create();
-    if (0 != rc)
-        return rc;
-
-    int lw = 0, lh = 0;
-    surface_layer_dims(&lw, &lh);
-    {
-        std::lock_guard<std::mutex> lk(g_mutex);
-        // 默认采集空间 = layer 创建尺寸(= 当前屏幕方向的 layer-stack
-        // 尺寸);Kotlin 随后用 HUD_GEO 校准成 MediaProjection 的精确值。
-        g_state.geoW = lw;
-        g_state.geoH = lh;
+    if (!surface_symbols_ready()) {
+        ALOG(ANDROID_LOG_ERROR, "symbols not resolved, anti-capture unsupported on this ROM");
+        return -1;
     }
 
-    // 首帧空渲染:立即暴露 lock/post 失败,而不是等第一条状态命令。
-    // 此刻渲染线程还没起,无需加锁读。
-    render(g_state);
+    // 试建小 layer + 试一次 lock/post:立即暴露创建/绘制路径失败,
+    // 让 HUD_ON 的返回值对上层兜底决策仍然可靠(此刻还不知道采集
+    // 几何,真正的 layer 由渲染线程按需创建)。
+    {
+        HudSurface probe{};
+        int rc = surface_create(&probe, 64, 64, 0, 0, "YolovaimHUD_probe");
+        if (0 != rc)
+            return rc;
+        ANativeWindow_Buffer buf{};
+        bool ok = (0 == ANativeWindow_lock(probe.win, &buf, nullptr));
+        if (ok) {
+            uint32_t *bits = reinterpret_cast<uint32_t *>(buf.bits);
+            for (int y = 0; y < buf.height; ++y) {
+                uint32_t *row = bits + static_cast<size_t>(y) * buf.stride;
+                for (int x = 0; x < buf.width; ++x)
+                    row[x] = 0u;
+            }
+            ok = (0 == ANativeWindow_unlockAndPost(probe.win));
+        }
+        surface_destroy(&probe);
+        if (!ok) {
+            ALOG(ANDROID_LOG_ERROR, "probe lock/post failed");
+            return -3;
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lk(g_mutex);
@@ -337,7 +447,7 @@ int renderer_start() {
         g_dirty = false;
         g_render_thread = std::thread(render_thread_func);
     }
-    ALOG(ANDROID_LOG_INFO, "renderer started, geo=%dx%d", lw, lh);
+    ALOG(ANDROID_LOG_INFO, "renderer started (on-demand layers)");
     return 0;
 }
 
@@ -353,7 +463,11 @@ void renderer_stop() {
     g_cv.notify_all();
     if (local.joinable())
         local.join(); // 最多等完一次进行中的渲染
-    surface_destroy(); // join 之后再销毁,避免与渲染竞争窗口
+    // join 之后再销毁,避免与渲染竞争窗口
+    surface_destroy(&g_geo);
+    surface_destroy(&g_text);
+    g_geo_created_gw = g_geo_created_gh = g_text_created_gw = 0;
+    g_check_fullscreen = false;
     {
         std::lock_guard<std::mutex> lk(g_mutex);
         g_started = false;
@@ -372,8 +486,8 @@ void set_geo(int w, int h) {
     std::lock_guard<std::mutex> lk(g_mutex);
     if (g_state.geoW == w && g_state.geoH == h)
         return;
-    // 尺寸变化(通常来自旋转)→ 置脏,渲染线程发现 layer 尺寸与几何
-    // 不符会销毁重建 layer(见 render 开头)
+    // 尺寸变化(通常来自旋转)→ 置脏,渲染线程发现采集几何与 layer
+    // 创建时不符会销毁重建(尺寸+位置,见 render)
     g_state.geoW = w;
     g_state.geoH = h;
     g_dirty = true;
