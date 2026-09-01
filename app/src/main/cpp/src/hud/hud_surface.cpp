@@ -17,7 +17,8 @@
 namespace hud {
 
 static ANativeWindow *g_window = nullptr;
-static int g_orientation = 0;
+static int g_layer_w = 0;
+static int g_layer_h = 0;
 
 bool surface_symbols_ready() {
     return android::ANativeWindowCreator::SymbolsReady();
@@ -32,17 +33,21 @@ int surface_create() {
         return -1;
     }
 
-    surface_refresh_display_info();
-
-    // 尺寸 -1,-1 = 跟随当前显示器 layer-stack 空间;skipScrenshot=true
-    // 打防捕获标记;z=100 与 demo PoC 实测参数一致。
-    g_window = android::ANativeWindowCreator::Create("YolovaimHUD", -1, -1, true, 100);
+    // GetDisplayInfo 返回按当前屏幕方向换算后的逻辑尺寸(内部已处理
+    // orientation 交换),即 layer-stack 空间尺寸。用显式尺寸创建并记录,
+    // 供渲染线程判断"几何变了但 layer 还是旧尺寸"→ 触发重建。
+    auto info = android::ANativeWindowCreator::GetDisplayInfo();
+    // z=100:压过应用窗口和应用型悬浮窗,又不与系统关键层抢位置,
+    // 与 demo PoC 实测参数一致;skipScrenshot=true 打防捕获标记。
+    g_window = android::ANativeWindowCreator::Create("YolovaimHUD", info.width, info.height, true, 100);
     if (nullptr == g_window) {
         ALOG(ANDROID_LOG_ERROR, "layer/window creation failed");
         return -2;
     }
     ANativeWindow_acquire(g_window);
-    ALOG(ANDROID_LOG_INFO, "anti-capture layer created, orientation=%d", g_orientation);
+    g_layer_w = info.width;
+    g_layer_h = info.height;
+    ALOG(ANDROID_LOG_INFO, "anti-capture layer created %dx%d", g_layer_w, g_layer_h);
     return 0;
 }
 
@@ -52,6 +57,8 @@ void surface_destroy() {
     ANativeWindow_release(g_window);
     android::ANativeWindowCreator::Destroy(g_window);
     g_window = nullptr;
+    g_layer_w = 0;
+    g_layer_h = 0;
     ALOG(ANDROID_LOG_INFO, "anti-capture layer destroyed");
 }
 
@@ -59,13 +66,9 @@ ANativeWindow *surface_window() {
     return g_window;
 }
 
-int surface_orientation() {
-    return g_orientation;
-}
-
-void surface_refresh_display_info() {
-    auto info = android::ANativeWindowCreator::GetDisplayInfo();
-    g_orientation = info.orientation;
+void surface_layer_dims(int *w, int *h) {
+    *w = g_layer_w;
+    *h = g_layer_h;
 }
 
 } // namespace hud

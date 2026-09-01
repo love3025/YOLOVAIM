@@ -9,14 +9,17 @@
  *   推理信息    顶部居中 blit Kotlin 传来的 ARGB 位图
  * 用户在物理屏上看到的应与迁移前基本一致(改进方案.md §7)。
  *
- * 旋转:layer 生活在 layer-stack 空间(自然方向);采集空间(MediaProjection
- * 输出帧,= 用户看到的屏幕方向)到 layer 空间的旋转变换在 plot() 内完成。
- * 方向值来自 SurfaceFlinger DisplayState.orientation。
+ * 坐标系:真机 dumpsys SurfaceFlinger 实证(RMX3366 / A13,横屏时
+ * layerStackSpace=2400x1080 而 framebufferSpace=1080x2400+ROTATION_90):
+ * layer 生活在 layer-stack 逻辑空间,该空间**跟随屏幕旋转**,旋转发生在
+ * layer-stack → framebuffer 之间。而 MediaProjection 采集帧也是逻辑
+ * 方向 —— 所以采集坐标 == layer 坐标,恒等映射,无需任何旋转变换。
+ * 旋转要处理的只有一件事:layer 尺寸烙定于创建时,几何尺寸变化时
+ * 在渲染线程里销毁重建。
  */
 
 #include "hud_renderer.h"
 #include "hud_surface.h"
-#include "ANativeWindowCreator.h"
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -51,9 +54,8 @@ struct HudState {
     // 中心的准星)撞车 —— 首版用"白像素"判据就栽在这上面。
     bool checkMode = false;
 
-    int geoW = 0; // 采集空间宽高(MediaProjection 坐标系)
+    int geoW = 0; // 采集空间宽高(MediaProjection 坐标系,= layer-stack 空间)
     int geoH = 0;
-    int orientation = 0;
 
     int fovRadius = 50;
     int rangeRadius = 300;
@@ -87,34 +89,16 @@ static bool g_text_in_begin = false;
 
 struct DrawCtx {
     ANativeWindow_Buffer *buf;
-    int orientation;
-    int gw, gh; // 采集空间尺寸
+    int gw, gh; // 采集空间尺寸(== layer-stack 尺寸,恒等映射)
 };
 
-// 采集空间 → layer 空间。方向 1/3 时 layer 尺寸为 (gh, gw)。
-// 翻转轴用 gw-1-x / gh-1-y(不是 gw-x):x=0 是有效坐标,映射到 gw 会
-// 落到 layer 外被裁掉 —— 检测框贴边时会缺 1px。
-// 注意:90° 系两个方向的选取基于 Android 旋转约定推导,真机验收时
-// 若检测框出现镜像/错位,交换 case 1 / case 3 的公式即可。
+// 采集空间 → layer 空间:恒等。见文件头注释 —— layer-stack 空间跟随
+// 屏幕旋转,旋转发生在 layer-stack → framebuffer 之间,与采集/绘制
+// 坐标无关。保留函数是为把这一结论钉在调用点上。
 static inline void xform(const DrawCtx &c, int x, int y, int *lx, int *ly) {
-    switch (c.orientation) {
-    case 1:
-        *lx = y;
-        *ly = c.gw - 1 - x;
-        break;
-    case 3:
-        *lx = c.gh - 1 - y;
-        *ly = x;
-        break;
-    case 2:
-        *lx = c.gw - 1 - x;
-        *ly = c.gh - 1 - y;
-        break;
-    default:
-        *lx = x;
-        *ly = y;
-        break;
-    }
+    (void)c;
+    *lx = x;
+    *ly = y;
 }
 
 static inline void plot(const DrawCtx &c, int x, int y, uint32_t rgba) {
@@ -211,6 +195,21 @@ static void blit_text(const DrawCtx &c, const HudState &s) {
 }
 
 static void render(const HudState &s) {
+    // layer 尺寸烙定于创建时(方案 §3.3)。几何尺寸变化(旋转)时在渲染
+    // 线程里销毁重建:surface_create 用当前 layer-stack 尺寸,重建后与
+    // 新几何一致。重建失败则放弃本帧渲染。
+    int lw = 0, lh = 0;
+    surface_layer_dims(&lw, &lh);
+    if (lw != s.geoW || lh != s.geoH) {
+        ALOG(ANDROID_LOG_INFO, "geo changed %dx%d -> %dx%d, recreating layer",
+             lw, lh, s.geoW, s.geoH);
+        surface_destroy();
+        if (0 != surface_create()) {
+            ALOG(ANDROID_LOG_ERROR, "layer recreation failed, skip frame");
+            return;
+        }
+    }
+
     ANativeWindow *w = surface_window();
     if (nullptr == w)
         return;
@@ -235,7 +234,7 @@ static void render(const HudState &s) {
     if (s.checkMode) {
         // 自检图案:洋红(0xFFFF00FF,ARGB/RGBA 数值相同),游戏画面
         // 不会天然出现;中心 r=12 实心圆 + 半屏 1/4 大圆环,采样容易
-        DrawCtx ctx{&buf, s.orientation, s.geoW, s.geoH};
+        DrawCtx ctx{&buf, s.geoW, s.geoH};
         const int cx = s.geoW / 2;
         const int cy = s.geoH / 2;
         const uint32_t magenta = 0xFFFF00FFu;
@@ -243,7 +242,7 @@ static void render(const HudState &s) {
         int r = (s.geoW < s.geoH ? s.geoW : s.geoH) / 4;
         circle(ctx, cx, cy, static_cast<float>(r), 4, magenta);
     } else if (any) {
-        DrawCtx ctx{&buf, s.orientation, s.geoW, s.geoH};
+        DrawCtx ctx{&buf, s.geoW, s.geoH};
         const int cx = s.geoW / 2;
         const int cy = s.geoH / 2;
 
@@ -317,15 +316,14 @@ int renderer_start() {
     if (0 != rc)
         return rc;
 
-    surface_refresh_display_info();
-    auto info = android::ANativeWindowCreator::GetDisplayInfo();
+    int lw = 0, lh = 0;
+    surface_layer_dims(&lw, &lh);
     {
         std::lock_guard<std::mutex> lk(g_mutex);
-        g_state.orientation = info.orientation;
-        // 默认采集空间 = 当前屏幕方向下的尺寸;Kotlin 随后用 HUD_GEO
-        // 校准成 MediaProjection 的精确值。
-        g_state.geoW = info.width;
-        g_state.geoH = info.height;
+        // 默认采集空间 = layer 创建尺寸(= 当前屏幕方向的 layer-stack
+        // 尺寸);Kotlin 随后用 HUD_GEO 校准成 MediaProjection 的精确值。
+        g_state.geoW = lw;
+        g_state.geoH = lh;
     }
 
     // 首帧空渲染:立即暴露 lock/post 失败,而不是等第一条状态命令。
@@ -339,8 +337,7 @@ int renderer_start() {
         g_dirty = false;
         g_render_thread = std::thread(render_thread_func);
     }
-    ALOG(ANDROID_LOG_INFO, "renderer started, geo=%dx%d orient=%d",
-         info.width, info.height, info.orientation);
+    ALOG(ANDROID_LOG_INFO, "renderer started, geo=%dx%d", lw, lh);
     return 0;
 }
 
@@ -372,14 +369,13 @@ void renderer_stop() {
 void set_geo(int w, int h) {
     if (w <= 0 || h <= 0)
         return;
-    surface_refresh_display_info(); // 采集尺寸变化通常伴随旋转
     std::lock_guard<std::mutex> lk(g_mutex);
-    if (g_state.geoW == w && g_state.geoH == h &&
-        g_state.orientation == surface_orientation())
+    if (g_state.geoW == w && g_state.geoH == h)
         return;
+    // 尺寸变化(通常来自旋转)→ 置脏,渲染线程发现 layer 尺寸与几何
+    // 不符会销毁重建 layer(见 render 开头)
     g_state.geoW = w;
     g_state.geoH = h;
-    g_state.orientation = surface_orientation();
     g_dirty = true;
     g_cv.notify_all();
 }

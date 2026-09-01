@@ -1,11 +1,12 @@
 /*
  * hud_surface.h — 防捕获 HUD layer 的生命周期管理。
  *
- * 只负责 layer 本身:符号探测、创建(带防捕获标记)、销毁、显示器信息。
+ * 只负责 layer 本身:符号探测、创建(带防捕获标记)、销毁、当前尺寸。
  * 画什么、什么时候画是 hud_renderer 的事。
  *
- * layer 尺寸取当前显示器 layer-stack 空间(自然方向,竖屏手机上即竖屏
- * 尺寸),不随屏幕旋转重建 —— 旋转由 hud_renderer 的坐标变换吸收。
+ * 尺寸说明:创建时取当前显示器 layer-stack 空间的尺寸(跟随屏幕旋转,
+ * 真机实证见 hud_renderer.cpp 文件头)。layer 尺寸烙定于创建时 ——
+ * 旋转后需要调用方(render 线程)销毁重建。
  */
 
 #ifndef HUD_SURFACE_H // !HUD_SURFACE_H
@@ -31,12 +32,9 @@ void surface_destroy();
 // 当前 layer 的窗口。未创建时为 nullptr。
 ANativeWindow *surface_window();
 
-// 最近一次查询到的显示器方向(0/1/2/3,对应 SurfaceFlinger Rotation)。
-// surface_create / surface_refresh_display_info 时更新。
-int surface_orientation();
-
-// 重新查询显示器方向(屏幕旋转后调用)。
-void surface_refresh_display_info();
+// 当前 layer 创建时的尺寸(layer-stack 空间,跟随屏幕方向)。
+// 未创建时返回 0x0。
+void surface_layer_dims(int *w, int *h);
 
 } // namespace hud
 
