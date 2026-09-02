@@ -57,7 +57,7 @@
 
 namespace hud {
 
-static const int MAX_BOXES = 16;
+static const int MAX_BOXES = 20; // 与 FloatService.detectionBuffer 一致,兜底路线画多少这里就画多少
 
 // 线条最粗 4px,且 corner_box/检测框的右下边会从坐标处再往外画 th-1 px,
 // 包围盒统一留这个余量。
@@ -189,20 +189,37 @@ static void vline(const DrawCtx &c, int x, int y1, int y2, int thickness, uint32
             plot(c, x + dx, y, rgba);
 }
 
-// 参数化圆环:比包围盒逐像素判定快一个数量级(动态 FOV 动画期间
-// fovRadius 每帧都变,这里在热路径上)。
-static void circle(const DrawCtx &c, float cx, float cy, float r, int thickness, uint32_t rgba) {
-    if (r <= 0.f)
+// 圆环用扫描线填充圆环带,不用参数化打点。
+//
+// 原来的实现是 steps = 6r 个角度打点,而周长是 2πr ≈ 6.28r —— 步数天生
+// 少于像素数,圆环上本来就有零星 1px 缺口;更要命的是 steps 上限 4000,
+// r 超过约 640(FOV 滑条能拉到的范围内)之后圆环直接变成**虚线**。
+// 扫描线版按每行解出内外半径的 x 跨度直接填,无缺口、无三角函数,
+// 而且几何上就是"以 r 为中心线、宽 thickness 的描边",与兜底
+// Canvas.drawCircle(strokeWidth=2) 的口径一致。
+static void circle(const DrawCtx &c, float cxf, float cyf, float r, int thickness, uint32_t rgba) {
+    if (r <= 0.f || thickness <= 0)
         return;
-    int steps = static_cast<int>(r * 6.f);
-    if (steps < 90) steps = 90;
-    if (steps > 4000) steps = 4000;
-    for (int i = 0; i < steps; i++) {
-        float a = 2.f * static_cast<float>(M_PI) * i / steps;
-        for (int k = 0; k < thickness; k++) {
-            float rr = r + k - (thickness - 1) * 0.5f;
-            plot(c, static_cast<int>(cx + cosf(a) * rr),
-                      static_cast<int>(cy + sinf(a) * rr), rgba);
+    const int cx = static_cast<int>(cxf);
+    const int cy = static_cast<int>(cyf);
+    const float ro = r + thickness * 0.5f;
+    const float ri = r - thickness * 0.5f;
+    const float ro2 = ro * ro;
+    const float ri2 = (ri > 0.f) ? ri * ri : -1.f;
+    const int R = static_cast<int>(ceilf(ro));
+    for (int dy = -R; dy <= R; dy++) {
+        const float fy = static_cast<float>(dy);
+        const float to = ro2 - fy * fy;
+        if (to < 0.f)
+            continue;
+        const int xo = static_cast<int>(sqrtf(to));
+        const float ti = ri2 - fy * fy;
+        if (ti > 0.f) {
+            const int xi = static_cast<int>(sqrtf(ti));
+            hline(c, cx - xo, cx - xi, cy + dy, 1, rgba);
+            hline(c, cx + xi, cx + xo, cy + dy, 1, rgba);
+        } else {
+            hline(c, cx - xo, cx + xo, cy + dy, 1, rgba);
         }
     }
 }

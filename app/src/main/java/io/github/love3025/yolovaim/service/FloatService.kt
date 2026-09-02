@@ -676,7 +676,7 @@ class FloatService : Service() {
 
     private fun sendHudBoxes(dets: List<DetectionInfo>) {
         if (!showDetectionBox) return // 开关关闭 → 推理热路径零 IPC(验收项)
-        val n = dets.size.coerceAtMost(16) // daemon 端协议上限
+        val n = dets.size.coerceAtMost(20) // daemon 端协议上限,与 detectionBuffer 等长
         if (n == 0) {
             // 清屏也要发一次,否则上一帧的框留在 layer 上
             if (hudBoxesSent) { hud()?.hudBoxes(IntArray(0)); hudBoxesSent = false }
@@ -726,7 +726,12 @@ class FloatService : Service() {
             // 这里画 —— 只把抗锯齿覆盖率传下去,由 daemon 按 fg/bg 合成,
             // 结果与旧的"整张 ARGB 位图"逐位一致。
             val density = resources.displayMetrics.density
-            hudInfoPaint.textSize = 11f * density
+            // 兜底是 TextView.textSize = 11f,单位 sp —— 跟随系统字体大小设置。
+            // 用 density 会把字体缩放钉死在 1.0,系统字体调大过的机器上两条
+            // 路线字号就不一样了,所以字号用 scaledDensity、内边距用 density
+            // (dp(10)/dp(3) 本来就是 dp)。
+            @Suppress("DEPRECATION")
+            hudInfoPaint.textSize = 11f * resources.displayMetrics.scaledDensity
             val fm = hudInfoPaint.fontMetrics
             val padH = (10 * density).toInt(); val padV = (3 * density).toInt()
             val tw = kotlin.math.ceil(hudInfoPaint.measureText(text)).toInt()

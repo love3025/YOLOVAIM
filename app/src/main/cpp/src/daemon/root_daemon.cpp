@@ -36,7 +36,7 @@
  *     HUD_GEO <w> <h>              capture-space size (MediaProjection frame)
  *     HUD_FOV <r>
  *     HUD_RANGE <r>
- *     HUD_BOXES <n> <x1 y1 x2 y2>...   (n <= 16, int coords)
+ *     HUD_BOXES <n> <x1 y1 x2 y2>...   (n <= 20, int coords)
  *     HUD_TEXT_MASK <w> <h> <fg-hex> <bg-hex> <nbytes>
  *                                  header line, then exactly <nbytes> raw
  *                                  bytes follow on stdin: an 8-bit alpha
@@ -278,9 +278,9 @@ static void handle_command(const char* cmd) {
         long n = strtol(p, &end, 10);
         p = end;
         if (n < 0) n = 0;
-        if (n > 16) n = 16;
-        int coords[64];
-        for (int i = 0; i < n * 4 && i < 64; i++) {
+        if (n > 20) n = 20;
+        int coords[80];
+        for (int i = 0; i < n * 4 && i < 80; i++) {
             long v = strtol(p, &end, 10);
             p = end;
             coords[i] = (int)v;

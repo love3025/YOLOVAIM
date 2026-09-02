@@ -233,7 +233,7 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
 
     override fun hudBoxes(rects: IntArray) {
         val n = rects.size / 4
-        // 16 框上限与 daemon 端一致;每行 ~300 字符,远低于 4096 的行缓冲
+        // 20 框上限与 daemon 端一致;每行 ~360 字符,远低于 4096 的行缓冲
         val sb = StringBuilder(32 + n * 24)
         sb.append("HUD_BOXES ").append(n)
         for (v in rects) sb.append(' ').append(v)
