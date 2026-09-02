@@ -1,0 +1,85 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ byo-model, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "cmake;3.22.1"
+
+      - name: Report toolchain
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+          echo "--- installed NDKs ---"
+          ls -1 "$ANDROID_HOME/ndk" 2>/dev/null || echo "(none under \$ANDROID_HOME/ndk)"
+          java -version
+
+      # 仓库里配的是阿里云 maven + 腾讯云 gradle 镜像（上游作者在国内）。
+      # GitHub runner 在境外走这些镜像会非常慢甚至超时，CI 里临时换回官方源。
+      # 只改 checkout 出来的副本，不动仓库本身，本地开发行为不变。
+      - name: Use upstream Gradle / Maven endpoints
+        run: |
+          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          sed -i '/maven.aliyun.com/d' settings.gradle.kts
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx5120m -Dfile.encoding=UTF-8/' gradle.properties
+          echo "--- settings.gradle.kts ---"
+          cat settings.gradle.kts
+
+      # 上游把 gradlew 提交成 100644，checkout 出来没有执行位。仓库里已经
+      # 用 update-index --chmod=+x 修了，这里再兜一次，免得别的分支上又踩到。
+      - name: Build debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Report APK
+        if: success()
+        run: ls -lh app/build/outputs/apk/debug/
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            app/build/reports/
+            app/.cxx/
+          if-no-files-found: ignore

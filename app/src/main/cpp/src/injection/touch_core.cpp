@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -24,11 +25,21 @@
 #define LOG_TAG "TouchCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "AimbotLatency", __VA_ARGS__)
+#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACELAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
+#else
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 #else
 #define LOGD(...) do { fprintf(stderr, "D/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #define LOGE(...) do { fprintf(stderr, "E/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
-#define LOGLAT(...) do { fprintf(stderr, "D/AimbotLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#define LOGLAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACELAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#else
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 #endif
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -199,23 +210,53 @@ static void upload() {
     pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeFingerCount == 4 ? 1 : 0);
     pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeFingerCount >= 5 ? 1 : 0);
     pushEvent(count, EV_SYN, SYN_REPORT, 0);
+    // This log used to fire on every successful uinput write — i.e. once per
+    // aim frame — and it runs inside the injector process, in the exact window
+    // where the caller was blocked waiting for the round-trip. It put a logd
+    // socket write on the injection critical path.
+#ifdef YOLOVAIM_TRACE
     long long tWriteStart = touchTimeUs();
+#endif
     int wr = write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
-    long long tWriteEnd = touchTimeUs();
     if (wr < 0) {
         LOGE("upload: write failed errno=%d", errno);
     } else {
-        LOGLAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+#ifdef YOLOVAIM_TRACE
+        long long tWriteEnd = touchTimeUs();
+        LOGTRACELAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+#endif
     }
 }
 
 // ─── Zone detection ─────────────────────────────────────────────────
 
+// 开火区上升沿计数。
+//
+// updateZones() 挂在每个 SYN_REPORT 上，也就是 120-240Hz 的真实触摸事件率；
+// 应用侧却只能按推理帧率(30-60Hz)查 g_fire_zone.finger_inside 这个电平。
+// 于是半自动连点被按「按压时长」而非「点击次数」计量：30fps 下短于 33ms 的
+// 点击会整帧落空，那一枪的压枪根本没算，而漏与不漏取决于点击与推理帧的相位。
+// 在这一层数上升沿，240Hz 下 15ms 的点击也不会丢。
+//
+// g_fire_prev 只在 updateZones() 里读写，而 updateZones() 的调用方
+// (readerThread) 始终持有 g_mutex，所以普通 int 即可。
+// g_fire_taps 则要被 IPC 线程以读-改-写方式取走(consume)，与 reader 线程的
+// 自增并发，必须是原子的 —— 现有的 touch_is_finger_in_fire_zone() 不加锁是
+// 因为它只是单次纯读，consume 没这个豁免。
+static std::atomic<int> g_fire_taps{0};
+static int g_fire_prev = 0;
+
+static inline void countFireEdgeLocked() {
+    const int now = g_fire_zone.finger_inside;
+    if (now && !g_fire_prev) g_fire_taps.fetch_add(1, std::memory_order_relaxed);
+    g_fire_prev = now;
+}
+
 static void updateZones() {
     g_trigger_zone.finger_inside = 0;
     g_fire_zone.finger_inside = 0;
     g_joystick_zone.finger_inside = 0;
-    if (g_devices.empty()) return;
+    if (g_devices.empty()) { countFireEdgeLocked(); return; }
 
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
@@ -241,6 +282,8 @@ static void updateZones() {
             if (pointInZone(g_joystick_zone, sx, sy)) g_joystick_zone.finger_inside = 1;
         }
     }
+
+    countFireEdgeLocked();
 }
 
 // ─── Device scanning ────────────────────────────────────────────────
@@ -298,8 +341,11 @@ static bool detectTouchDeviceViaGetevent(char* outPath, size_t pathSize,
             hasSlot = hasX = hasY = false;
             maxX = maxY = 0;
         }
-        // Skip our own previously-created virtual device
-        if (strstr(line, "name:") && strstr(line, "Aimbot")) {
+        // NOTE: 遗留过滤器。早期版本把虚拟设备命名为品牌名，此处按名字跳过自己。
+        // 现在设备名克隆自真实触摸设备（见下方 EVIOCGNAME 分支）或为随机串，
+        // 所以这个条件实际已经匹配不到任何东西。改名时一并更新以免留下旧品牌，
+        // 行为未变；要真正修复应改为按 uinput fd / devpath 排除自身。
+        if (strstr(line, "name:") && strstr(line, "YOLOVAIM")) {
             hasSlot = hasX = hasY = false;
             maxX = maxY = 0;
         }
@@ -795,6 +841,14 @@ void touch_set_joystick_zone(int l, int t, int r, int b) { g_joystick_zone = {l,
 
 bool touch_is_finger_in_trigger_zone(void)  { return g_trigger_zone.finger_inside; }
 bool touch_is_finger_in_fire_zone(void)     { return g_fire_zone.finger_inside; }
+
+// 一次往返同时取走电平和点击数：(taps << 1) | level。
+// 拆成两条命令会让推理热路径每帧多一次阻塞式 IPC 往返，正是 4ee9e9e 刚
+// 消除掉的那类浪费(execCmd 是 write + readLine，且在 cmdLock 上串行)。
+int touch_consume_fire_state(void) {
+    const int taps = g_fire_taps.exchange(0, std::memory_order_relaxed);
+    return (taps << 1) | (g_fire_zone.finger_inside ? 1 : 0);
+}
 bool touch_is_finger_in_joystick_zone(void) { return g_joystick_zone.finger_inside; }
 
 bool touch_lift_joystick_finger(void) {

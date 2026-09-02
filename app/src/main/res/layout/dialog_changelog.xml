@@ -26,6 +26,38 @@
         android:orientation="vertical"
         android:layout_marginTop="24dp">
 
+        <!-- v1.3.0 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.3.0"
+                android:textSize="16sp"
+                android:textColor="?attr/colorOnSurface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2026-09-01"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:layout_marginTop="2dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="• 防捕获 HUD：FOV 圈/截取框/中心点/检测框/推理信息迁移到 Native 层显示，不再进入识别画面\n• 识别结果不再受自身 UI 干扰，检测框回路的正反馈污染彻底消除\n• 首次启用自动校验防捕获是否生效，失效时自动回退旧渲染\n• 中心点改为独立开关，可单独开启\n• 无 root 环境自动使用兼容渲染，功能不缺失"
+                android:textSize="14sp"
+                android:textColor="?attr/colorOnSurface"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
         <!-- v1.2.1 -->
         <LinearLayout
             android:layout_width="match_parent"

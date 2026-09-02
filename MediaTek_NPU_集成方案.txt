@@ -177,7 +177,7 @@ void runInference(LiteRtCompiledModel compiledModel,
 ----------------
 
 ```java
-package team.maodie.aimbot;
+package io.github.love3025.yolovaim;
 
 public class LiteRtNativeJni {
     private static Throwable loadError;
@@ -397,7 +397,7 @@ LiteRT 兼容 TFLite 模型格式，现有的 .tflite 文件可以直接使用:
 -----------------
 
 方案1: 放在 assets 目录，运行时复制到内部存储
-方案2: 直接放在内部存储 /sdcard/Android/data/team.maodie.aimbot/files/models/
+方案2: 直接放在内部存储 /sdcard/Android/data/io.github.love3025.yolovaim/files/models/
 
 LiteRT 的 LiteRtCreateModelFromFile 需要文件路径，不能直接读 assets。
 
@@ -439,7 +439,7 @@ app/src/main/
 │       ├── yolov8n_float_192.tflite
 │       └── yolov8n_int8_192_calibrated.tflite
 └── java/
-    └── team/maodie/aimbot/
+    └── io/github/love3025/yolovaim/
         ├── LiteRtNativeJni.java
         └── MediaTekNpuInference.java
 

@@ -12,7 +12,7 @@
 
 // ═════════════════════════════════════════════════════════════════════
 //  JNI Interface
-//  Package: team.maodie.aimbot.service.RemoteInjectorService
+//  Package: io.github.love3025.yolovaim.service.RemoteInjectorService
 // ═════════════════════════════════════════════════════════════════════
 
 extern "C" {
@@ -20,7 +20,7 @@ extern "C" {
 // ─── Lifecycle ──────────────────────────────────────────────────────
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrInit(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrInit(
     JNIEnv*, jclass, jint screenW, jint screenH)
 {
     bool ok = inputmgr_init(screenW, screenH);
@@ -29,7 +29,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrInit(
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrClose(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrClose(
     JNIEnv*, jclass)
 {
     inputmgr_close();
@@ -39,21 +39,21 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrClose(
 // ─── Grab control ───────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrGrab(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrGrab(
     JNIEnv*, jclass)
 {
     inputmgr_grab();
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrUngrab(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrUngrab(
     JNIEnv*, jclass)
 {
     inputmgr_ungrab();
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrIsGrabbed(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsGrabbed(
     JNIEnv*, jclass)
 {
     return inputmgr_is_grabbed() ? JNI_TRUE : JNI_FALSE;
@@ -62,7 +62,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrIsGrabbed(
 // ─── Blocking poll ──────────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrPollAndUpdate(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrPollAndUpdate(
     JNIEnv*, jclass, jint timeoutMs)
 {
     return inputmgr_poll_and_update(timeoutMs);
@@ -72,7 +72,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrPollAndUpdat
 // Returns int[N*4]: [id0, x0, y0, isDown0, id1, x1, y1, isDown1, ...]
 
 JNIEXPORT jintArray JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeReadPointers(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeReadPointers(
     JNIEnv* env, jclass)
 {
     static constexpr int MAX_PTR = 16;
@@ -96,28 +96,28 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeReadPointers(
 // ─── Device info ────────────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrGetDeviceId(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrGetDeviceId(
     JNIEnv*, jclass)
 {
     return inputmgr_get_device_id();
 }
 
 JNIEXPORT jint JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrGetMaxX(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrGetMaxX(
     JNIEnv*, jclass)
 {
     return inputmgr_get_max_x();
 }
 
 JNIEXPORT jint JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrGetMaxY(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrGetMaxY(
     JNIEnv*, jclass)
 {
     return inputmgr_get_max_y();
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrHasSlotSupport(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrHasSlotSupport(
     JNIEnv*, jclass)
 {
     return inputmgr_has_slot_support() ? JNI_TRUE : JNI_FALSE;
@@ -126,7 +126,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrHasSlotSuppo
 // ─── Screen params ──────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetScreenParams(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrSetScreenParams(
     JNIEnv*, jclass, jint w, jint h, jint rotation)
 {
     inputmgr_set_screen_params(w, h, rotation);
@@ -136,7 +136,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetScreenPar
 // ─── Zone configuration ────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetTriggerZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrSetTriggerZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
 {
     inputmgr_set_trigger_zone(l, t, r, b);
@@ -144,7 +144,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetTriggerZo
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetFireZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrSetFireZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
 {
     inputmgr_set_fire_zone(l, t, r, b);
@@ -152,7 +152,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetFireZone(
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetJoystickZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrSetJoystickZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
 {
     inputmgr_set_joystick_zone(l, t, r, b);
@@ -160,28 +160,35 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrSetJoystickZ
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrIsFingerInTriggerZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsFingerInTriggerZone(
     JNIEnv*, jclass)
 {
     return inputmgr_is_finger_in_trigger_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrIsFingerInFireZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsFingerInFireZone(
     JNIEnv*, jclass)
 {
     return inputmgr_is_finger_in_fire_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jint JNICALL
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrConsumeFireState(
+    JNIEnv*, jclass)
+{
+    return (jint)inputmgr_consume_fire_state();
+}
+
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrIsFingerInJoystickZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrIsFingerInJoystickZone(
     JNIEnv*, jclass)
 {
     return inputmgr_is_finger_in_joystick_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeInputmgrLiftJoystickFinger(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeInputmgrLiftJoystickFinger(
     JNIEnv*, jclass)
 {
     return inputmgr_lift_joystick_finger() ? JNI_TRUE : JNI_FALSE;

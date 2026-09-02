@@ -4,15 +4,15 @@ plugins {
 }
 
 android {
-    namespace = "team.maodie.aimbot"
+    namespace = "io.github.love3025.yolovaim"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "team.maodie.aimbot"
+        applicationId = "io.github.love3025.yolovaim"
         minSdk = 31
         targetSdk = 35
-        versionCode = 21
-        versionName = "1.2.1"
+        versionCode = 22
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("aimbot")
+project("yolovaim")
 
 set(QNN_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib)
 set(QNN_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -28,9 +28,9 @@ add_library(tensorflowlite_gpu_jni SHARED IMPORTED)
 set_target_properties(tensorflowlite_gpu_jni PROPERTIES
     IMPORTED_LOCATION ${QNN_LIB_DIR}/libtensorflowlite_gpu_jni.so)
 
-# Compile aimbot (JNI bridge + inference engines)
-add_library(aimbot SHARED
-    src/inference/aimbot.cpp
+# Compile yolovaim (JNI bridge + inference engines)
+add_library(yolovaim SHARED
+    src/inference/yolovaim.cpp
     src/inference/ncnn_engine.cpp
     src/inference/litert_engine.cpp
     src/inference/qnn_engine.cpp
@@ -47,11 +47,18 @@ add_library(uinput_inject SHARED src/injection/uinput_inject.cpp)
 target_link_libraries(uinput_inject touch_core android log)
 
 # Root daemon (standalone binary for su execution, packaged as .so for Gradle)
-add_executable(root_daemon src/daemon/root_daemon.cpp)
-target_include_directories(root_daemon PRIVATE src/injection)
-target_link_libraries(root_daemon touch_core android log)
+# The HUD module is compiled in: it talks to SurfaceFlinger through runtime
+# dlopen/dlsym, so there is no link-time dependency on libgui.
+add_executable(root_daemon
+    src/daemon/root_daemon.cpp
+    src/hud/hud_surface.cpp
+    src/hud/hud_renderer.cpp)
+target_include_directories(root_daemon PRIVATE src/injection src/hud)
+target_link_libraries(root_daemon touch_core android log dl)
 set_target_properties(root_daemon PROPERTIES
     OUTPUT_NAME "libroot_daemon.so"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
 )
 
 # InputManager evdev reader (for InputManager injection mode)
@@ -61,12 +68,12 @@ target_link_libraries(inputmgr_core android log)
 add_library(inputmgr_inject SHARED src/injection/inputmgr_jni.cpp)
 target_link_libraries(inputmgr_inject inputmgr_core android log)
 
-target_include_directories(aimbot PRIVATE
+target_include_directories(yolovaim PRIVATE
         ${QNN_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include/qnn)
 
 # Link TFLite and QNN libraries
-target_link_libraries(aimbot
+target_link_libraries(yolovaim
         libQnnHtp
         libQnnSystem
         libQnnTFLiteDelegate
@@ -122,7 +129,7 @@ find_package(OpenMP REQUIRED)
 find_package(Vulkan REQUIRED)
 
 # Link NCNN with all dependencies (including Vulkan for GPU acceleration)
-target_link_libraries(aimbot
+target_link_libraries(yolovaim
         ncnn
         glslang
         SPIRV
@@ -135,4 +142,4 @@ target_link_libraries(aimbot
         Vulkan::Vulkan
         android
         log)
-target_include_directories(aimbot PRIVATE ${NCNN_INCLUDE_DIR})
+target_include_directories(yolovaim PRIVATE ${NCNN_INCLUDE_DIR})
