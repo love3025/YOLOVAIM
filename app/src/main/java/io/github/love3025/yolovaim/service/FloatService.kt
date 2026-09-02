@@ -36,6 +36,7 @@ import io.github.love3025.yolovaim.injector.InjectorCallback
 import io.github.love3025.yolovaim.injector.HudClient
 import io.github.love3025.yolovaim.inference.JniCallBack
 import io.github.love3025.yolovaim.util.ProjectionHolder
+import io.github.love3025.yolovaim.util.allowDisplayCutout
 
 class FloatService : Service() {
 
@@ -1725,7 +1726,7 @@ class FloatService : Service() {
         }
     }
 
-    private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT)
+    private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT).allowDisplayCutout()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val ch = NotificationChannel(CH_ID, "YOLOVAIM", NotificationManager.IMPORTANCE_LOW); (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch) } }

@@ -15,6 +15,7 @@ import io.github.love3025.yolovaim.view.AreaSettingsView
 import io.github.love3025.yolovaim.view.GuiPanelView
 import io.github.love3025.yolovaim.model.AreaConfig
 import io.github.love3025.yolovaim.util.ProjectionHolder
+import io.github.love3025.yolovaim.util.allowDisplayCutout
 
 class OverlayManager(
     private val context: Context,
@@ -62,7 +63,7 @@ class OverlayManager(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        )
+        ).allowDisplayCutout()
         p.gravity = Gravity.TOP or Gravity.START
         p.x = screenWidth() / 2 - size / 2
         p.y = screenHeight() / 2 - size / 2
@@ -106,7 +107,7 @@ class OverlayManager(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
-        )
+        ).allowDisplayCutout()
         areaSettingsView?.apply {
             onConfirm = { areas ->
                 onAreaSettingsConfirm?.invoke(areas)
@@ -163,7 +164,7 @@ class OverlayManager(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        )
+        ).allowDisplayCutout()
         p.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
         // Small inset from the top so the line doesn't collide with the
         // status-bar pill on devices that keep it visible (e.g. ColorOS).
