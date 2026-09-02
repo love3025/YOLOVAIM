@@ -39,6 +39,46 @@ class AimController(
         private const val HOLD_RATE_SLOW = 30f
         private const val HOLD_RATE_FAST = 150f
         /**
+         * 连点下压速度：每枪 kick 的落位时间常数 τ(ms)。
+         * 速度 0% -> 73ms，**60% -> 36.4ms**，100% -> 12ms。
+         *
+         * 60% 那一档恰好等于历史上写死的 `pow(0.4, dt*30)` 的等效 τ
+         * (-1/(30·ln0.4) = 36.4ms)，而 recoilTapSpeed 的默认值就是 0.6 ——
+         * 所以老配置升级后连点手感不变。
+         *
+         * 快端的实测代价(30fps，一帧 33ms)：τ=36ms 首帧交付 60%、τ=20ms 81%、
+         * τ=12ms 94%。也就是说 100% 档基本是把一枪的量单帧打满 = 阶跃输入，而
+         * Y 轴的 kp/kd 被 kpYRatio/kdYRatio 特意压低过(抑制纵向震荡)，可能会抖。
+         * 这一档仍然留着：该由使用者在真机上判断，不该由代码替他封掉。面板提示
+         * 里标了这件事。
+         */
+        private const val TAP_TAU_SLOW_MS = 73f
+        private const val TAP_TAU_FAST_MS = 12f
+        /**
+         * 回落衰减速率常数(1/s) = 原来 `pow(0.7, dt*30)` 的等价指数形式
+         * (30·ln0.7 = -10.70024)。换 exp 是纯性能：pow 一般按 exp(y·log x) 实现，
+         * 实测(aarch64 OpenJDK) 97.3ns vs 19.3ns，float32 下偏差 3e-7。
+         */
+        private const val DECAY_EXP_PER_SEC = -10.70024f
+        /**
+         * 长按斜坡的起步门限(ms)。按下不足此时长的算"点一下"，只走 tap kick，
+         * 不上斜坡。
+         *
+         * 这道门限把**按压时长**挡在连点通路之外，是「连点下压力度」那句"与按住
+         * 多久无关"能成立的前提。上游的 held 是"手指在开火区"的电平，连点时那
+         * 几十毫秒它同样是 true，斜坡便跟着跑，每枪实得 `kick + rate*按压时长`。
+         * 后果是点得快(60ms)每枪压得少、点得慢(150ms)每枪压得多 —— 方向正好是
+         * 反的，决定总爬升的是开枪次数而不是按压时长；而且这是条不可调的噪声，
+         * 仿真实测它能让每枪的量随按压时长漂移 38%。
+         *
+         * 150ms 的取法：连点的按压时长典型 40~120ms，点射/长按 200ms 以上。
+         * 两个方向的代价不对称 —— 门限偏低会让粗糙的点击重新漏进斜坡(就是这里
+         * 要修的 bug)；偏高只是让全自动晚 150ms 起步，恒速斜坡因此永久滞后
+         * `rate*0.15` = 4.5~22px，相对 range 满量程 400px 是 1~5%，斜坡见顶后
+         * 差值归零，且第一枪的 kick 本来就盖在那段上。所以宁可取大。
+         */
+        private const val HOLD_ONSET_MS = 150L
+        /**
          * 下压范围满量程 = 屏幕高度 × 该比例。1080p 上 = 400px，与上游
          * MAX_OFFSET 一致；用比例而非绝对值，换分辨率不必重调。
          */
@@ -110,18 +150,37 @@ class AimController(
 
     // Recoil compensation
     var recoilEnabled = false
-    var recoilStrength = 0.5f   // 0.0 ~ 1.0
-    var recoilTapStrength = 0.5f      // 连点压枪强度 0.0 ~ 1.0，0 = 关闭
-    var recoilSpeed = 0.5f            // 压枪速度 0.0 ~ 1.0，决定下压速率
+    /**
+     * 长按下压力度(0.0 ~ 1.0)：按住开火键最终压到多深(斜坡的终点)。
+     *
+     * **只夹长按那一份。** 曾经它是长按与连点共用的总上限，后果是只玩连点的人
+     * 把它留在 5% 最小值时，连点累计被夹在 20px(一枪的量)上，而面板上没有任何
+     * 提示是这个滑块在卡他。现在 hold/tap 两份偏移分开累计、各有上限，共用的只
+     * 剩一个内部安全值(见 updateRecoil 里的 totalMax)。
+     */
+    var recoilStrength = 0.5f
+    /** 连点下压力度 0.0 ~ 1.0：每点一次开火键压多少(× TAP_KICK_MAX_PX)，0 = 关闭。 */
+    var recoilTapStrength = 0.5f
+    /** 长按下压速度 0.0 ~ 1.0 → HOLD_RATE_* 的 px/s：按住时每秒压多少。 */
+    var recoilSpeed = 0.5f
+    /** 连点下压速度 0.0 ~ 1.0 → TAP_TAU_* 的 τ：每枪那份量多快落到位。默认 0.6 = 历史值。 */
+    var recoilTapSpeed = 0.6f
     var recoilResetIntervalMs = 300   // 松开开火区超过此时长才开始回落；0 = 立即重置
     /**
      * 压枪标度的参考高度 = 采集高度(px)。由 FloatService 在建立采集后写入。
      * 兜底 1080 只在还没建立采集时用得到，那时也不会有推理帧。
      */
     var recoilRefHeight = 1080f
+    /** 对外的总偏移 = holdOffsetY + tapOffsetY，由 updateRecoil() 末尾算出。 */
     private var recoilOffsetY = 0f
+    /** 长按斜坡那一份，上限 = 长按下压力度。 */
+    private var holdOffsetY = 0f
+    /** 连点累计那一份，上限是内部安全值，不受长按力度影响。 */
+    private var tapOffsetY = 0f
     private var lastFireMs = 0L
     private var pendingKick = 0f
+    /** 当前这次按压的起点(ms)；0 = 没在按。用来区分"点一下"和"按住"。 */
+    private var pressStartMs = 0L
 
     // Class filtering
     var aimClasses: MutableSet<Int> = mutableSetOf()
@@ -481,11 +540,28 @@ class AimController(
     /**
      * 压枪状态机 —— 必须每推理帧调用一次，且与「有没有目标」无关。
      *
-     * 强度与速度是两个维度，必须分开：
-     *  - **压枪强度 = 下压范围**，屏幕高度的比例（100% ≈ 0.37 屏高）。
-     *  - **压枪速度 = 下压速率**，直接是 px/s。
+     * 参数是**对称的 2×2**，长按和连点各有自己的力度与速度，互不共用：
      *
-     * 两者都是屏幕空间量。不要改回按目标框高取比例 —— 那与
+     * |      | 力度(压多少)                    | 速度(多快压到)                  |
+     * |------|--------------------------------|--------------------------------|
+     * | 长按 | recoilStrength = 斜坡终点深度   | recoilSpeed = px/s (HOLD_RATE_*) |
+     * | 连点 | recoilTapStrength = 每枪的量    | recoilTapSpeed = 落位 τ (TAP_TAU_*) |
+     *
+     * 对称不是为了好看，是因为不对称过：以前 recoilStrength 是两条路共用的总上限，
+     * 于是长按"没有力度"(它的力度被那个共用滑块吃掉了)、连点"没有速度"(τ 写死)，
+     * 而且只玩连点的人会被长按侧的值卡住。现在 holdOffsetY / tapOffsetY 分开累计、
+     * 各有上限，唯一共用的是 totalMax —— 一个内部安全线，不是滑块。
+     *
+     * 两个"速度"方向一致(越高越快)但量纲不同，这是两边动力学不同决定的：长按对抗
+     * 连续爬升，所以是 px/s；连点每枪是一次冲量，量已由力度定死，速度只能是"这份
+     * 量多快落到位"。连点的等效补偿速率 = `每枪量 × 点击频率` —— 由玩家的手指决定
+     * 并随点击快慢自动缩放(仿真：3/5/8 发每秒 → 60/100/160 px/s)，天然低于全自动，
+     * 也本该如此：开枪次数少，枪口爬升就少。
+     *
+     * recoilTapStrength 与按压时长无关，这条由 HOLD_ONSET_MS 保证；在加门限之前
+     * 它只是句谎话(实测漂移 38%)，见那里的说明。
+     *
+     * 四者都是屏幕空间量。不要改回按目标框高取比例 —— 那与
      * aimOffsetYRatio / boxAimRatio 是不同性质的量：那两个决定"打身体哪个部位"
      * (该随框高缩放)，压枪对抗的是镜头爬升(与距离无关)。混用会让远距离失效。
      *
@@ -496,6 +572,12 @@ class AimController(
      *
      * 时间基而不是帧基：原来是每帧固定量，30fps 按住一秒下压 45px、60fps 就是
      * 90px，`4ee9e9e` 提帧之后压枪同比变快。现在按 dt 累加，帧率无关。
+     *
+     * kick 与斜坡是加性的，但**按压时长只喂给斜坡这一条**：一次按压若跨过门限，
+     * 得到的是"第一枪的 kick + 之后的爬升补偿"，这与真实枪械一致；短于门限就
+     * 只有 kick。自动扳机走的是 triggerFired 锁存(准心在目标上就一直 true)，
+     * 恒过门限，行为与加门限之前相同 —— 它自己注入的点击在 updateZones() 里被
+     * TOUCH_VIRTUAL_SLOT/TOUCH_TRIGGER_SLOT 排除、不计入 taps，所以它只吃斜坡。
      *
      * 松手后不立即清零，而是超过 recoilResetIntervalMs 才开始衰减：
      *  - 半自动连点的枪与枪之间（松手 100-200ms）不该被清零，否则每枪都从 0 压起
@@ -510,49 +592,83 @@ class AimController(
      * 这与自瞄有没有接管无关。等自瞄再接手时，偏移量应当反映真实的累计爬升。
      */
     fun updateRecoil(held: Boolean, taps: Int, dtSec: Float, nowMs: Long) {
-        if (!recoilEnabled) { recoilOffsetY = 0f; pendingKick = 0f; return }
+        if (!recoilEnabled) {
+            holdOffsetY = 0f; tapOffsetY = 0f; recoilOffsetY = 0f
+            pendingKick = 0f; pressStartMs = 0L
+            return
+        }
 
-        // 下压范围。屏幕空间，不看目标框 —— 见 companion 里的标度说明。
-        val range = (recoilStrength * RANGE_MAX_RATIO * recoilRefHeight)
+        // 按压起点。held 由 false→true 的那一帧记下，松开清零。
+        // 注意 held = 手指在开火区 || 自动扳机锁存，两者都算"在开火"。
+        if (held) { if (pressStartMs == 0L) pressStartMs = nowMs } else pressStartMs = 0L
+
+        // 面板滑块本就是 0~1，这两道夹取守的是手改 config.json 的情形：负值会让
+        // 斜坡反向爬升、让 τ 插值到 0 或负数(exp 的结果反号、pendingKick 自增不
+        // 收敛)。面板的 0~100% 是这两个量唯一的真值来源。
+        val speed = recoilSpeed.coerceIn(0f, 1f)
+        val tapSpeed = recoilTapSpeed.coerceIn(0f, 1f)
+
+        // 长按的终点深度 = 长按下压力度。**只夹长按那一份。**
+        val holdRange = (recoilStrength * RANGE_MAX_RATIO * recoilRefHeight)
             .coerceAtMost(MAX_OFFSET)
+        // 两份偏移之和的物理上限：屏幕高的 RANGE_MAX_RATIO。不设滑块 —— 它不是
+        // 手感参数，而是"别把准星压到目标脚下去"的安全线，正常使用碰不到它。
+        // 连点那一份单独也用它当上限：连点压多少该由「每枪的量 × 点了几枪」决定，
+        // 不该被长按侧的力度throttle 住(那正是这次要修的老毛病)。
+        val totalMax = (RANGE_MAX_RATIO * recoilRefHeight).coerceAtMost(MAX_OFFSET)
 
-        // 连点：每检测到一次按下，加一份固定量。与按住多久无关。
+        // ── 连点：每检测到一次按下，加一份固定量。与按住多久无关。 ──
         if (taps > 0 && recoilTapStrength > 0f) {
             pendingKick += recoilTapStrength * TAP_KICK_MAX_PX * taps
             lastFireMs = nowMs
         }
         // kick 摊到之后几帧释放而不是一帧打满：它进的是 PID 的目标值，而 Y 轴的
         // kp/kd 本就被 kpYRatio/kdYRatio 特意压低来抑制纵向震荡，一次性十几 px
-        // 的阶跃正是那个环节最不擅长吃的输入。0.4 → 每帧释放剩余的 60% @30fps。
+        // 的阶跃正是那个环节最不擅长吃的输入。
+        //
+        // 释放快慢 = 连点下压速度(TAP_TAU_*)。指数释放且按 dt 归一：与长按那条
+        // 一样必须帧率无关，`1-exp(-dt/τ)` 恰好满足 —— 给定墙钟时间内释放掉的
+        // 总量与分几帧走无关。
         if (pendingKick > 0f) {
-            val take = pendingKick * (1f - Math.pow(0.4, (dtSec * 30f).toDouble()).toFloat())
-            recoilOffsetY += take
+            val tauMs = TAP_TAU_SLOW_MS + (TAP_TAU_FAST_MS - TAP_TAU_SLOW_MS) * tapSpeed
+            val take = pendingKick * (1f - Math.exp((-dtSec * 1000f / tauMs).toDouble()).toFloat())
+            tapOffsetY += take
             pendingKick -= take
-            if (pendingKick < 0.5f) { recoilOffsetY += pendingKick; pendingKick = 0f }
+            if (pendingKick < 0.5f) { tapOffsetY += pendingKick; pendingKick = 0f }
         }
 
-        // 长按：恒速下压，到 range 为止。
+        // ── 长按：恒速下压，到 holdRange 为止。 ──
         //
-        // 速率直接是 px/s，与强度(=范围)彻底无关 —— 两个滑块互不干扰。用绝对
-        // 速率而不是 range/sec：后者强度调低时下降也跟着变慢，等于又把两者绑回去。
+        // 速率直接是 px/s，与力度(=终点深度)彻底无关 —— 两个滑块互不干扰。用绝对
+        // 速率而不是 range/sec：后者力度调低时下降也跟着变慢，等于又把两者绑回去。
         //
         // 恒速而不是指数逼近：后者末段无限慢，且不符合真实枪械先爬升后见顶的形状。
         if (held) {
-            val rate = HOLD_RATE_SLOW + (HOLD_RATE_FAST - HOLD_RATE_SLOW) * recoilSpeed
-            recoilOffsetY += rate * dtSec
+            // lastFireMs 无条件刷：门限只管斜坡要不要走，不改变"正在开火"这个
+            // 事实，否则下面的回落会在连点的每次松手之间被触发。
             lastFireMs = nowMs
+            if (nowMs - pressStartMs >= HOLD_ONSET_MS) {
+                val rate = HOLD_RATE_SLOW + (HOLD_RATE_FAST - HOLD_RATE_SLOW) * speed
+                holdOffsetY += rate * dtSec
+            }
+            // 跨过门限的那一帧会把整个 dtSec 都算进去，多算不超过一帧
+            // (30fps × 150px/s ≈ 5px)。为这点误差去拆分帧内时间不值得。
         } else if (recoilResetIntervalMs <= 0) {
             // 间隔 = 0：松开开火区立即重置，不走衰减。
-            recoilOffsetY = 0f
-            pendingKick = 0f
+            holdOffsetY = 0f; tapOffsetY = 0f; pendingKick = 0f
         } else if (pendingKick <= 0f && nowMs - lastFireMs > recoilResetIntervalMs) {
-            // 衰减系数同样按时间归一，否则这里又会引入一个帧率相关量，
-            // 把上面刚换成时间基的意义抵消掉。0.7/帧 @30fps 为基准。
-            recoilOffsetY *= Math.pow(0.7, (dtSec * 30f).toDouble()).toFloat()
-            if (recoilOffsetY < 1f) recoilOffsetY = 0f
+            // 衰减系数同样按时间归一，否则这里又会引入一个帧率相关量，把上面刚
+            // 换成时间基的意义抵消掉。基准是 0.7/帧 @30fps，见 DECAY_EXP_PER_SEC。
+            val k = Math.exp((dtSec * DECAY_EXP_PER_SEC).toDouble()).toFloat()
+            holdOffsetY *= k
+            tapOffsetY *= k
+            if (holdOffsetY < 0.5f) holdOffsetY = 0f
+            if (tapOffsetY < 0.5f) tapOffsetY = 0f
         }
-        // 终点就是 range 本身，不需要另一个"上限"参数。
-        recoilOffsetY = recoilOffsetY.coerceIn(0f, range)
+
+        holdOffsetY = holdOffsetY.coerceIn(0f, holdRange)
+        tapOffsetY = tapOffsetY.coerceIn(0f, totalMax)
+        recoilOffsetY = (holdOffsetY + tapOffsetY).coerceIn(0f, totalMax)
     }
 
     /** 排障用：外部只读当前偏移量。 */
@@ -560,6 +676,11 @@ class AimController(
 
     fun resetRecoil() {
         recoilOffsetY = 0f
+        holdOffsetY = 0f
+        tapOffsetY = 0f
+        // 一起清掉，否则下一帧 pendingKick 的残量会被加回刚归零的偏移上。
+        pendingKick = 0f
+        pressStartMs = 0L
     }
 
     fun reset() {

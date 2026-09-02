@@ -51,9 +51,10 @@ data class AppConfig(
     var classTriggerOffsets: Map<Int, Float> = emptyMap(),  // per-class trigger Y offset
     var triggerClasses: Set<Int> = emptySet(),  // empty = all classes
     var recoilEnabled: Boolean = false,
-    var recoilStrength: Float = 0.5f,  // 0.0 ~ 1.0
-    var recoilTapStrength: Float = 0.5f,    // 连点压枪强度 0.0~1.0，0 = 关闭
-    var recoilSpeed: Float = 0.5f,          // 压枪速度 0.0~1.0，多久走完下压范围
+    var recoilStrength: Float = 0.5f,       // 下压范围 0.0~1.0(长按/连点共用的总上限)。JSON key 保留旧名，勿改，否则老配置读不到
+    var recoilTapStrength: Float = 0.5f,    // 连点每枪的固定下压量 0.0~1.0，0 = 关闭
+    var recoilSpeed: Float = 0.5f,          // 长按下压速度 0.0~1.0 → px/s：按住时每秒压多少
+    var recoilTapSpeed: Float = 0.6f,       // 连点下压速度 0.0~1.0 → τ：每枪那份量多快落到位。0.6 = 历史写死的 36.4ms
     var recoilResetIntervalMs: Int = 300,   // 松开多久后回落；0 = 立即重置
     var convergeThresh: Int = 10,
     var autoStopEnabled: Boolean = false,
@@ -128,6 +129,8 @@ object ConfigManager {
                         recoilStrength = obj.optDouble("recoilStrength", 0.5).toFloat(),
                         recoilTapStrength = obj.optDouble("recoilTapStrength", 0.5).toFloat(),
                         recoilSpeed = obj.optDouble("recoilSpeed", 0.5).toFloat(),
+                        // 缺省 0.6 = 加这个滑块之前写死的 τ=36.4ms，老配置升级后手感不变
+                        recoilTapSpeed = obj.optDouble("recoilTapSpeed", 0.6).toFloat(),
                         recoilResetIntervalMs = obj.optInt("recoilResetIntervalMs", 300),
                         convergeThresh = obj.optInt("convergeThresh", 10),
                         autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
@@ -196,6 +199,7 @@ object ConfigManager {
                     put("recoilStrength", config.recoilStrength.toDouble())
                     put("recoilTapStrength", config.recoilTapStrength.toDouble())
                     put("recoilSpeed", config.recoilSpeed.toDouble())
+                    put("recoilTapSpeed", config.recoilTapSpeed.toDouble())
                     put("recoilResetIntervalMs", config.recoilResetIntervalMs)
                     put("convergeThresh", config.convergeThresh)
                     put("autoStopEnabled", config.autoStopEnabled)
