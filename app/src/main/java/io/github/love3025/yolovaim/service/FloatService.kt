@@ -142,8 +142,7 @@ class FloatService : Service() {
     private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f; private var kf = 0.05f
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
-    private var recoilTapStrength = 0.5f; private var recoilResetIntervalMs = 300
-    private var recoilSpeed = 0.5f; private var recoilTapSpeed = 0.6f
+    private var recoilSpeed = 0.5f; private var recoilResetIntervalMs = 300
     private val aimingState = AimingState()
 
     // Bezier aim state
@@ -328,9 +327,7 @@ class FloatService : Service() {
         aimController.classBoxAimRatios = classBoxAimRatios
         aimController.recoilEnabled = recoilEnabled
         aimController.recoilStrength = recoilStrength
-        aimController.recoilTapStrength = recoilTapStrength
         aimController.recoilSpeed = recoilSpeed
-        aimController.recoilTapSpeed = recoilTapSpeed
         aimController.recoilResetIntervalMs = recoilResetIntervalMs
 
         // TriggerController
@@ -369,9 +366,7 @@ class FloatService : Service() {
         triggerOffsetYRatio = cfg.triggerOffsetYRatio
         recoilEnabled = cfg.recoilEnabled
         recoilStrength = cfg.recoilStrength
-        recoilTapStrength = cfg.recoilTapStrength
         recoilSpeed = cfg.recoilSpeed
-        recoilTapSpeed = cfg.recoilTapSpeed
         recoilResetIntervalMs = cfg.recoilResetIntervalMs
         ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
         aimMode = cfg.aimMode
@@ -1146,9 +1141,7 @@ class FloatService : Service() {
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
         guiPanel.recoilEnabled = cfg.recoilEnabled
         guiPanel.recoilStrength = cfg.recoilStrength
-        guiPanel.recoilTapStrength = cfg.recoilTapStrength
         guiPanel.recoilSpeed = cfg.recoilSpeed
-        guiPanel.recoilTapSpeed = cfg.recoilTapSpeed
         guiPanel.recoilResetIntervalMs = cfg.recoilResetIntervalMs
         guiPanel.aimOffsetYRatio = cfg.aimOffsetYRatio
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
@@ -1285,9 +1278,7 @@ class FloatService : Service() {
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
         guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
         guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
-        guiPanel.onRecoilTapStrengthChanged = { recoilTapStrength = it; aimController.recoilTapStrength = it; ConfigManager.updateConfig { recoilTapStrength = it } }
         guiPanel.onRecoilSpeedChanged = { recoilSpeed = it; aimController.recoilSpeed = it; ConfigManager.updateConfig { recoilSpeed = it } }
-        guiPanel.onRecoilTapSpeedChanged = { recoilTapSpeed = it; aimController.recoilTapSpeed = it; ConfigManager.updateConfig { recoilTapSpeed = it } }
         guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show

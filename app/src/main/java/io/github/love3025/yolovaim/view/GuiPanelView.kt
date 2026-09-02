@@ -67,9 +67,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerClassesChanged: ((Set<Int>) -> Unit)? = null
     var onRecoilEnabledChanged: ((Boolean) -> Unit)? = null
     var onRecoilStrengthChanged: ((Float) -> Unit)? = null
-    var onRecoilTapStrengthChanged: ((Float) -> Unit)? = null
     var onRecoilSpeedChanged: ((Float) -> Unit)? = null
-    var onRecoilTapSpeedChanged: ((Float) -> Unit)? = null
     var onRecoilResetIntervalChanged: ((Int) -> Unit)? = null
     var onConvergeThreshChanged: ((Int) -> Unit)? = null
     var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
@@ -110,9 +108,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var autoSaveDataset = false
     var recoilEnabled = false
     var recoilStrength = 0.5f
-    var recoilTapStrength = 0.5f
     var recoilSpeed = 0.5f
-    var recoilTapSpeed = 0.6f
     var recoilResetIntervalMs = 300
     var autoStopEnabled = false
     private var navScrollView: ScrollView? = null
@@ -243,15 +239,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "压枪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = recoilEnabled; setOnCheckedChangeListener { _, c -> recoilEnabled = c; onRecoilEnabledChanged?.invoke(c) } })
         })
-        contentContainer.addView(MaterialTextView(context).apply { text = "长按(按住不放)和连点(半自动)各有自己的力度和速度,互不影响。力度=压多少,速度=多快压到"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, dp(2)) })
-        contentContainer.addView(buildStepperSlider("长按下压力度 (压到多深)", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
-        contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键最终压到多深,按屏幕高算：100% ≈ 0.37 屏高(1080p 约 400px)。只管长按,不再夹住连点"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
-        contentContainer.addView(buildStepperSlider("长按下压速度 (每秒)", recoilSpeed, 0f, 1.0f, "%.0f%%") { recoilSpeed = it; onRecoilSpeedChanged?.invoke(it) })
-        contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键时每秒压多少：0%:30px 50%:90px 100%:150px。后坐力大、开火前期压不住就调高"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
-        contentContainer.addView(buildStepperSlider("连点下压力度 (每枪)", recoilTapStrength, 0f, 1.0f, "%.0f%%") { recoilTapStrength = it; onRecoilTapStrengthChanged?.invoke(it) })
-        contentContainer.addView(MaterialTextView(context).apply { text = "每点一次固定压这么多(100% = 40px),与按住多久无关。一秒压多少 = 这个量 × 你点得多快；0 = 关闭"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
-        contentContainer.addView(buildStepperSlider("连点下压速度 (每枪落位)", recoilTapSpeed, 0f, 1.0f, "%.0f%%") { recoilTapSpeed = it; onRecoilTapSpeedChanged?.invoke(it) })
-        contentContainer.addView(MaterialTextView(context).apply { text = "每枪那份量多快落到准星上：0%:73ms 60%:36ms(默认,等于旧版) 100%:12ms。100% 时一枪几乎单帧压满,最跟手但可能纵向抖;嫌生硬就往下调"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "长按(按住不放)和连点(半自动)都适用,不分模式。范围=最多压到多深,速度=压下去多快"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, dp(2)) })
+        contentContainer.addView(buildStepperSlider("下压范围", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "最多压到多深,按屏幕高算：100% ≈ 0.37 屏高(1080p 约 400px)。压到这个深度就停住,不再往下走"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("压枪速度", recoilSpeed, 0f, 1.0f, "%.0f%%") { recoilSpeed = it; onRecoilSpeedChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "按住时每秒压多少：0%:30px 50%:90px 100%:150px。连点时每枪压「速度 × 100ms」(50% 约 9px/枪),与你按住多久无关。后坐力大、开火前期压不住就调高"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(buildStepperSlider("开火重置间隔", recoilResetIntervalMs.toFloat(), 0f, 1000f, "0ms", 50f) { v -> val iv = v.toInt(); recoilResetIntervalMs = iv; onRecoilResetIntervalChanged?.invoke(iv) })
         contentContainer.addView(MaterialTextView(context).apply { text = "松开开火键超过此时长才开始回落；0 = 松开即重置。慢速连点要让它大于两枪的间隔,否则上一枪的补偿会在下一枪前蒸发(2 发/秒 + 默认 300ms 实测等效只剩 3px/s)"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(spacer(dp(6)))

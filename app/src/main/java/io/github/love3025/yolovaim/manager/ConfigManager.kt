@@ -51,10 +51,8 @@ data class AppConfig(
     var classTriggerOffsets: Map<Int, Float> = emptyMap(),  // per-class trigger Y offset
     var triggerClasses: Set<Int> = emptySet(),  // empty = all classes
     var recoilEnabled: Boolean = false,
-    var recoilStrength: Float = 0.5f,       // 下压范围 0.0~1.0(长按/连点共用的总上限)。JSON key 保留旧名，勿改，否则老配置读不到
-    var recoilTapStrength: Float = 0.5f,    // 连点每枪的固定下压量 0.0~1.0，0 = 关闭
-    var recoilSpeed: Float = 0.5f,          // 长按下压速度 0.0~1.0 → px/s：按住时每秒压多少
-    var recoilTapSpeed: Float = 0.6f,       // 连点下压速度 0.0~1.0 → τ：每枪那份量多快落到位。0.6 = 历史写死的 36.4ms
+    var recoilStrength: Float = 0.5f,       // 下压范围 0.0~1.0：最多压到多深，长按连点共用。JSON key 保留旧名，勿改，否则老配置读不到
+    var recoilSpeed: Float = 0.5f,          // 压枪速度 0.0~1.0 → px/s：每秒压多少，长按连点共用
     var recoilResetIntervalMs: Int = 300,   // 松开多久后回落；0 = 立即重置
     var convergeThresh: Int = 10,
     var autoStopEnabled: Boolean = false,
@@ -127,10 +125,10 @@ object ConfigManager {
                         triggerClasses = parseIntSet(obj.optJSONArray("triggerClasses")),
                         recoilEnabled = obj.optBoolean("recoilEnabled", false),
                         recoilStrength = obj.optDouble("recoilStrength", 0.5).toFloat(),
-                        recoilTapStrength = obj.optDouble("recoilTapStrength", 0.5).toFloat(),
                         recoilSpeed = obj.optDouble("recoilSpeed", 0.5).toFloat(),
-                        // 缺省 0.6 = 加这个滑块之前写死的 τ=36.4ms，老配置升级后手感不变
-                        recoilTapSpeed = obj.optDouble("recoilTapSpeed", 0.6).toFloat(),
+                        // recoilTapStrength / recoilTapSpeed 两个 key 已废弃：压枪收敛成
+                        // 「范围 + 速度」两个参数后不再有连点专属项。老配置里残留的这两个
+                        // key 读进来也没处放，不读即可 —— 下次 save() 会自然把它们写掉。
                         recoilResetIntervalMs = obj.optInt("recoilResetIntervalMs", 300),
                         convergeThresh = obj.optInt("convergeThresh", 10),
                         autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
@@ -197,9 +195,7 @@ object ConfigManager {
                     put("triggerClasses", serializeIntSet(config.triggerClasses))
                     put("recoilEnabled", config.recoilEnabled)
                     put("recoilStrength", config.recoilStrength.toDouble())
-                    put("recoilTapStrength", config.recoilTapStrength.toDouble())
                     put("recoilSpeed", config.recoilSpeed.toDouble())
-                    put("recoilTapSpeed", config.recoilTapSpeed.toDouble())
                     put("recoilResetIntervalMs", config.recoilResetIntervalMs)
                     put("convergeThresh", config.convergeThresh)
                     put("autoStopEnabled", config.autoStopEnabled)
