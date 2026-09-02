@@ -240,38 +240,24 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         execNoReply(sb.toString())
     }
 
-    override fun hudTextBmp(w: Int, h: Int, pixels: IntArray) {
-        // 逐行 RLE,透明像素不传输;一行 run 过多时分块续写(daemon 端
-        // 每个 run 自带 x 偏移,天然支持分块)。
-        execNoReply("HUD_TEXT_BMP $w $h")
-        val runs = ArrayList<Int>(256) // 交替 [x, len, argb]
-        for (y in 0 until h) {
-            runs.clear()
-            val row = y * w
-            var x = 0
-            while (x < w) {
-                val px = pixels[row + x]
-                if (px ushr 24 == 0) { x++; continue } // 透明跳过
-                var len = 1
-                while (x + len < w && pixels[row + x + len] == px) len++
-                runs.add(x); runs.add(len); runs.add(px)
-                x += len
-            }
-            var i = 0
-            while (i < runs.size) {
-                val sb = StringBuilder(128)
-                val end = minOf(runs.size, i + 24 * 3) // 每行最多 24 段,协议两端一致
-                sb.append("HUD_TEXT_ROW ").append(y).append(' ').append((end - i) / 3)
-                while (i < end) {
-                    sb.append(' ').append(runs[i])                     // x
-                      .append(' ').append(runs[i + 1])                 // len
-                      .append(' ').append("%08X".format(runs[i + 2])) // argb
-                    i += 3
-                }
-                execNoReply(sb.toString())
+    override fun hudTextMask(w: Int, h: Int, fg: Int, bg: Int, mask: ByteArray, len: Int) {
+        // 头部一行 + 掩码整块,两次 write 一次 flush,全程只抢一次 cmdLock。
+        // BufferedOutputStream 对 len >= 缓冲区的写入会直接落到 fd,所以
+        // 48KB 的掩码就是一次 write 系统调用(旧 RLE 协议是 270 次)。
+        val n = if (len > mask.size) mask.size else len
+        if (w <= 0 || h <= 0 || n < w * h) return
+        val header = "!HUD_TEXT_MASK $w $h ${"%08X".format(fg)} ${"%08X".format(bg)} $n\n"
+        synchronized(cmdLock) {
+            if (!connected) return
+            try {
+                daemonStdin!!.write(header.toByteArray())
+                daemonStdin!!.write(mask, 0, n)
+                daemonStdin!!.flush()
+            } catch (e: Exception) {
+                Log.e(TAG, "hudTextMask error: ${e.message}")
+                connected = false
             }
         }
-        execNoReply("HUD_TEXT_END")
     }
 
     override fun tap(x: Int, y: Int) {

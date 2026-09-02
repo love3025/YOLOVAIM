@@ -41,8 +41,14 @@ interface HudClient {
     fun hudBoxes(rects: IntArray)
 
     /**
-     * 推理信息文字位图。pixels 为 ARGB_8888 整行扫描的 0xAARRGGBB,
-     * 透明像素由实现端(编码时)剔除。
+     * 推理信息文字:8bit alpha 覆盖率掩码 + 前景/背景色(0xAARRGGBB)。
+     *
+     * 只传覆盖率、由 daemon 侧合成药丸底与文字颜色 —— 抗锯齿文字的
+     * ARGB 位图逐行 RLE 会退化成每帧数千段(950x52 实测 5558 段 / 270
+     * 条 IPC 行),每条都要独占 cmdLock 并挤掉注入命令。掩码是整块一次
+     * 写入,系统调用从每帧 270 次降到 1 次。
+     *
+     * mask 长度须 >= w*h(packed,行主序),len 为实际有效字节数。
      */
-    fun hudTextBmp(w: Int, h: Int, pixels: IntArray)
+    fun hudTextMask(w: Int, h: Int, fg: Int, bg: Int, mask: ByteArray, len: Int)
 }

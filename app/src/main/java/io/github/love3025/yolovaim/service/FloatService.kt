@@ -171,15 +171,30 @@ class FloatService : Service() {
     private var hudCheckStage = 0    // 0=idle 1=图案已下发,采样中
     private var hudCheckFrames = 0
     private var hudCheckMaxHits = 0
+    // 自检采样尝试次数上限:wrapHardwareBuffer/copy 失败时旧实现是裸 return,
+    // 既不计数也不清 pending —— 一旦该路径持续失败,每个采集帧都会做一次
+    // 全屏 HardwareBuffer→Bitmap 拷贝且永不退出。
+    private var hudCheckAttempts = 0
+    private val hudCheckMaxAttempts = 60
     // 推理热路径上的值变门闩:值没变不发 IPC
     private var lastHudFov = -1
     private var hudBoxesSent = false
     // 推理信息文字:同文本跳过(与兜底 setInferInfo 的门闩一致,不做时间节流)
-    private var lastHudInfoText: String? = null
+    @Volatile private var lastHudInfoText: String? = null
     private val hudInfoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFEB3B.toInt() // OverlayManager TextView 同款浅黄
         typeface = Typeface.DEFAULT_BOLD
     }
+    // 掩码渲染的复用缓冲(只在推理线程访问)。旧实现每帧新建 Bitmap +
+    // IntArray(w*h) ≈ 200KB,60fps 就是 12MB/s 的主线程分配,GC 反复
+    // 打断 UI —— 这就是"连 GUI 菜单都卡"的那一份。
+    private var hudMaskBmp: Bitmap? = null
+    private var hudMaskCanvas: Canvas? = null
+    private var hudMaskRaw: ByteArray? = null          // 位图原生字节(RGBA)
+    private var hudMaskRawBuf: java.nio.ByteBuffer? = null
+    private var hudMask: ByteArray? = null             // 提取出的 8bit 覆盖率
+    private val hudInfoFg = 0xFFFFEB3B.toInt()         // 浅黄字
+    private val hudInfoBg = 0xCC101010.toInt()         // 半透明黑底药丸
 
     // EMA-smoothed fps derived from each frame's full inference budget
     // (preproc + invoke + postproc). EMA keeps the displayed number from
@@ -588,6 +603,7 @@ class FloatService : Service() {
             hudCheckStage = 0
             hudCheckFrames = 0
             hudCheckMaxHits = 0
+            hudCheckAttempts = 0
             lastHudFov = -1
             hudBoxesSent = false
             lastHudInfoText = null
@@ -623,6 +639,7 @@ class FloatService : Service() {
         hudNative = false
         hudSelfCheckPending = false
         hudCheckStage = 0
+        hudCheckAttempts = 0
         try { touchService.hud()?.hudOff() } catch (_: Exception) {}
         Log.w(TAG, "HUD: fallback ($reason)")
         mainHandler.post {
@@ -687,9 +704,12 @@ class FloatService : Service() {
         }
     }
 
-    /** 推理信息发布:native 路径渲染 Bitmap → RLE IPC;兜底走 TextView。 */
+    /** 推理信息发布:native 路径渲染覆盖率掩码 → 一次 IPC;兜底走 TextView。 */
     private fun pushInferInfo(text: String) {
-        if (hudNative) pushHudInfoText(text) else overlayManager.setInferInfo(text)
+        // native 路径在调用线程(推理线程)直接渲染 + 一次 write,不再经过
+        // mainHandler:主线程只负责 TextView 兜底那条路。
+        if (hudNative) pushHudInfoText(text)
+        else mainHandler.post { overlayManager.setInferInfo(text) }
     }
 
     private fun pushHudInfoText(text: String) {
@@ -702,7 +722,9 @@ class FloatService : Service() {
         val client = hud() ?: return
         try {
             // TextView 同款视觉:11sp 粗体浅黄字 + 半透明黑底药丸
-            // (OverlayManager.kt setupInferInfoView 的参数)
+            // (OverlayManager.kt setupInferInfoView 的参数)。药丸底不在
+            // 这里画 —— 只把抗锯齿覆盖率传下去,由 daemon 按 fg/bg 合成,
+            // 结果与旧的"整张 ARGB 位图"逐位一致。
             val density = resources.displayMetrics.density
             hudInfoPaint.textSize = 11f * density
             val fm = hudInfoPaint.fontMetrics
@@ -710,14 +732,38 @@ class FloatService : Service() {
             val tw = kotlin.math.ceil(hudInfoPaint.measureText(text)).toInt()
             val th = kotlin.math.ceil(fm.descent - fm.ascent).toInt()
             val w = tw + padH * 2; val h = th + padV * 2
-            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            val c = Canvas(bmp)
-            c.drawColor(0xCC101010.toInt())
-            c.drawText(text, padH.toFloat(), padV - fm.ascent, hudInfoPaint)
-            val px = IntArray(w * h)
-            bmp.getPixels(px, 0, w, 0, 0, w, h)
-            bmp.recycle()
-            client.hudTextBmp(w, h, px)
+            if (w <= 0 || h <= 0) return
+            // 尺寸没变就复用整套缓冲(位图/原生字节/掩码/Canvas)
+            val old = hudMaskBmp
+            val bmp: Bitmap
+            if (old != null && old.width == w && old.height == h) {
+                bmp = old
+            } else {
+                old?.recycle()
+                bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                hudMaskBmp = bmp
+                hudMaskCanvas = Canvas(bmp)
+                val fresh = ByteArray(bmp.rowBytes * h)
+                hudMaskRaw = fresh
+                hudMaskRawBuf = java.nio.ByteBuffer.wrap(fresh)
+                hudMask = ByteArray(w * h)
+            }
+            val canvas = hudMaskCanvas ?: return
+            val raw = hudMaskRaw ?: return
+            val mask = hudMask ?: return
+            val buf = hudMaskRawBuf ?: return
+            bmp.eraseColor(0) // 透明底:要的是纯覆盖率
+            canvas.drawText(text, padH.toFloat(), padV - fm.ascent, hudInfoPaint)
+            buf.clear()
+            bmp.copyPixelsToBuffer(buf)
+            // ARGB_8888 的原生字节序是 R,G,B,A —— 每像素第 4 个字节就是覆盖率
+            val stride = bmp.rowBytes
+            var di = 0
+            for (y in 0 until h) {
+                var si = y * stride + 3
+                for (x in 0 until w) { mask[di++] = raw[si]; si += 4 }
+            }
+            client.hudTextMask(w, h, hudInfoFg, hudInfoBg, mask, w * h)
         } catch (e: Exception) {
             Log.e(TAG, "HUD text render failed: ${e.message}")
         }
@@ -739,7 +785,21 @@ class FloatService : Service() {
             hudCheckStage = 1
             hudCheckFrames = 0
             hudCheckMaxHits = 0
+            hudCheckAttempts = 0
             return // 图案要等下一帧才出现在采集里
+        }
+        // 采样尝试要计数:下面 wrap/copy 失败时旧实现是裸 return,既不推进
+        // hudCheckFrames 也不清 pending —— 该路径一旦持续失败,每个采集帧
+        // 都会做一次全屏 HardwareBuffer→Bitmap 拷贝,永不退出。
+        hudCheckAttempts++
+        if (hudCheckAttempts > hudCheckMaxAttempts) {
+            try { client.hudCheck(false) } catch (_: Exception) {}
+            hudSelfCheckPending = false
+            hudCheckStage = 0
+            // 验不出来就按最坏情况处理:未经验证的防捕获一旦失效,HUD 会被
+            // 烧进采集帧、污染推理输入(v1 就是这么静默失败的)。
+            hudFallBack("self-check: ${hudCheckMaxAttempts} 帧都读不到采集帧,无法验证")
+            return
         }
         val hw = try { Bitmap.wrapHardwareBuffer(hb, null) } catch (e: Exception) { null } ?: return
         val bmp = try { hw.copy(Bitmap.Config.ARGB_8888, false) } catch (e: Exception) { null }
@@ -1577,7 +1637,7 @@ class FloatService : Service() {
                             "推理 %.1ffps · 预处理 %.2fms · 后处理 %.2fms · 检测 %d",
                             inferFps, pre, post, count
                         )
-                        mainHandler.post { pushInferInfo(text) }
+                        pushInferInfo(text)
                     }
 
                     // 按住激发: 物理手指按在触发区时才能自瞄（提到外层，使 lift 条件也能读到）
