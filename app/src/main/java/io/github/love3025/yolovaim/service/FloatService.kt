@@ -36,6 +36,7 @@ import io.github.love3025.yolovaim.injector.InjectorCallback
 import io.github.love3025.yolovaim.injector.HudClient
 import io.github.love3025.yolovaim.inference.JniCallBack
 import io.github.love3025.yolovaim.util.ProjectionHolder
+import io.github.love3025.yolovaim.util.allowDisplayCutout
 
 class FloatService : Service() {
 
@@ -429,7 +430,13 @@ class FloatService : Service() {
             val enabled = ConfigManager.getConfig().useNativeHud
             Log.i(TAG, "收到HUD_PREF_CHANGED, useNativeHud=$enabled, 当前hudNative=$hudNative")
             if (enabled) {
-                if (!hudNative) setupHud() // 关→开:激活 native HUD,撤掉兜底渲染
+                // hudOn 是带 3s 超时的阻塞往返(execCmd):不能卡主线程,也不
+                // 能压在推理 executor 上(单线程,会冻住推理循环 —— 同
+                // TouchService tapExecutor 的理由)。失败结果经
+                // onHudUnavailable 广播回设置页弹开关。
+                if (!hudNative) Thread { setupHud() }.apply {
+                    name = "yolovaim-hud-toggle"; isDaemon = true
+                }.start() // 关→开:激活 native HUD,撤掉兜底渲染
             } else {
                 if (hudNative) hudFallBack("user disabled 防录屏") // 开→关:关 layer,恢复原路线
             }
@@ -494,6 +501,15 @@ class FloatService : Service() {
         if (aimClasses.isEmpty() && currentClasses.isNotEmpty()) aimClasses = currentClasses.keys.toMutableSet()
         if (triggerClasses.isEmpty() && currentClasses.isNotEmpty()) triggerClasses = currentClasses.keys.toMutableSet()
         Log.d(TAG, "启动模型类别: $currentClasses, aimClasses=$aimClasses, triggerClasses=$triggerClasses")
+        // 兜底:引擎还没初始化就直接启动了服务。首次安装的典型路径就是它——
+        // loadDefaultModel 只在 MainActivity onCreate+500ms 跑一次,那时模型
+        // 列表还是空的;导入流程又不会加载引擎(下拉框 setText(...,false)
+        // 不触发选择监听),用户点启动时 g_engine 是 null,推理循环全程
+        // "Engine not initialized",状态栏显示"运行中 none"。
+        if (entry != null && JniCallBack.getBackend() == "none") {
+            Log.w(TAG, "引擎未初始化,服务启动时兜底加载: ${entry.filename}")
+            loadModel(entry.filename)
+        }
         ProjectionHolder.updateState(1, JniCallBack.getBackend())
         return START_NOT_STICKY
     }
@@ -506,6 +522,9 @@ class FloatService : Service() {
         // native HUD 的 layer 生命周期跟着 daemon,但显式关掉干净:
         // 长驻的空 layer 也占合成开销(改进方案.md §5.2)
         try { if (hudNative) { hud()?.hudOff(); hudNative = false; hudSelfCheckPending = false; hudCheckStage = 0 } } catch (_: Exception) {}
+        // 服务停止 = 防捕获层必然没了。广播 reason 置空:这是正常停止,
+        // 不是故障,设置页不需要弹提示,开关保持 config 现值即可。
+        ProjectionHolder.updateHudState(false, null)
         try { if (ballAdded) { wm.removeView(ballView); ballAdded = false } } catch (_: Exception) {}
         try { if (overlayAdded) { wm.removeView(overlayView); overlayAdded = false } } catch (_: Exception) {}
         try { if (guiAdded) { wm.removeView(guiPanel); guiAdded = false; guiVisible = false } } catch (_: Exception) {}
@@ -579,6 +598,7 @@ class FloatService : Service() {
         if (!ConfigManager.getConfig().useNativeHud) {
             hudNative = false
             Log.i(TAG, "HUD: disabled by user (防录屏开关关闭), using fallback renderer")
+            ProjectionHolder.updateHudState(false, null)
             updateHudDiagnostics()
             return
         }
@@ -586,7 +606,7 @@ class FloatService : Service() {
         if (client == null) {
             Log.i(TAG, "HUD: root daemon unavailable, using fallback renderer")
             hudNative = false
-            updateHudDiagnostics()
+            onHudUnavailable("未连接 Root 守护进程（防录屏需要 Root）")
             return
         }
         val ok = try { client.hudOn() } catch (e: Exception) {
@@ -595,6 +615,7 @@ class FloatService : Service() {
         hudNative = ok
         if (ok) {
             Log.i(TAG, "HUD: native anti-capture layer active")
+            ProjectionHolder.updateHudState(true, null)
             replayHudState(client)
             hudSelfCheckPending = true
             hudCheckStage = 0
@@ -612,8 +633,22 @@ class FloatService : Service() {
             }
         } else {
             Log.w(TAG, "HUD: HUD_ON failed (symbol miss or layer creation), using fallback renderer")
-            updateHudDiagnostics()
+            onHudUnavailable("设备不支持防捕获图层（符号缺失或图层创建失败）")
         }
+    }
+
+    /**
+     * 防录屏激活失败。开关语义是"开着 = 生效"，所以除了走兜底渲染，
+     * 还要把 useNativeHud 写回 false 并广播给设置页 —— 设置页的开关据此
+     * 弹回关闭，避免"开关显示开着、实际却在走会被录进画面的路线"的假象。
+     */
+    private fun onHudUnavailable(reason: String) {
+        if (ConfigManager.getConfig().useNativeHud) {
+            ConfigManager.updateConfig { useNativeHud = false }
+            Log.w(TAG, "HUD: 激活失败，防录屏开关回退为关闭 ($reason)")
+        }
+        ProjectionHolder.updateHudState(false, reason)
+        updateHudDiagnostics()
     }
 
     /** daemon 重连/重启后的状态重放:开关 + 几何 + 当前值。 */
@@ -639,6 +674,14 @@ class FloatService : Service() {
         hudCheckAttempts = 0
         try { touchService.hud()?.hudOff() } catch (_: Exception) {}
         Log.w(TAG, "HUD: fallback ($reason)")
+        // 自检失败等运行时失效:开关同样回退(开着 = 生效的语义);
+        // 用户主动关闭那条路 config 已是 false,只广播状态、不算故障。
+        if (ConfigManager.getConfig().useNativeHud) {
+            ConfigManager.updateConfig { useNativeHud = false }
+            ProjectionHolder.updateHudState(false, reason)
+        } else {
+            ProjectionHolder.updateHudState(false, null)
+        }
         mainHandler.post {
             try {
                 if (!overlayAdded && overlayParams != null) {
@@ -1725,7 +1768,7 @@ class FloatService : Service() {
         }
     }
 
-    private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT)
+    private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT).allowDisplayCutout()
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val ch = NotificationChannel(CH_ID, "YOLOVAIM", NotificationManager.IMPORTANCE_LOW); (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch) } }

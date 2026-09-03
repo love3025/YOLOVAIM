@@ -43,6 +43,27 @@ object ProjectionHolder {
     fun setTouchStatusListener(listener: (String) -> Unit) { touchStatusListener = listener }
     fun removeTouchStatusListener() { touchStatusListener = null }
 
+    // 防录屏（native HUD）实际状态 —— FloatService 写入，设置页读取。
+    // 开关的语义是"开着 = 防捕获层真的生效"，所以激活失败时服务端会把
+    // useNativeHud 回退为 false 并在这里广播：active=false 且 reason 非空
+    // = 尝试过但失败（设置页据此把开关弹回关闭）；reason 为空 = 用户自己
+    // 关掉或服务停止，不是故障，开关不用动。
+    var hudActive: Boolean = false
+        private set
+    var hudUnavailableReason: String? = null
+        private set
+
+    private var hudStateListener: ((Boolean, String?) -> Unit)? = null
+
+    fun setHudStateListener(listener: (Boolean, String?) -> Unit) { hudStateListener = listener }
+    fun removeHudStateListener() { hudStateListener = null }
+
+    fun updateHudState(active: Boolean, reason: String?) {
+        hudActive = active
+        hudUnavailableReason = reason
+        hudStateListener?.invoke(active, reason)
+    }
+
     // 服务状态（0=待机, 1=运行, 2=推理中）
     var currentState: Int = 0
     var currentModelName: String = ""
