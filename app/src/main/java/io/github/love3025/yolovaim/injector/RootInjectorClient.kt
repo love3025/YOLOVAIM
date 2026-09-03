@@ -14,6 +14,23 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         private const val TAG = "RootInjector"
         private const val LAT_TAG = "YolovaimLatency"
         private const val CONNECT_TIMEOUT_MS = 10000L
+
+        /**
+         * Root 是否已授权（不是 su 二进制是否存在——是要真的能拿到 uid=0）。
+         * 防捕获 HUD 只能由 root daemon 创建，设置页的「防录屏」开关打开前
+         * 用它做门禁：拿不到 root 的设备根本不该能把开关打开。
+         * MainActivity 的权限检测也走这里，两处判据保持一致。
+         * 注意：root 管理器设为"询问"时会弹授权框，阻塞到用户选择为止。
+         */
+        fun isRootAvailable(): Boolean = try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val output = reader.readLine() ?: ""
+            process.waitFor()
+            output.contains("uid=0")
+        } catch (_: Exception) {
+            false
+        }
     }
 
     @Volatile

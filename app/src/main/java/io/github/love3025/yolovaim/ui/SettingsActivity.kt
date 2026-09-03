@@ -61,6 +61,15 @@ class SettingsActivity : AppCompatActivity() {
         ProjectionHolder.removeHudStateListener()
     }
 
+    /** Root 验证通过后真正打开防录屏:置开关 + 写配置 + 通知服务激活。 */
+    private fun enableHudSwitch() {
+        hudSwitchUpdating = true
+        hudSwitch.isChecked = true
+        hudSwitchUpdating = false
+        ConfigManager.updateConfig { useNativeHud = true }
+        notifyServiceIfRunning("HUD_PREF_CHANGED")
+    }
+
     /**
      * 防录屏开关的真实状态由 FloatService 广播:开关"开着"必须等于防捕获
      * 层真的生效。active=false 且 reason 非空 = 激活/自检失败(无 Root、
@@ -154,8 +163,31 @@ class SettingsActivity : AppCompatActivity() {
 
         hudSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (hudSwitchUpdating) return@setOnCheckedChangeListener
-            ConfigManager.updateConfig { useNativeHud = isChecked }
-            notifyServiceIfRunning("HUD_PREF_CHANGED")
+            if (!isChecked) {
+                ConfigManager.updateConfig { useNativeHud = false }
+                notifyServiceIfRunning("HUD_PREF_CHANGED")
+                return@setOnCheckedChangeListener
+            }
+            // 开启门禁:防捕获层只能由 root daemon 创建,拿不到 root 的设备
+            // 不该能把开关打开。服务端 HUD 正在跑(已验证过 root + 图层)就
+            // 跳过检测直接开;否则异步跑一次 su 探测,通过才真正打开。
+            if (ProjectionHolder.hudActive) {
+                enableHudSwitch()
+            } else {
+                // 先弹回关闭,探测结果回来再决定 —— su 探测会阻塞(root 管理
+                // 器弹授权框),不能卡主线程也不能让开关停在"未验证的开"上
+                hudSwitchUpdating = true; hudSwitch.isChecked = false; hudSwitchUpdating = false
+                Thread {
+                    val ok = io.github.love3025.yolovaim.injector.RootInjectorClient.isRootAvailable()
+                    runOnUiThread {
+                        if (ok) enableHudSwitch()
+                        else Toast.makeText(
+                            this, "防录屏需要 Root，未检测到 Root 授权，开关保持关闭",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }.apply { name = "hud-root-check"; isDaemon = true }.start()
+            }
         }
 
         scrollView.addView(content)

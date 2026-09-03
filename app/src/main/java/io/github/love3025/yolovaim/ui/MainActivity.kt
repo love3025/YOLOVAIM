@@ -882,17 +882,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun isRootAvailable(): Boolean {
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            val reader = java.io.BufferedReader(java.io.InputStreamReader(process.inputStream))
-            val output = reader.readLine() ?: ""
-            process.waitFor()
-            output.contains("uid=0")
-        } catch (_: Exception) {
-            false
-        }
-    }
+    private fun isRootAvailable(): Boolean = io.github.love3025.yolovaim.injector.RootInjectorClient.isRootAvailable()
 
     private fun isInjectorAvailable(): Boolean {
         return rootAvailable || isShizukuGranted()
