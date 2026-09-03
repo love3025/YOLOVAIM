@@ -9,6 +9,7 @@ import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
+import android.widget.TextView
 import kotlin.math.roundToInt
 import android.widget.ScrollView
 import com.google.android.material.button.MaterialButton
@@ -66,6 +67,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerClassesChanged: ((Set<Int>) -> Unit)? = null
     var onRecoilEnabledChanged: ((Boolean) -> Unit)? = null
     var onRecoilStrengthChanged: ((Float) -> Unit)? = null
+    var onRecoilSpeedChanged: ((Float) -> Unit)? = null
+    var onRecoilResetIntervalChanged: ((Int) -> Unit)? = null
     var onConvergeThreshChanged: ((Int) -> Unit)? = null
     var onAutoStopEnabledChanged: ((Boolean) -> Unit)? = null
     var onAimbotFovChanged: ((Int) -> Unit)? = null
@@ -105,6 +108,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var autoSaveDataset = false
     var recoilEnabled = false
     var recoilStrength = 0.5f
+    var recoilSpeed = 0.5f
+    var recoilResetIntervalMs = 300
     var autoStopEnabled = false
     private var navScrollView: ScrollView? = null
     private var savedNavScrollY = 0
@@ -123,6 +128,18 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     private data class TabDef(val label: String)
     private val tabs = listOf(TabDef("自瞄"), TabDef("扳机"), TabDef("防闪"), TabDef("模型"), TabDef("系统"))
     var activeTab = 0
+
+    // 防捕获 HUD 诊断(不显眼入口,方案 §6.4):系统 tab 底部一行小字,
+    // 显示当前渲染路径 native(root daemon 防捕获 layer)/ fallback
+    // (OverlayCanvasView 悬浮窗)。
+    var hudMode = "unknown"
+        private set
+    private var hudModeText: TextView? = null
+
+    fun updateHudMode(mode: String) {
+        hudMode = mode
+        hudModeText?.text = "HUD: $mode"
+    }
     private lateinit var contentContainer: LinearLayout
     private var switching = false
 
@@ -222,8 +239,13 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "压枪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = recoilEnabled; setOnCheckedChangeListener { _, c -> recoilEnabled = c; onRecoilEnabledChanged?.invoke(c) } })
         })
-        contentContainer.addView(buildStepperSlider("压枪强度", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
-        contentContainer.addView(MaterialTextView(context).apply { text = "按住开火键时持续下压"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "长按(按住不放)和连点(半自动)都适用,不分模式。范围=最多压到多深,速度=压下去多快"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, dp(2)) })
+        contentContainer.addView(buildStepperSlider("下压范围", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "最多压到多深,按屏幕高算：100% ≈ 0.37 屏高(1080p 约 400px)。压到这个深度就停住,不再往下走"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("压枪速度", recoilSpeed, 0f, 1.0f, "%.0f%%") { recoilSpeed = it; onRecoilSpeedChanged?.invoke(it) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "按住时每秒压多少：0%:30px 50%:90px 100%:150px。连点时每枪压「速度 × 100ms」(50% 约 9px/枪),与你按住多久无关。后坐力大、开火前期压不住就调高"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
+        contentContainer.addView(buildStepperSlider("开火重置间隔", recoilResetIntervalMs.toFloat(), 0f, 1000f, "0ms", 50f) { v -> val iv = v.toInt(); recoilResetIntervalMs = iv; onRecoilResetIntervalChanged?.invoke(iv) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "松开开火键超过此时长才开始回落；0 = 松开即重置。慢速连点要让它大于两枪的间隔,否则上一枪的补偿会在下一枪前蒸发(2 发/秒 + 默认 300ms 实测等效只剩 3px/s)"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildStepperSlider("收敛阈值", convergeThresh.toFloat(), 0f, 100f, "0px") { v -> val iv = v.toInt(); convergeThresh = iv; onConvergeThreshChanged?.invoke(iv) })
@@ -535,6 +557,15 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialSwitch(context).apply { isChecked = showInferInfo; setOnCheckedChangeListener { _, c -> showInferInfo = c; onShowInferInfoChanged?.invoke(c) } })
         })
         contentContainer.addView(MaterialTextView(context).apply { text = "屏幕上方显示推理时长/预处理/后处理耗时及检测数"; textSize = 10f; setTextColor(clOnSurfaceVariant) })
+        contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
+        contentContainer.addView(MaterialTextView(context).apply {
+            text = "HUD: $hudMode"
+            textSize = 9f
+            setTextColor(clOnSurfaceVariant)
+            alpha = 0.7f
+            hudModeText = this
+        })
     }
 
     private fun stepSizeForFmt(fmt: String): Float {

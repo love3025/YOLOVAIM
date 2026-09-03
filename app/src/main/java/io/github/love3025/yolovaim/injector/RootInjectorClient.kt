@@ -9,11 +9,28 @@ import java.io.InputStreamReader
 import java.io.OutputStream
 import io.github.love3025.yolovaim.model.TouchMethod
 
-open class RootInjectorClient(private val context: Context) : TouchInjectorInterface {
+open class RootInjectorClient(private val context: Context) : TouchInjectorInterface, HudClient {
     companion object {
         private const val TAG = "RootInjector"
         private const val LAT_TAG = "YolovaimLatency"
         private const val CONNECT_TIMEOUT_MS = 10000L
+
+        /**
+         * Root 是否已授权（不是 su 二进制是否存在——是要真的能拿到 uid=0）。
+         * 防捕获 HUD 只能由 root daemon 创建，设置页的「防录屏」开关打开前
+         * 用它做门禁：拿不到 root 的设备根本不该能把开关打开。
+         * MainActivity 的权限检测也走这里，两处判据保持一致。
+         * 注意：root 管理器设为"询问"时会弹授权框，阻塞到用户选择为止。
+         */
+        fun isRootAvailable(): Boolean = try {
+            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val output = reader.readLine() ?: ""
+            process.waitFor()
+            output.contains("uid=0")
+        } catch (_: Exception) {
+            false
+        }
     }
 
     @Volatile
@@ -23,6 +40,19 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     private var daemonReader: BufferedReader? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val cmdLock = Object()
+
+    // 单线程复用，不是每次调用起一个线程 —— 这条路径是每帧走的。
+    private val readerExec = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "root-daemon-reader").apply { isDaemon = true }
+    }
+
+    // daemon 正常回复在 1ms 内（execCmd 里 >0.5ms 就打日志了）。
+    // 500ms 足够宽松到不会误伤，又不至于让一帧卡到肉眼可见。
+    private val CMD_TIMEOUT_MS = 500L
+
+    // GET_FIRE_STATE 是后加的命令，旧 daemon 不认识。连接时探一次，
+    // 不支持就永久回退到 IS_FINGER_IN_FIRE_ZONE，不在热路径上反复试。
+    @Volatile private var supportsFireState = false
 
     override fun connect(callback: InjectorCallback) {
         Log.d(TAG, "Attempting root connection...")
@@ -62,6 +92,14 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
             }
 
             connected = true
+
+            // 能力探测：新增命令只在这里试一次。旧 daemon 会回 ERR:unknown
+            // command，此后热路径永远走已验证的 IS_FINGER_IN_FIRE_ZONE。
+            val probe = execCmd("GET_FIRE_STATE")
+            supportsFireState = probe != null && probe.startsWith("OK:") &&
+                                probe.removePrefix("OK:").trim().toIntOrNull() != null
+            Log.d(TAG, "GET_FIRE_STATE supported=$supportsFireState (probe=$probe)")
+
             Log.d(TAG, "Root daemon connected")
 
             // Liveness monitoring thread
@@ -97,14 +135,34 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
 
     override fun isConnected(): Boolean = connected && process != null
 
-    private fun execCmd(cmd: String): String? {
+    /**
+     * 阻塞往返，带超时。
+     *
+     * 超时���是可选的保险：这个函数在推理循环里每帧都被调用，而
+     * BufferedReader.readLine() 本身没有超时。daemon 只要有一次没吐出预期的
+     * 回复，推理线程就永久停在这里 —— 表现是「应用能打开、不闪退、但完全
+     * 没有效果」，没有崩溃也没有异常日志，极难定位（2026-08-31 实测踩过）。
+     *
+     * 超时后把 connected 置 false：读线程已经卡死在 readLine 上，
+     * cancel(true) 对阻塞的 InputStream 读无效，后续命令会排在它后面。
+     * 与其每帧再挂一次，不如直接进入断开状态，让上层看到真实情况。
+     */
+    private fun execCmd(cmd: String, timeoutMs: Long = CMD_TIMEOUT_MS): String? {
         synchronized(cmdLock) {
             if (!connected) return null
             val t0 = System.nanoTime()
             try {
                 daemonStdin!!.write("$cmd\n".toByteArray())
                 daemonStdin!!.flush()
-                val resp = daemonReader?.readLine()
+                val fut = readerExec.submit<String?> { daemonReader?.readLine() }
+                val resp = try {
+                    fut.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } catch (te: java.util.concurrent.TimeoutException) {
+                    fut.cancel(true)
+                    Log.e(TAG, "execCmd timeout (${timeoutMs}ms): $cmd")
+                    connected = false
+                    return null
+                }
                 val dtMs = (System.nanoTime() - t0) / 1e6
                 // Log slow commands. Daemon IPC is usually <1ms; >1ms indicates daemon is behind.
                 if (dtMs > 0.5) {
@@ -156,6 +214,68 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
 
     protected fun sendOk(cmd: String): Boolean = execOk(cmd)
     protected fun sendCmd(cmd: String): String? = execCmd(cmd)
+
+    // ================= HudClient(防捕获 native HUD)=================
+    // 协议见 root_daemon.cpp 头部注释。除 hudOn 外全部走 execNoReply
+    // ('!' 前缀):这些调用出现在推理热路径上,不能阻塞等回话。
+
+    override fun hudOn(): Boolean {
+        val resp = execCmd("HUD_ON", 3000L) // layer 创建含 binder 往返,给宽裕超时
+        return resp?.startsWith("OK") == true
+    }
+
+    override fun hudOff() {
+        execNoReply("HUD_OFF")
+    }
+
+    override fun hudToggle(what: String, on: Boolean) {
+        execNoReply("HUD_TOGGLE $what ${if (on) 1 else 0}")
+    }
+
+    override fun hudCheck(on: Boolean) {
+        execNoReply(if (on) "HUD_CHECK_ON" else "HUD_CHECK_OFF")
+    }
+
+    override fun hudGeo(w: Int, h: Int) {
+        execNoReply("HUD_GEO $w $h")
+    }
+
+    override fun hudFov(r: Int) {
+        execNoReply("HUD_FOV $r")
+    }
+
+    override fun hudRange(r: Int) {
+        execNoReply("HUD_RANGE $r")
+    }
+
+    override fun hudBoxes(rects: IntArray) {
+        val n = rects.size / 4
+        // 20 框上限与 daemon 端一致;每行 ~360 字符,远低于 4096 的行缓冲
+        val sb = StringBuilder(32 + n * 24)
+        sb.append("HUD_BOXES ").append(n)
+        for (v in rects) sb.append(' ').append(v)
+        execNoReply(sb.toString())
+    }
+
+    override fun hudTextMask(w: Int, h: Int, fg: Int, bg: Int, mask: ByteArray, len: Int) {
+        // 头部一行 + 掩码整块,两次 write 一次 flush,全程只抢一次 cmdLock。
+        // BufferedOutputStream 对 len >= 缓冲区的写入会直接落到 fd,所以
+        // 48KB 的掩码就是一次 write 系统调用(旧 RLE 协议是 270 次)。
+        val n = if (len > mask.size) mask.size else len
+        if (w <= 0 || h <= 0 || n < w * h) return
+        val header = "!HUD_TEXT_MASK $w $h ${"%08X".format(fg)} ${"%08X".format(bg)} $n\n"
+        synchronized(cmdLock) {
+            if (!connected) return
+            try {
+                daemonStdin!!.write(header.toByteArray())
+                daemonStdin!!.write(mask, 0, n)
+                daemonStdin!!.flush()
+            } catch (e: Exception) {
+                Log.e(TAG, "hudTextMask error: ${e.message}")
+                connected = false
+            }
+        }
+    }
 
     override fun tap(x: Int, y: Int) {
         execOk("DOWN $x $y")
@@ -223,6 +343,13 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     override fun isFingerInFireZone(): Boolean {
         val resp = execCmd("IS_FINGER_IN_FIRE_ZONE")
         return resp == "OK:1"
+    }
+
+    override fun consumeFireState(): Int {
+        if (!supportsFireState) return -1        // 不支持：本地返回，不发 IPC
+        val resp = execCmd("GET_FIRE_STATE") ?: return -1
+        if (!resp.startsWith("OK:")) return -1
+        return resp.removePrefix("OK:").trim().toIntOrNull() ?: -1
     }
 
     override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {

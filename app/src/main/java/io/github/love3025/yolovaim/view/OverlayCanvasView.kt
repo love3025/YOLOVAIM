@@ -77,7 +77,12 @@ class OverlayCanvasView(context: Context) : View(context) {
             val cy = captureHeight / 2f
             val half = rangeRadius.toFloat()
             drawCornerBox(canvas, cx - half, cy - half, cx + half, cy + half)
-            if (showCenterDot) canvas.drawCircle(cx, cy, 4f, paintCenter)
+        }
+
+        // 中心点是独立开关:旧实现嵌在 showCaptureRange 的 if 里,单独开
+        // 画不出来(native HUD 迁移时顺手修掉,两条路径行为一致)
+        if (showCenterDot) {
+            canvas.drawCircle(captureWidth / 2f, captureHeight / 2f, 4f, paintCenter)
         }
 
         if (showFov && fovRadius > 0) {

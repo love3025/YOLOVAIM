@@ -185,6 +185,24 @@ class AreaSettingsView(context: Context) : View(context) {
     private val edgeThreshold get() = (24 * resources.displayMetrics.density).toInt()
     private val cornerRadius get() = (12 * resources.displayMetrics.density).toFloat()
 
+    // 将所有区域钳制到当前视图范围内，防止恢复的配置尺寸大于视图导致 coerceIn 崩溃
+    private fun clampAreasToView() {
+        if (width <= 0 || height <= 0) return
+        areas.forEach { area ->
+            if (area.name == "摇杆范围") {
+                val size = area.width.coerceAtMost(area.height)
+                    .coerceIn(1, width.coerceAtMost(height).coerceAtLeast(1))
+                area.width = size
+                area.height = size
+            } else {
+                area.width = area.width.coerceIn(1, width)
+                area.height = area.height.coerceIn(1, height)
+            }
+            area.x = area.x.coerceIn(0, (width - area.width).coerceAtLeast(0))
+            area.y = area.y.coerceIn(0, (height - area.height).coerceAtLeast(0))
+        }
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
 
@@ -220,6 +238,9 @@ class AreaSettingsView(context: Context) : View(context) {
 
         okButtonRect.set(buttonsLeft.toFloat(), buttonsBottom - buttonHeight, buttonsLeft + buttonWidth.toFloat(), buttonsBottom)
         cancelButtonRect.set((buttonsLeft + buttonWidth + buttonSpacing).toFloat(), buttonsBottom - buttonHeight, (buttonsLeft + totalButtonsWidth).toFloat(), buttonsBottom)
+
+        // 视图尺寸确定后（含旋转/分屏变化），确保恢复的区域落在视图内
+        clampAreasToView()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -346,8 +367,8 @@ class AreaSettingsView(context: Context) : View(context) {
 
                 if (touchMode == TouchMode.DRAG_REGION && activeAreaIndex >= 0 && moved) {
                     val area = areas[activeAreaIndex]
-                    area.x = (area.x + dx).coerceIn(0, width - area.width)
-                    area.y = (area.y + dy).coerceIn(0, height - area.height)
+                    area.x = (area.x + dx).coerceIn(0, (width - area.width).coerceAtLeast(0))
+                    area.y = (area.y + dy).coerceIn(0, (height - area.height).coerceAtLeast(0))
                     invalidate()
                 } else if (touchMode == TouchMode.EDGE_RESIZE && activeAreaIndex >= 0 && moved) {
                     resizeArea(activeAreaIndex, activeEdge, dx, dy)
@@ -425,31 +446,31 @@ class AreaSettingsView(context: Context) : View(context) {
                 Edge.NONE -> 0
             }
 
-            val newSize = (area.width + delta).coerceIn(minSize, width.coerceAtMost(height))
+            val newSize = (area.width + delta).coerceIn(minSize, width.coerceAtMost(height).coerceAtLeast(minSize))
             val centerX = area.x + area.width / 2
             val centerY = area.y + area.height / 2
             area.width = newSize
             area.height = newSize
-            area.x = (centerX - newSize / 2).coerceIn(0, width - newSize)
-            area.y = (centerY - newSize / 2).coerceIn(0, height - newSize)
+            area.x = (centerX - newSize / 2).coerceIn(0, (width - newSize).coerceAtLeast(0))
+            area.y = (centerY - newSize / 2).coerceIn(0, (height - newSize).coerceAtLeast(0))
             return
         }
 
         when (edge) {
             Edge.TOP -> {
-                val newY = (area.y + dy).coerceIn(0, area.bottom - minSize)
+                val newY = (area.y + dy).coerceIn(0, (area.bottom - minSize).coerceAtLeast(0))
                 val change = area.y - newY
                 area.y = newY
                 area.height += change
             }
-            Edge.BOTTOM -> area.height = (area.height + dy).coerceIn(minSize, height - area.y)
+            Edge.BOTTOM -> area.height = (area.height + dy).coerceIn(minSize, (height - area.y).coerceAtLeast(minSize))
             Edge.LEFT -> {
-                val newX = (area.x + dx).coerceIn(0, area.right - minSize)
+                val newX = (area.x + dx).coerceIn(0, (area.right - minSize).coerceAtLeast(0))
                 val change = area.x - newX
                 area.x = newX
                 area.width += change
             }
-            Edge.RIGHT -> area.width = (area.width + dx).coerceIn(minSize, width - area.x)
+            Edge.RIGHT -> area.width = (area.width + dx).coerceIn(minSize, (width - area.x).coerceAtLeast(minSize))
             Edge.TOP_LEFT -> { resizeArea(areaIdx, Edge.TOP, dx, dy); resizeArea(areaIdx, Edge.LEFT, dx, dy) }
             Edge.TOP_RIGHT -> { resizeArea(areaIdx, Edge.TOP, dx, dy); resizeArea(areaIdx, Edge.RIGHT, dx, dy) }
             Edge.BOTTOM_LEFT -> { resizeArea(areaIdx, Edge.BOTTOM, dx, dy); resizeArea(areaIdx, Edge.LEFT, dx, dy) }
@@ -489,6 +510,8 @@ class AreaSettingsView(context: Context) : View(context) {
             }
         }
         areasInitialized = true
+        // 恢复的配置可能来自其他分辨率/方向，立即钳制；若视图尚未布局则由 onSizeChanged 兜底
+        clampAreasToView()
         invalidate()
     }
 

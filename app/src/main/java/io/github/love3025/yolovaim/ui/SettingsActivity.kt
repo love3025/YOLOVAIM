@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -34,10 +35,53 @@ class SettingsActivity : AppCompatActivity() {
     private val displayDensity: Float by lazy { resources.displayMetrics.density }
     private fun dp(value: Int): Int = (value * displayDensity + 0.5f).toInt()
 
+    // 防录屏开关引用 —— 服务端激活失败时(onHudStateChanged 广播回来)
+    // 要把它弹回关闭,所以得从生命周期回调里够得着。
+    private lateinit var hudSwitch: MaterialSwitch
+
+    // 服务端回写导致的 setChecked 也会触发 OnCheckedChangeListener,
+    // 门闩住,避免把"弹回关闭"再当作用户操作重放一遍(重复发 intent)。
+    private var hudSwitchUpdating = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ConfigManager.init(this)
         setContentView(createLayout())
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ProjectionHolder.setHudStateListener { active, reason ->
+            runOnUiThread { onHudStateChanged(active, reason) }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        ProjectionHolder.removeHudStateListener()
+    }
+
+    /** Root 验证通过后真正打开防录屏:置开关 + 写配置 + 通知服务激活。 */
+    private fun enableHudSwitch() {
+        hudSwitchUpdating = true
+        hudSwitch.isChecked = true
+        hudSwitchUpdating = false
+        ConfigManager.updateConfig { useNativeHud = true }
+        notifyServiceIfRunning("HUD_PREF_CHANGED")
+    }
+
+    /**
+     * 防录屏开关的真实状态由 FloatService 广播:开关"开着"必须等于防捕获
+     * 层真的生效。active=false 且 reason 非空 = 激活/自检失败(无 Root、
+     * 图层创建失败等)→ 把开关弹回关闭并提示原因;reason 为空是用户自己
+     * 关的或服务停止,不动开关。
+     */
+    private fun onHudStateChanged(active: Boolean, reason: String?) {
+        if (active || reason == null || !hudSwitch.isChecked) return
+        hudSwitchUpdating = true
+        hudSwitch.isChecked = false
+        hudSwitchUpdating = false
+        Toast.makeText(this, "防录屏开启失败：$reason\n开关已自动关闭", Toast.LENGTH_LONG).show()
     }
 
     private fun createLayout(): View {
@@ -100,6 +144,49 @@ class SettingsActivity : AppCompatActivity() {
                 ProjectionHolder.needsModelReload = true
                 threadRow.visibility = View.GONE
                 reloadModelIfServiceRunning()
+            }
+        }
+
+        // === 防捕获 section ===
+        content.addView(createSectionHeader("防捕获"))
+
+        // 防录屏开关
+        val hudRow = createSwitchRow(
+            title = "防录屏",
+            subtitle = "检测框、FOV 圈等显示元素画在防捕获层上，录屏 / 截屏不可见。" +
+                "需要 Root；打开时会实际验证防捕获层能否创建，" +
+                "设备不支持将自动弹回关闭。关闭后使用普通悬浮窗，会被录进画面"
+        )
+        hudSwitch = hudRow.tag as MaterialSwitch
+        hudSwitch.isChecked = ConfigManager.getConfig().useNativeHud
+        content.addView(hudRow)
+
+        hudSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (hudSwitchUpdating) return@setOnCheckedChangeListener
+            if (!isChecked) {
+                ConfigManager.updateConfig { useNativeHud = false }
+                notifyServiceIfRunning("HUD_PREF_CHANGED")
+                return@setOnCheckedChangeListener
+            }
+            // 开启门禁:防捕获层只能由 root daemon 创建,拿不到 root 的设备
+            // 不该能把开关打开。服务端 HUD 正在跑(已验证过 root + 图层)就
+            // 跳过检测直接开;否则异步跑一次 su 探测,通过才真正打开。
+            if (ProjectionHolder.hudActive) {
+                enableHudSwitch()
+            } else {
+                // 先弹回关闭,探测结果回来再决定 —— su 探测会阻塞(root 管理
+                // 器弹授权框),不能卡主线程也不能让开关停在"未验证的开"上
+                hudSwitchUpdating = true; hudSwitch.isChecked = false; hudSwitchUpdating = false
+                Thread {
+                    val ok = io.github.love3025.yolovaim.injector.RootInjectorClient.isRootAvailable()
+                    runOnUiThread {
+                        if (ok) enableHudSwitch()
+                        else Toast.makeText(
+                            this, "防录屏需要 Root，未检测到 Root 授权，开关保持关闭",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }.apply { name = "hud-root-check"; isDaemon = true }.start()
             }
         }
 
@@ -218,14 +305,17 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun reloadModelIfServiceRunning() {
+        notifyServiceIfRunning("RELOAD_MODEL")
+    }
+
+    /** 服务在跑就发一个 action intent,让运行中的 FloatService 应用设置变更。 */
+    private fun notifyServiceIfRunning(intentAction: String) {
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val running = am.getRunningServices(100).any {
             it.service.className == FloatService::class.java.name
         }
         if (running) {
-            startForegroundService(Intent(this, FloatService::class.java).apply {
-                action = "RELOAD_MODEL"
-            })
+            startForegroundService(Intent(this, FloatService::class.java).setAction(intentAction))
         }
     }
 

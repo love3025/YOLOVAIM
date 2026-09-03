@@ -12,6 +12,7 @@ import io.github.love3025.yolovaim.model.AreaConfig
 import io.github.love3025.yolovaim.injector.TouchInjectorInterface
 import io.github.love3025.yolovaim.view.TriggerOverlayView
 import io.github.love3025.yolovaim.util.ProjectionHolder
+import io.github.love3025.yolovaim.util.allowDisplayCutout
 
 class TriggerController(
     private val context: Context,
@@ -65,7 +66,7 @@ class TriggerController(
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        )
+        ).allowDisplayCutout()
         p.gravity = Gravity.TOP or Gravity.START
         p.x = screenWidth() / 2 - size / 2
         p.y = screenHeight() / 2 - size / 2

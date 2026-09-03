@@ -51,14 +51,17 @@ data class AppConfig(
     var classTriggerOffsets: Map<Int, Float> = emptyMap(),  // per-class trigger Y offset
     var triggerClasses: Set<Int> = emptySet(),  // empty = all classes
     var recoilEnabled: Boolean = false,
-    var recoilStrength: Float = 0.5f,  // 0.0 ~ 1.0
+    var recoilStrength: Float = 0.5f,       // 下压范围 0.0~1.0：最多压到多深，长按连点共用。JSON key 保留旧名，勿改，否则老配置读不到
+    var recoilSpeed: Float = 0.5f,          // 压枪速度 0.0~1.0 → px/s：每秒压多少，长按连点共用
+    var recoilResetIntervalMs: Int = 300,   // 松开多久后回落；0 = 立即重置
     var convergeThresh: Int = 10,
     var autoStopEnabled: Boolean = false,
     var useCpuInference: Boolean = false,
     var cpuThreadCount: Int = 4,
     var touchMethodIndex: Int = 0,  // 0=Uinput, 1=InputManager
     var kf: Float = 0.05f,          // PID feedforward gain (F term, 0.01-0.20)
-    var showInferInfo: Boolean = false  // render preprocess/infer/postprocess time + det count at top of overlay
+    var showInferInfo: Boolean = false,  // render preprocess/infer/postprocess time + det count at top of overlay
+    var useNativeHud: Boolean = true     // 防捕获 native HUD;false = 强制走普通悬浮窗路线(会被录屏捕获)
 )
 
 object ConfigManager {
@@ -122,13 +125,19 @@ object ConfigManager {
                         triggerClasses = parseIntSet(obj.optJSONArray("triggerClasses")),
                         recoilEnabled = obj.optBoolean("recoilEnabled", false),
                         recoilStrength = obj.optDouble("recoilStrength", 0.5).toFloat(),
+                        recoilSpeed = obj.optDouble("recoilSpeed", 0.5).toFloat(),
+                        // recoilTapStrength / recoilTapSpeed 两个 key 已废弃：压枪收敛成
+                        // 「范围 + 速度」两个参数后不再有连点专属项。老配置里残留的这两个
+                        // key 读进来也没处放，不读即可 —— 下次 save() 会自然把它们写掉。
+                        recoilResetIntervalMs = obj.optInt("recoilResetIntervalMs", 300),
                         convergeThresh = obj.optInt("convergeThresh", 10),
                         autoStopEnabled = obj.optBoolean("autoStopEnabled", false),
                         useCpuInference = obj.optBoolean("useCpuInference", false),
                         cpuThreadCount = obj.optInt("cpuThreadCount", 4),
                         touchMethodIndex = obj.optInt("touchMethodIndex", 0),
                         kf = obj.optDouble("kf", 0.05).toFloat(),
-                        showInferInfo = obj.optBoolean("showInferInfo", false)
+                        showInferInfo = obj.optBoolean("showInferInfo", false),
+                        useNativeHud = obj.optBoolean("useNativeHud", true)
                     )
                 }
             }
@@ -186,6 +195,8 @@ object ConfigManager {
                     put("triggerClasses", serializeIntSet(config.triggerClasses))
                     put("recoilEnabled", config.recoilEnabled)
                     put("recoilStrength", config.recoilStrength.toDouble())
+                    put("recoilSpeed", config.recoilSpeed.toDouble())
+                    put("recoilResetIntervalMs", config.recoilResetIntervalMs)
                     put("convergeThresh", config.convergeThresh)
                     put("autoStopEnabled", config.autoStopEnabled)
                     put("useCpuInference", config.useCpuInference)
@@ -193,6 +204,7 @@ object ConfigManager {
                     put("touchMethodIndex", config.touchMethodIndex)
                     put("kf", config.kf.toDouble())
                     put("showInferInfo", config.showInferInfo)
+                    put("useNativeHud", config.useNativeHud)
                 }
                 file.writeText(obj.toString(2))
             }

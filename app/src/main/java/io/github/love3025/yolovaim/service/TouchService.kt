@@ -2,6 +2,7 @@ package io.github.love3025.yolovaim.service
 
 import android.content.Context
 import android.util.Log
+import io.github.love3025.yolovaim.injector.HudClient
 import io.github.love3025.yolovaim.injector.InjectorCallback
 import io.github.love3025.yolovaim.injector.InputManagerInjectorClient
 import io.github.love3025.yolovaim.injector.RootInjectorClient
@@ -55,6 +56,13 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     var onStateChanged: ((ConnectionState) -> Unit)? = null
 
     private var delegate: TouchInjectorInterface? = null
+
+    /**
+     * 防捕获 native HUD 通道:仅 root 注入路径(RootInjectorClient)实现
+     * HudClient。Shizuku / InputManager 路径返回 null,FloatService 拿到
+     * null 就走 OverlayCanvasView 兜底(改进方案.md §6)。
+     */
+    fun hud(): HudClient? = delegate as? HudClient
 
     private fun updateState(newState: ConnectionState) {
         state = newState
@@ -221,6 +229,8 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
     }
 
     override fun isFingerInFireZone(): Boolean = delegate?.isFingerInFireZone() ?: false
+
+    override fun consumeFireState(): Int = delegate?.consumeFireState() ?: -1
 
     override fun setJoystickZone(left: Int, top: Int, right: Int, bottom: Int) {
         delegate?.setJoystickZone(left, top, right, bottom)

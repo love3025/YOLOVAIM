@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -280,6 +281,22 @@ static void clearProtoAState() {
     g_proto_a_touch_major = 0;
 }
 
+// 开火区上升沿计数 —— 与 touch_core 同样的理由：evdev 事件是 120-240Hz，
+// 应用侧只能按推理帧率查电平，短于帧间隔的点击会被整帧漏掉。在这里数，
+// 半自动连点才能按「打了几枪」而不是「按了多久」计量。
+// 调用方均已持有 g_mutex；g_fire_taps 要被 IPC 线程 consume，故用原子。
+static std::atomic<int> g_fire_taps{0};
+static int g_fire_prev = 0;
+
+static inline void countFireEdgeLocked() {
+    int now = 0;
+    for (auto& ptr : g_physical_pointers) {
+        if (pointInZone(g_fire_zone, (int)ptr.x, (int)ptr.y)) { now = 1; break; }
+    }
+    if (now && !g_fire_prev) g_fire_taps.fetch_add(1, std::memory_order_relaxed);
+    g_fire_prev = now;
+}
+
 // Update physical pointers from Protocol B slots (matches reference: updatePhysicalPointers)
 static void updatePhysicalPointers() {
     std::lock_guard<std::mutex> guard(g_mutex);
@@ -327,6 +344,7 @@ static void updatePhysicalPointers() {
         }
     }
 
+    countFireEdgeLocked();
     g_dirty = true;
 }
 
@@ -353,6 +371,7 @@ static void updatePhysicalPointersProtoA() {
     g_cached_finger_result[0] = (int)g_physical_pointers.size();
     g_cached_finger_time = currentTimeMillis();
 
+    countFireEdgeLocked();
     g_dirty = true;
 }
 
@@ -487,6 +506,7 @@ static int processEvdevEvents(int fd) {
                     if (had_active) {
                         LOGD("PHYS_CLEAR[protoA] grabbed=%d", g_grabbed);
                     }
+                    countFireEdgeLocked();
                     g_dirty = true;
                 }
 
@@ -502,6 +522,7 @@ static int processEvdevEvents(int fd) {
                 if (had_active) {
                     LOGD("PHYS_CLEAR[btn-touch-up] grabbed=%d", g_grabbed);
                 }
+                countFireEdgeLocked();
                 g_dirty = true;
                 g_proto_a_count = 0;
                 g_proto_a_has_pos = false;
@@ -747,6 +768,16 @@ bool inputmgr_is_finger_in_fire_zone(void) {
         if (pointInZone(g_fire_zone, (int)ptr.x, (int)ptr.y)) return true;
     }
     return false;
+}
+
+// 一次往返同时取走电平和点击数：(taps << 1) | level。理由同 touch_core。
+int inputmgr_consume_fire_state(void) {
+    const int taps = g_fire_taps.exchange(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> guard(g_mutex);
+    for (auto& ptr : g_physical_pointers) {
+        if (pointInZone(g_fire_zone, (int)ptr.x, (int)ptr.y)) return (taps << 1) | 1;
+    }
+    return taps << 1;
 }
 
 bool inputmgr_is_finger_in_joystick_zone(void) {

@@ -155,6 +155,13 @@ Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeIsFingerInF
     return touch_is_finger_in_fire_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jint JNICALL
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeConsumeFireState(
+    JNIEnv*, jclass)
+{
+    return (jint)touch_consume_fire_state();
+}
+
 JNIEXPORT void JNICALL
 Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeSetJoystickZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
