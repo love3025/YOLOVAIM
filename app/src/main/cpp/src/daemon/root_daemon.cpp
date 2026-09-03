@@ -7,7 +7,10 @@
  *   Commands (stdin, one per line):
  *     SET_RESOLUTION <screenW> <screenH>
  *     SET_DEVICE_RESOLUTION <devW> <devH>
- *     SET_ORIENTATION <1|0>          (1=landscape, 0=portrait)
+ *     SET_ORIENTATION <0|1|2|3>      (Display.getRotation(): 0=portrait,
+ *                                     1=90, 2=180, 3=270. 1 and 3 are both
+ *                                     landscape but 180 apart — collapsing
+ *                                     them to a bool mirrors every coord.)
  *     OPEN_UINPUT
  *     CLOSE_UINPUT
  *     START_GETEVENT
@@ -148,8 +151,10 @@ static void handle_command(const char* cmd) {
         reply("OK");
     }
     else if (strncmp(buf, "SET_ORIENTATION ", 16) == 0) {
-        int landscape = atoi(buf + 16);
-        touch_set_screen_params(g_screen_w, g_screen_h, landscape != 0);
+        // 0..3 = Display.getRotation()。老客户端只发 0/1,语义不变
+        // (0=竖屏, 1=横屏 90°),新客户端会发 2/3。
+        int rotation = atoi(buf + 16);
+        touch_set_screen_params(g_screen_w, g_screen_h, rotation);
         reply("OK");
     }
     else if (strcmp(buf, "OPEN_UINPUT") == 0) {
@@ -295,8 +300,8 @@ static void handle_command(const char* cmd) {
             reply("ERR:invalid args");
         }
     }
-    else if (strncmp(buf, "STEALTH_SET_ORIENTATION ", 26) == 0) {
-        int n = atoi(buf + 26);
+    else if (strncmp(buf, "STEALTH_SET_ORIENTATION ", 24) == 0) {
+        int n = atoi(buf + 24);
         stealth_set_orientation(n);
         reply("OK");
     }
