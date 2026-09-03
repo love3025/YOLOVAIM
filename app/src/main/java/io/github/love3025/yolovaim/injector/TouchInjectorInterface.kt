@@ -50,6 +50,19 @@ interface TouchInjectorInterface {
     fun setResolution(screenW: Int, screenH: Int, devW: Int, devH: Int)
     fun setOrientationConfig(landscapeStart: Boolean)
 
+    /**
+     * 当前显示旋转(Display.getRotation():0=自然方向 1=90° 2=180° 3=270°)。
+     *
+     * 只传「是否横屏」是不够的:1 和 3 都是横屏,但相差 180°,注入坐标与
+     * zone 判定按同一张表算会整体点镜像 —— 表现就是充电口换一边后自瞄和
+     * 扳机全部落空。
+     *
+     * 刻意不写成接口默认实现:Kotlin 2.0 默认仍是 DefaultImpls 模式,
+     * Java 实现类([ShizukuInjectorClient])继承不到默认体,编译期就会炸。
+     * 还没接旋转的后端在自己类里退回 [setOrientationConfig] 即可。
+     */
+    fun setDisplayRotation(rotation: Int)
+
     fun startGeteventListener()
     fun stopGeteventListener()
 

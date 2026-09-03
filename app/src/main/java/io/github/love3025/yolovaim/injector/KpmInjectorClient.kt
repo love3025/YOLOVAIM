@@ -97,9 +97,12 @@ class KpmInjectorClient(context: Context) : RootInjectorClient(context) {
     }
 
     override fun setOrientationConfig(landscapeStart: Boolean) {
-        // touchc 的 orientation 1 与 touch_core 的 landscape 分支是同一个旋转
-        // (phys.x = 短边 - y, phys.y = x);180°/270°(2/3)暂无信息源
         sendOk("STEALTH_SET_ORIENTATION ${if (landscapeStart) 1 else 0}")
+    }
+
+    // touchc 与 touch_core 用同一套 0..3 编号(Display.getRotation()),透传。
+    override fun setDisplayRotation(rotation: Int) {
+        sendOk("STEALTH_SET_ORIENTATION $rotation")
     }
 
     override fun blockPhysicalTouch() {
