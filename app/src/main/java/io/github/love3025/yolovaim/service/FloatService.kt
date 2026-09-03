@@ -214,6 +214,12 @@ class FloatService : Service() {
     private var areaSettingsAdded = false
     private val savedAreas = mutableListOf<AreaConfig>()
 
+    // 用户是否真的在「区域设置」里配过区域。savedAreas 永远被补满 4 个占位以喂给
+    // AreaSettingsView，所以「有没有元素」并不能代表「配没配」—— 占位是
+    // AreaConfig() 的默认值(150x150 @ 0,0)，当成真实开火区用就会把每一枪都点到
+    // 屏幕左上角。区分这两者是本标志存在的唯一理由。
+    private var areasConfigured = false
+
     // Area index constants — magic number prevention
     private val AREA_INDEX_FIRE = 0
     private val AREA_INDEX_TRIGGER = 1
@@ -268,13 +274,14 @@ class FloatService : Service() {
         )
 
         triggerController = TriggerController(
-            context = this,
-            wm = wm,
             touchClient = { touchService },
-            savedAreas = { savedAreas },
-            screenWidth = { screenWidth },
-            screenHeight = { screenHeight },
-            dp = { dp(it) }
+            fireArea = { if (areasConfigured) savedAreas.getOrNull(AREA_INDEX_FIRE) else null },
+            fallbackTapCircle = {
+                val size = dp(triggerTouchRange.coerceAtLeast(30))
+                // triggerAreaX/Y 由本类持有的触发圆圈维护(setupTriggerOverlay +
+                // onPositionChanged)，用户拖动后也是最新值。
+                Triple(triggerAreaX + size / 2, triggerAreaY + size / 2, size / 2)
+            }
         )
 
         inferenceManager = InferenceManager(
@@ -338,8 +345,6 @@ class FloatService : Service() {
         triggerController.triggerUpFluct = triggerUpFluct
         triggerController.triggerDownFluct = triggerDownFluct
         triggerController.triggerTouchDuration = triggerTouchDuration
-        triggerController.triggerTouchRange = triggerTouchRange
-        triggerController.triggerShowArea = triggerShowArea
         triggerController.autoStopEnabled = autoStopEnabled
         triggerController.triggerOffsetYRatio = triggerOffsetYRatio
         triggerController.triggerClasses = triggerClasses.toMutableSet()
@@ -393,7 +398,9 @@ class FloatService : Service() {
         triggerClasses = cfg.triggerClasses.toMutableSet()
         savedAreas.clear()
         savedAreas.addAll(cfg.areas)
-        // 确保有4个区域（兼容旧配置）
+        areasConfigured = cfg.areas.isNotEmpty()
+        // 确保有4个区域（兼容旧配置）。注意这里补的是占位，不是可用配置 ——
+        // 判断「用户配没配」一律看 areasConfigured。
         while (savedAreas.size < 4) {
             savedAreas.add(AreaConfig(name = when (savedAreas.size) {
                 0 -> "开火区"
@@ -1120,10 +1127,12 @@ class FloatService : Service() {
                 currentClasses = entry.classes
                 // 模型切换时更新类别选择：保留仍存在的类别，新增的自动选中
                 if (currentClasses.isNotEmpty()) {
+                    // NONE_CLASS 要留着：它代表用户显式关掉了全部类别，
+                    // 被过滤掉的话下面的 isEmpty 分支会把全部类别又打开。
                     val validIds = currentClasses.keys
-                    aimClasses = aimClasses.filter { it in validIds }.toMutableSet()
+                    aimClasses = aimClasses.filter { it in validIds || it == GuiPanelView.NONE_CLASS }.toMutableSet()
                     if (aimClasses.isEmpty()) aimClasses = validIds.toMutableSet()
-                    triggerClasses = triggerClasses.filter { it in validIds }.toMutableSet()
+                    triggerClasses = triggerClasses.filter { it in validIds || it == GuiPanelView.NONE_CLASS }.toMutableSet()
                     if (triggerClasses.isEmpty()) triggerClasses = validIds.toMutableSet()
                 }
                 Log.d(TAG, "模型类别: $currentClasses, aimClasses=$aimClasses, triggerClasses=$triggerClasses")
@@ -1249,14 +1258,25 @@ class FloatService : Service() {
             ConfigManager.updateConfig { range = px }
         }
         guiPanel.onConfidenceChanged = { currentConfidence = it; JniCallBack.setConfidence(it); ConfigManager.updateConfig { confidence = it } }
-        guiPanel.onTriggerEnabled = { triggerEnabled = it; triggerController.triggerEnabled = it; ConfigManager.updateConfig { triggerEnabled = it } }
+        guiPanel.onTriggerEnabled = {
+            triggerEnabled = it; triggerController.triggerEnabled = it
+            ConfigManager.updateConfig { triggerEnabled = it }
+            // 没配开火区就打开扳机，枪会开在屏幕中央的触发圆圈里而不是开火键上。
+            // 这条提示是为了不让它再静默地"看起来完全没反应"。
+            if (it && !areasConfigured) {
+                android.widget.Toast.makeText(
+                    this, "尚未设置开火区，扳机会点在屏幕中央的触发圆圈里\n请到「区域设置」里框出开火键",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
         guiPanel.onTriggerReactionSpeed = { triggerReactionSpeed = it; triggerController.triggerReactionSpeed = it; ConfigManager.updateConfig { triggerReactionSpeed = it } }
         guiPanel.onTriggerCooldown = { triggerCooldown = it; triggerController.triggerCooldown = it; ConfigManager.updateConfig { triggerCooldown = it } }
         guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it; triggerController.triggerUpFluct = it; ConfigManager.updateConfig { triggerUpFluctuation = it } }
         guiPanel.onTriggerDownFluctuation = { triggerDownFluct = it; triggerController.triggerDownFluct = it; ConfigManager.updateConfig { triggerDownFluctuation = it } }
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it; triggerController.triggerTouchDuration = it; ConfigManager.updateConfig { triggerTouchDuration = it } }
-        guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; triggerController.triggerTouchRange = px; updateTriggerOverlaySize(); triggerController.updateTriggerOverlaySize(); ConfigManager.updateConfig { triggerTouchRange = px } }
-        guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; triggerController.triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility(); triggerController.updateTriggerOverlayVisibility(); ConfigManager.updateConfig { triggerShowArea = show } }
+        guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize(); ConfigManager.updateConfig { triggerTouchRange = px } }
+        guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility(); ConfigManager.updateConfig { triggerShowArea = show } }
         guiPanel.onAutoStopEnabledChanged = { autoStopEnabled = it; triggerController.autoStopEnabled = it; ConfigManager.updateConfig { autoStopEnabled = it } }
         guiPanel.onAimOffsetYRatioChanged = { aimOffsetYRatio = it; aimController.aimOffsetYRatio = it; ConfigManager.updateConfig { aimOffsetYRatio = it } }
         guiPanel.onAimSwayAmplitudeChanged = { aimSwayAmplitude = it; aimController.aimSwayAmplitude = it; ConfigManager.updateConfig { aimSwayAmplitude = it } }
@@ -1427,6 +1447,7 @@ class FloatService : Service() {
             onConfirm = { areas ->
                 savedAreas.clear()
                 savedAreas.addAll(areas)
+                areasConfigured = areas.isNotEmpty()
                 ConfigManager.updateConfig { this.areas = areas.toList() }
                 updateTriggerZone()
                 updateFireZone()
@@ -1463,18 +1484,21 @@ class FloatService : Service() {
 
     // 推送触发区域到远程服务，用于物理手指检测
     private fun updateTriggerZone() {
+        if (!areasConfigured) return   // 占位区域不是用户配的，推下去只会误判物理手指
         val zone = savedAreas.getOrNull(AREA_INDEX_TRIGGER) ?: return
         touchService.setTriggerZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateTriggerZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
     private fun updateFireZone() {
+        if (!areasConfigured) return   // 占位区域不是用户配的，推下去只会误判物理手指
         val zone = savedAreas.getOrNull(AREA_INDEX_FIRE) ?: return
         touchService.setFireZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateFireZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")
     }
 
     private fun updateJoystickZone() {
+        if (!areasConfigured) return   // 占位区域不是用户配的，推下去只会误判物理手指
         val zone = savedAreas.getOrNull(AREA_INDEX_JOYSTICK) ?: return
         touchService.setJoystickZone(zone.x, zone.y, zone.right, zone.bottom)
         Log.d(TAG, "updateJoystickZone: (${zone.x},${zone.y})-(${zone.right},${zone.bottom})")

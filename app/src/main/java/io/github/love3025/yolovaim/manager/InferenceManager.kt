@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import io.github.love3025.yolovaim.service.FloatService
 import io.github.love3025.yolovaim.controller.AimController
 import io.github.love3025.yolovaim.controller.TriggerController
+import io.github.love3025.yolovaim.view.GuiPanelView
 import io.github.love3025.yolovaim.view.OverlayCanvasView
 import io.github.love3025.yolovaim.inference.JniCallBack
 import io.github.love3025.yolovaim.util.ProjectionHolder
@@ -117,10 +118,11 @@ class InferenceManager(
                 currentClasses = entry.classes
                 // 模型切换时更新类别选择：保留仍存在的类别，新增的自动选中
                 if (currentClasses.isNotEmpty()) {
+                    // NONE_CLASS 要留着：它代表用户显式关掉了全部类别。
                     val validIds = currentClasses.keys
-                    aimController.aimClasses = aimController.aimClasses.filter { it in validIds }.toMutableSet()
+                    aimController.aimClasses = aimController.aimClasses.filter { it in validIds || it == GuiPanelView.NONE_CLASS }.toMutableSet()
                     if (aimController.aimClasses.isEmpty()) aimController.aimClasses = validIds.toMutableSet()
-                    triggerController.triggerClasses = triggerController.triggerClasses.filter { it in validIds }.toMutableSet()
+                    triggerController.triggerClasses = triggerController.triggerClasses.filter { it in validIds || it == GuiPanelView.NONE_CLASS }.toMutableSet()
                     if (triggerController.triggerClasses.isEmpty()) triggerController.triggerClasses = validIds.toMutableSet()
                 }
                 Log.d(TAG, "模型类别: $currentClasses, aimClasses=${aimController.aimClasses}, triggerClasses=${triggerController.triggerClasses}")

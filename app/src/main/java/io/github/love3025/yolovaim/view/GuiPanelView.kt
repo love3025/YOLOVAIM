@@ -21,6 +21,14 @@ import io.github.love3025.yolovaim.R
 
 class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(context, R.style.Theme_YOLOVAIM)) {
 
+    companion object {
+        /** 哨兵类别 ID：集合里只剩它时代表"用户显式地一个类别都不选"。
+         *  空集合在配置里的含义是"未配置 → 全选"，所以必须有别的东西占位，
+         *  否则关掉最后一个类别会被当成全选、开关就等于失效。
+         *  真实 classId 恒 >= 0，所以它永远不会误匹配任何检测框。 */
+        const val NONE_CLASS = -1
+    }
+
     var onEnabledChanged: ((Boolean) -> Unit)? = null
     var onSpeedChanged: ((Float) -> Unit)? = null
     var onRangeChanged: ((Int) -> Unit)? = null
@@ -371,6 +379,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             contentContainer.addView(MaterialTextView(context).apply { text = "目标类别"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
             contentContainer.addView(spacer(dp(4)))
             val allIds = classMap.keys.sorted()
+            // 空集合 = 未配置 = 全选；显式全部关闭用哨兵 NONE_CLASS 表示，
+            // 这样"一个都不瞄"和"没配置过"才能区分开。
             val effectiveAim = if (aimClasses.isEmpty()) allIds.toMutableSet() else aimClasses
             for ((id, name) in classMap.entries.sortedBy { it.key }) {
                 val checked = id in effectiveAim
@@ -379,11 +389,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
                     addView(MaterialTextView(context).apply { text = name; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
                     addView(MaterialSwitch(context).apply {
                         isChecked = checked
-                        if (allIds.size <= 1) { isEnabled = false; alpha = 0.5f }
                         setOnCheckedChangeListener { _, c ->
                             if (aimClasses.isEmpty()) aimClasses = allIds.toMutableSet()
-                            if (!c && aimClasses.size <= 1 && id in aimClasses) { isChecked = true; return@setOnCheckedChangeListener }
+                            aimClasses.remove(NONE_CLASS)
                             if (c) aimClasses.add(id) else aimClasses.remove(id)
+                            if (aimClasses.isEmpty()) aimClasses.add(NONE_CLASS)
                             onAimClassesChanged?.invoke(aimClasses.toMutableSet())
                         }
                     })
@@ -460,11 +470,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
                     addView(MaterialTextView(context).apply { text = name; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
                     addView(MaterialSwitch(context).apply {
                         isChecked = checked
-                        if (allIds.size <= 1) { isEnabled = false; alpha = 0.5f }
                         setOnCheckedChangeListener { _, c ->
                             if (triggerClasses.isEmpty()) triggerClasses = allIds.toMutableSet()
-                            if (!c && triggerClasses.size <= 1 && id in triggerClasses) { isChecked = true; return@setOnCheckedChangeListener }
+                            triggerClasses.remove(NONE_CLASS)
                             if (c) triggerClasses.add(id) else triggerClasses.remove(id)
+                            if (triggerClasses.isEmpty()) triggerClasses.add(NONE_CLASS)
                             onTriggerClassesChanged?.invoke(triggerClasses.toMutableSet())
                         }
                     })
