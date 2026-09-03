@@ -1127,10 +1127,12 @@ class FloatService : Service() {
                 currentClasses = entry.classes
                 // 模型切换时更新类别选择：保留仍存在的类别，新增的自动选中
                 if (currentClasses.isNotEmpty()) {
+                    // NONE_CLASS 要留着：它代表用户显式关掉了全部类别，
+                    // 被过滤掉的话下面的 isEmpty 分支会把全部类别又打开。
                     val validIds = currentClasses.keys
-                    aimClasses = aimClasses.filter { it in validIds }.toMutableSet()
+                    aimClasses = aimClasses.filter { it in validIds || it == GuiPanelView.NONE_CLASS }.toMutableSet()
                     if (aimClasses.isEmpty()) aimClasses = validIds.toMutableSet()
-                    triggerClasses = triggerClasses.filter { it in validIds }.toMutableSet()
+                    triggerClasses = triggerClasses.filter { it in validIds || it == GuiPanelView.NONE_CLASS }.toMutableSet()
                     if (triggerClasses.isEmpty()) triggerClasses = validIds.toMutableSet()
                 }
                 Log.d(TAG, "模型类别: $currentClasses, aimClasses=$aimClasses, triggerClasses=$triggerClasses")
