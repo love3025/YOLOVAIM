@@ -51,7 +51,9 @@ target_link_libraries(uinput_inject touch_core android log)
 # dlopen/dlsym, so there is no link-time dependency on libgui.
 # The stealth module (KPM kernel injection) is compiled in too: the KPM syscall
 # channel requires a root caller (inputprobe.c checks current_uid() == 0), so
-# touchc must live in this process, not the app process.
+# touchc must live in this process, not the app process. The pairing salt lives
+# directly in src/injection/stealth/touch_pairing.h (see the decision note
+# there) — nothing to configure at build time.
 add_executable(root_daemon
     src/daemon/root_daemon.cpp
     src/hud/hud_surface.cpp
@@ -65,35 +67,6 @@ set_target_properties(root_daemon PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
 )
-
-# ─── Stealth(KPM)配对盐检查 ───────────────────────────────────────────
-# 真实盐由 app/build.gradle.kts 从 gitignored 的 local.properties
-# (stealth.pairSalt=...)读出并经 -DTOUCH_PAIR_SALT="..." 注入;占位符编出来
-# 的 daemon 永远握不上 KPM(表现为 initRemote 报 no_channel,极难排查),
-# 所以默认在这里拦下。CI 用 -DSTEALTH_ALLOW_PLACEHOLDER=1 显式豁免
-# (产物里 Stealth 选项不可用,其余功能不受影响)。
-#
-# 注意:-D 只建立 CMake 缓存变量,不会自动传给编译器 —— 必须再经
-# target_compile_definitions 落到编译命令行,touch_pairing.h 的 #ifndef
-# 才拿得到真值(否则静默回落内置占位符,正是 66a0c98 那次 CI 翻车的原因)。
-if(NOT DEFINED TOUCH_PAIR_SALT OR TOUCH_PAIR_SALT STREQUAL "" OR
-   TOUCH_PAIR_SALT STREQUAL "PLACEHOLDER-configure-stealth.pairSalt")
-    if(STEALTH_ALLOW_PLACEHOLDER)
-        message(WARNING
-            "TOUCH_PAIR_SALT is a placeholder: this build's Stealth (KPM) "
-            "touch method will NOT pair with any kernel module. Configure "
-            "stealth.pairSalt in local.properties for a real build.")
-    else()
-        message(FATAL_ERROR
-            "TOUCH_PAIR_SALT is not configured. Add 'stealth.pairSalt=<your "
-            "private salt>' to local.properties (same salt the inputprobe.kpm "
-            "was built with — see scripts/sync_touch_pairing.sh), or pass "
-            "-DSTEALTH_ALLOW_PLACEHOLDER=1 / -Pstealth.allowPlaceholder=true "
-            "to build without the Stealth channel.")
-    endif()
-endif()
-# 把真盐传给编译器(带引号,展开为 TOUCH_PAIR_SALT="realsalt")
-target_compile_definitions(root_daemon PRIVATE TOUCH_PAIR_SALT="${TOUCH_PAIR_SALT}")
 
 # InputManager evdev reader (for InputManager injection mode)
 add_library(inputmgr_core STATIC src/injection/inputmgr_core.cpp)

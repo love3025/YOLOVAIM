@@ -43,11 +43,7 @@
 ### Stealth 无痕方式的额外准备
 
 1. **内核装 KPM**：APatch 管理器 → KPM → 安装 `inputprobe.kpm`（KernelSU/Magisk 先刷 KPatch-Next-Module）。模块来自[无痕触摸库项目]，或自行用 kpm-src 源码构建。
-2. **配对盐**：通道只认用「相同包名 + 盐」编译出的 app 与 KPM。在本仓库 `local.properties` 里写：
-   ```
-   stealth.pairSalt=<你的私有盐>
-   ```
-   然后运行 `scripts/sync_touch_pairing.sh` 把配置渲染到 kpm-src 一侧，重编 `inputprobe.kpm` 刷入设备，再构建 app。**没配盐构建会直接报错**（CI 例外，其产物里 Stealth 不可用）。
+2. **配对**：通道只认用「相同包名 + 盐」编译出的 app 与 KPM。盐直接写在源码里（`touch_pairing.h` 的 `TOUCH_PAIR_SALT`，见该文件头注释的决策说明）——**构建零配置**，任何人克隆源码构建出的 app 都能与同盐编译的 `inputprobe.kpm` 直接配对。换盐 = 同时改两侧头文件（`scripts/sync_touch_pairing.sh` 负责同步）后各自重编。
 3. Stealth 失败**不降级**：内核没装 KPM 或盐不一致时，状态栏会显示人话原因，不会静默换有痕注入。
 
 ---

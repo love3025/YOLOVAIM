@@ -190,10 +190,12 @@ Stealth path specifics:
   auto-stop by injecting Up on the real finger's slot via KPM
 - No fallback: STEALTH_INIT failure (no .kpm / salt mismatch) surfaces as a
   human-readable status, never silently degrades to uinput
-- Pairing salt: `stealth.pairSalt` in gitignored local.properties → CMake
-  `-DTOUCH_PAIR_SALT` (placeholder → FATAL_ERROR; CI passes
-  `-Pstealth.allowPlaceholder=true`). Sync to the KPM side with
-  `scripts/sync_touch_pairing.sh`, then rebuild inputprobe.kpm
+- Pairing salt: hardcoded in `src/injection/stealth/touch_pairing.h`
+  (`TOUCH_PAIR_SALT`) — deliberately in-source, not gitignored config: the salt
+  is a compile-time constant extractable from any shipped APK anyway, so repo
+  secrecy adds nothing (decision note in the header). Zero build configuration;
+  sync to the KPM side (verbatim copy) with `scripts/sync_touch_pairing.sh`,
+  then rebuild inputprobe.kpm
 - touchc.cpp is vendored from the 无痕触摸源码 project with 3 slot extensions
   (slot-parameterized Down/Move/Up, slot_max validation, per-slot confirm-up
   bitmap) — see the vendoring note at the top of touchc.h

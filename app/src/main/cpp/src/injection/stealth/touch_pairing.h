@@ -11,23 +11,19 @@
  * 拿不到盐的其它进程调用该 syscall 会穿透成原始系统调用 —— 既用不了,也探测
  * 不到通道存在(ping 不回)。无需运行时输入任何东西。
  *
- * 【盐不进 git】本仓库有远程,盐一旦提交,任何有读权限的人就能算出通道密钥。
- * 真实盐写在 local.properties 的 stealth.pairSalt=...,由 app/build.gradle.kts
- * 经 -DTOUCH_PAIR_SALT="..." 注入 CMake;没配盐直接构建会被 CMake 拦下
- * (CI 用 -Pstealth.allowPlaceholder=true 显式豁免,产物里 Stealth 不可用)。
+ * 【盐直接写在源码里】(决策 2026-09-03):盐是编译期常量,本来就会躺在每个
+ * 分发出去的 APK 的 libroot_daemon.so 里(strings 可提取),仓库级保密没有
+ * 实际意义;通道本身还要求 root 调用方,威胁模型里"偷盐"换不来什么 ——
+ * 有 root 直接走 uinput 即可,想要无痕自编 KPM 即可。盐在源码里的价值是
+ * 让任何拿到源码的人直接构建出可配对的 app,无需配置任何东西。
  *
- * 同步到 KPM 侧:用 scripts/sync_touch_pairing.sh,它会把本文件渲染成
- * 「盐已展开」的完整版写进 kpm-src/kpms/inputprobe/,并校验包名/通道号一致。
+ * 同步到 KPM 侧:直接拷贝本文件到 kpm-src/kpms/inputprobe/(两份一字不差),
+ * scripts/sync_touch_pairing.sh 做的就是这件事并校验一致性。
  * ===========================================================================
  */
 
 #define TOUCH_TARGET_PACKAGE "io.github.love3025.yolovaim"
-
-/* 真实值由构建注入(-DTOUCH_PAIR_SALT=...);这里是占位符。
- * CMake 会检查占位符未被替换的情况并拒绝构建。 */
-#ifndef TOUCH_PAIR_SALT
-#define TOUCH_PAIR_SALT      "PLACEHOLDER-configure-stealth.pairSalt"
-#endif
+#define TOUCH_PAIR_SALT      "6d8076327d3f2384c9dbb78113b273a0"
 
 /* syscall 通道号:冷门号(默认 18 = __NR_lookup_dcookie),库与 KPM 必须一致。
  * 想更隐蔽可换其它极少用到的号,两侧同步改即可。 */

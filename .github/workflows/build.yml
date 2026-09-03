@@ -57,20 +57,12 @@ jobs:
 
       # 上游把 gradlew 提交成 100644，checkout 出来没有执行位。仓库里已经
       # 用 update-index --chmod=+x 修了，这里再兜一次，免得别的分支上又踩到。
-      # 配对盐走仓库 Secret STEALTH_PAIR_SALT（本地 local.properties 同值）：
-      # 配了就出「真盐 APK」，Stealth 触摸方式可直接与同盐编译的
-      # inputprobe.kpm 配对；没配则回退占位符豁免（Stealth 不可用，其余功能
-      # 不受影响）。密钥 = FNV(包名+盐)，Secret 与 local.properties 修改要同步。
+      # 配对盐直接在 touch_pairing.h 源码里(见该文件头注释的决策说明),
+      # 构建无需任何额外配置,产物开箱即与同盐编译的 inputprobe.kpm 配对。
       - name: Build debug APK
-        env:
-          STEALTH_PAIR_SALT: ${{ secrets.STEALTH_PAIR_SALT }}
         run: |
           chmod +x gradlew
-          if [ -n "$STEALTH_PAIR_SALT" ]; then
-            ./gradlew assembleDebug --stacktrace --no-daemon -Pstealth.pairSalt="$STEALTH_PAIR_SALT"
-          else
-            ./gradlew assembleDebug --stacktrace --no-daemon -Pstealth.allowPlaceholder=true
-          fi
+          ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Report APK
         if: success()
