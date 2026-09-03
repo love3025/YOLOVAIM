@@ -32,7 +32,11 @@ void touch_start_readers(void);
 void touch_stop_readers(void);
 
 // Configuration
-void touch_set_screen_params(int w, int h, bool landscape);
+// rotation: Android Display.getRotation() —— 0=自然方向, 1=90°, 2=180°, 3=270°。
+// 只区分横竖(布尔)是不够的:1 与 3 都是横屏,但两者的面板坐标差一个 180°
+// 点镜像,按同一张表算会把注入点和 zone 判定一起翻到屏幕对角
+// (实测表现:充电口换一边后自瞄/扳机全部失效)。
+void touch_set_screen_params(int w, int h, int rotation);
 
 // Injection (screen coordinates — rotation handled internally)
 void touch_down(int slot, int id, int screenX, int screenY);

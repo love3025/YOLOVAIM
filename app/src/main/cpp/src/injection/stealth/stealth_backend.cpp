@@ -44,7 +44,7 @@ extern "C" StealthStatus stealth_init(int screenW, int screenH,
             // touchc 的坐标系和 touch_core 的 zone 坐标系一起喂
             if (s_orientation >= 0) {
                 tm.SetScreenOrientation(s_orientation);
-                touch_set_screen_params(screenW, screenH, (s_orientation & 1) != 0);
+                touch_set_screen_params(screenW, screenH, s_orientation);
             }
             return STEALTH_OK;
         case TouchManager::TouchStatus::kNoTouchDevice:
@@ -84,9 +84,8 @@ extern "C" void stealth_set_orientation(int orientation) {
     s_orientation = orientation;
     if (!s_active) { return; }  // init 后会补投(见 stealth_init)
     TouchManager::GetInstance().SetScreenOrientation(orientation);
-    // 库的 case 1 与 touch_core 的 landscape 分支是同一个旋转
-    // (phys.x = 短边 - y;phys.y = x),1/3 视为横屏
-    touch_set_screen_params(s_screen_w, s_screen_h, (orientation & 1) != 0);
+    // touchc 与 touch_core 现在用同一套 0..3 旋转编号,原样透传即可
+    touch_set_screen_params(s_screen_w, s_screen_h, orientation);
 }
 
 extern "C" bool stealth_grab(int enable) {
