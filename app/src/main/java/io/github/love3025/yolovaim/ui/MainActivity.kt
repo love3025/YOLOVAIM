@@ -1218,6 +1218,14 @@ class MainActivity : AppCompatActivity() {
                 ModelRepository.update(model)
                 loadModelsFromRepository()
                 rebuildModelCard()
+                // 保存的就是当前选中的模型 → 立即(重)载引擎。两个作用:
+                // 1. inputSize 可能被手改过,ncnn 需要新值;
+                // 2. 首次安装导入的模型靠这里第一次真正加载——导入流程本身
+                //    不初始化引擎,下拉框 setText(...,false) 预填文本也不触发
+                //    选择监听,不加载的话点启动就是"运行中 none"。
+                if (modelList.getOrNull(selectedModelIndex)?.id == model.id) {
+                    loadDefaultModel()
+                }
                 Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("取消", null)

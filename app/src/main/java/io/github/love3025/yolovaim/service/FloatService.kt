@@ -501,6 +501,15 @@ class FloatService : Service() {
         if (aimClasses.isEmpty() && currentClasses.isNotEmpty()) aimClasses = currentClasses.keys.toMutableSet()
         if (triggerClasses.isEmpty() && currentClasses.isNotEmpty()) triggerClasses = currentClasses.keys.toMutableSet()
         Log.d(TAG, "启动模型类别: $currentClasses, aimClasses=$aimClasses, triggerClasses=$triggerClasses")
+        // 兜底:引擎还没初始化就直接启动了服务。首次安装的典型路径就是它——
+        // loadDefaultModel 只在 MainActivity onCreate+500ms 跑一次,那时模型
+        // 列表还是空的;导入流程又不会加载引擎(下拉框 setText(...,false)
+        // 不触发选择监听),用户点启动时 g_engine 是 null,推理循环全程
+        // "Engine not initialized",状态栏显示"运行中 none"。
+        if (entry != null && JniCallBack.getBackend() == "none") {
+            Log.w(TAG, "引擎未初始化,服务启动时兜底加载: ${entry.filename}")
+            loadModel(entry.filename)
+        }
         ProjectionHolder.updateState(1, JniCallBack.getBackend())
         return START_NOT_STICKY
     }
