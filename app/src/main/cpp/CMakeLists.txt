@@ -72,6 +72,10 @@ set_target_properties(root_daemon PROPERTIES
 # 的 daemon 永远握不上 KPM(表现为 initRemote 报 no_channel,极难排查),
 # 所以默认在这里拦下。CI 用 -DSTEALTH_ALLOW_PLACEHOLDER=1 显式豁免
 # (产物里 Stealth 选项不可用,其余功能不受影响)。
+#
+# 注意:-D 只建立 CMake 缓存变量,不会自动传给编译器 —— 必须再经
+# target_compile_definitions 落到编译命令行,touch_pairing.h 的 #ifndef
+# 才拿得到真值(否则静默回落内置占位符,正是 66a0c98 那次 CI 翻车的原因)。
 if(NOT DEFINED TOUCH_PAIR_SALT OR TOUCH_PAIR_SALT STREQUAL "" OR
    TOUCH_PAIR_SALT STREQUAL "PLACEHOLDER-configure-stealth.pairSalt")
     if(STEALTH_ALLOW_PLACEHOLDER)
@@ -88,6 +92,8 @@ if(NOT DEFINED TOUCH_PAIR_SALT OR TOUCH_PAIR_SALT STREQUAL "" OR
             "to build without the Stealth channel.")
     endif()
 endif()
+# 把真盐传给编译器(带引号,展开为 TOUCH_PAIR_SALT="realsalt")
+target_compile_definitions(root_daemon PRIVATE TOUCH_PAIR_SALT="${TOUCH_PAIR_SALT}")
 
 # InputManager evdev reader (for InputManager injection mode)
 add_library(inputmgr_core STATIC src/injection/inputmgr_core.cpp)
