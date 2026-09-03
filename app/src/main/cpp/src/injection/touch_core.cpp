@@ -772,6 +772,62 @@ void touch_close(void) {
     closeTouchLocked();
 }
 
+// Reader-only 初始化(stealth/KPM 注入路径用),与 touch_init 只差两处:
+// 1) 面板 fd 只 O_RDONLY 打开,不 EVIOCGRAB —— uinput 路径靠 grab 让
+//    InputReader 忽略真手指(游戏只看 uinput 投影);stealth 路径注入与真触摸
+//    同源同路径,真手指必须继续送达游戏,grab 了游戏就收不到任何触摸。
+//    代价:本读者会同时看到真手指与 KPM 注入报文,靠 slot 8/9 排除表区分
+//    (updateZones / touch_lift_joystick_finger 已排除,无需改动)。
+// 2) 不创建 uinput 设备,g_outputFd 保持 0 —— upload() 开头的
+//    `if (g_outputFd <= 0) return;` 让读者线程里的 upload 全程 no-op,
+//    zone 检测 / fire 边沿计数零改动复用。
+bool touch_init_reader_only(int screenW, int screenH) {
+    if (screenW <= 0 || screenH <= 0) {
+        LOGE("touch_init_reader_only: invalid screen size %dx%d", screenW, screenH);
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(g_mutex);
+    closeTouchLocked();
+
+    Vec2 size(static_cast<float>(screenW), static_cast<float>(screenH));
+    g_screenSize = size.x > size.y ? size : Vec2(size.y, size.x);
+    g_screen_w = screenW;
+    g_screen_h = screenH;
+
+    int touchMaxX = screenW;
+    int touchMaxY = screenH;
+    char touchPath[256] = "";
+    if (!detectTouchDeviceViaGetevent(touchPath, sizeof(touchPath), touchMaxX, touchMaxY) ||
+        touchPath[0] == '\0') {
+        // uinput 路径探测失败可以继续(只是没有 zone 检测);stealth 路径的
+        // 读者是全部意义所在,没有面板 fd 就没有存在的必要
+        LOGE("touch_init_reader_only: no touch device detected");
+        return false;
+    }
+
+    int fd = open(touchPath, O_RDONLY);
+    if (fd < 0) {
+        LOGE("touch_init_reader_only: open %s failed errno=%d", touchPath, errno);
+        return false;
+    }
+
+    Device device{};
+    device.fd = fd;
+    device.absX.maximum = touchMaxX;
+    device.absY.maximum = touchMaxY;
+    strncpy(device.path, touchPath, sizeof(device.path) - 1);
+    device.path[sizeof(device.path) - 1] = '\0';
+    g_devices.push_back(device);
+
+    Vec2 logical = size;
+    if (logical.x > logical.y) std::swap(logical.x, logical.y);
+    g_touchScale.x = static_cast<float>(touchMaxX) / std::max(1.0f, logical.x);
+    g_touchScale.y = static_cast<float>(touchMaxY) / std::max(1.0f, logical.y);
+    g_initialized = true;
+    LOGD("touch(reader-only) ready scale=%.3f,%.3f", g_touchScale.x, g_touchScale.y);
+    return true;
+}
+
 bool touch_is_initialized(void) { return g_initialized; }
 int  touch_get_output_fd(void)   { return g_outputFd; }
 
@@ -885,4 +941,43 @@ bool touch_lift_joystick_finger(void) {
 
     if (lifted) upload();
     return lifted;
+}
+
+// 当前真实手指(排除虚拟 slot 8/9)中位于摇杆区内的面板 slot 号列表。
+// uinput 路径自己用 touch_lift_joystick_finger() 抹掉 uinput 投影即可;
+// stealth 路径没有 uinput 投影,真手指直通游戏 —— 调用方拿本函数返回的
+// slot 后,经 KPM 内核通道对这些 slot 各发一次抬起来完成同样的"自动停枪"。
+// 返回写入 outSlots 的个数(0 = 摇杆区没有真实手指)。
+int touch_get_joystick_finger_slots(int* outSlots, int maxSlots) {
+    if (outSlots == nullptr || maxSlots <= 0) return 0;
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (!g_initialized || g_devices.empty()) return 0;
+
+    int count = 0;
+    int touchMaxX = g_devices[0].absX.maximum;
+    int touchMaxY = g_devices[0].absY.maximum;
+
+    for (size_t d = 0; d < g_devices.size() && count < maxSlots; d++) {
+        for (int f = 0; f < maxF && count < maxSlots; f++) {
+            if (!g_devices[d].fingers[f].isDown) continue;
+            if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
+
+            float devX = g_devices[d].fingers[f].pos.x;
+            float devY = g_devices[d].fingers[f].pos.y;
+            int sx, sy;
+            if (g_landscape) {
+                sx = static_cast<int>(devY * g_screen_w / touchMaxY);
+                sy = g_screen_h - static_cast<int>(devX * g_screen_h / touchMaxX);
+            } else {
+                sx = static_cast<int>(devX * g_screen_w / touchMaxX);
+                sy = static_cast<int>(devY * g_screen_h / touchMaxY);
+            }
+
+            if (pointInZone(g_joystick_zone, sx, sy)) {
+                outSlots[count++] = f;
+                LOGD("joystickFingerSlot: dev%zu finger%d at (%d,%d)", d, f, sx, sy);
+            }
+        }
+    }
+    return count;
 }

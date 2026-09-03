@@ -17,6 +17,12 @@ extern "C" {
 
 // Lifecycle
 bool touch_init(int screenW, int screenH);
+// Reader-only variant for the stealth (KPM) path: opens the real panel
+// WITHOUT EVIOCGRAB and never creates a uinput device — real fingers keep
+// flowing to the game and injection goes through the kernel KPM channel.
+// g_devices[0]/zone detection/fire-state bookkeeping work exactly as in
+// touch_init(); upload() stays a no-op because g_outputFd stays 0.
+bool touch_init_reader_only(int screenW, int screenH);
 void touch_close(void);
 bool touch_is_initialized(void);
 int  touch_get_output_fd(void);
@@ -48,6 +54,11 @@ bool touch_is_finger_in_joystick_zone(void);
 
 // Lift physical finger in joystick zone
 bool touch_lift_joystick_finger(void);
+
+// Panel slots of real fingers currently inside the joystick zone (stealth
+// path: caller injects an Up on each slot via the KPM channel). Returns the
+// number of slots written to outSlots.
+int  touch_get_joystick_finger_slots(int* outSlots, int maxSlots);
 
 #ifdef __cplusplus
 }

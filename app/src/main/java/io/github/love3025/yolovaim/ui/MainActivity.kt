@@ -671,7 +671,11 @@ class MainActivity : AppCompatActivity() {
             val autoComplete = dropdownLayout.findViewById<MaterialAutoCompleteTextView>(R.id.dropdown)
             touchMethodAutoComplete = autoComplete
 
-            val displayNames = listOf("Uinput - 适合部分设备", "InputManager - 适配大部分设备")
+            val displayNames = listOf(
+                "Uinput - 适合部分设备",
+                "InputManager - 适配大部分设备",
+                "Stealth - 内核无痕(需 root + KPM)"
+            )
             val touchMethods = TouchMethod.entries
 
             val safeIndex = if (selectedTouchMethod.ordinal in touchMethods.indices) selectedTouchMethod.ordinal else 0

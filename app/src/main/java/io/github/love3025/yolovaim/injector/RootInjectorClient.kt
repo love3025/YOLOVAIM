@@ -214,6 +214,7 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
 
     protected fun sendOk(cmd: String): Boolean = execOk(cmd)
     protected fun sendCmd(cmd: String): String? = execCmd(cmd)
+    protected fun sendNoReply(cmd: String) = execNoReply(cmd)
 
     // ================= HudClient(防捕获 native HUD)=================
     // 协议见 root_daemon.cpp 头部注释。除 hudOn 外全部走 execNoReply

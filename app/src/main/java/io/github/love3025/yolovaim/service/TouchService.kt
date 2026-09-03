@@ -5,6 +5,7 @@ import android.util.Log
 import io.github.love3025.yolovaim.injector.HudClient
 import io.github.love3025.yolovaim.injector.InjectorCallback
 import io.github.love3025.yolovaim.injector.InputManagerInjectorClient
+import io.github.love3025.yolovaim.injector.KpmInjectorClient
 import io.github.love3025.yolovaim.injector.RootInjectorClient
 import io.github.love3025.yolovaim.injector.ShizukuInjectorClient
 import io.github.love3025.yolovaim.injector.TouchInjectorInterface
@@ -64,6 +65,13 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
      */
     fun hud(): HudClient? = delegate as? HudClient
 
+    /**
+     * Stealth(KPM)通道自检失败的人话原因,非 Stealth 路径或已成功时为 null。
+     * FloatService 用它把 initRemote 失败透出到状态文本 —— 无痕路径明确失败,
+     * 不降级也不静默。
+     */
+    fun lastStealthError(): String? = (delegate as? KpmInjectorClient)?.lastInitError
+
     private fun updateState(newState: ConnectionState) {
         state = newState
         onStateChanged?.invoke(newState)
@@ -76,6 +84,40 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
         when (ProjectionHolder.selectedTouchMethod) {
             TouchMethod.INPUT_MANAGER -> connectInputManager(callback)
             TouchMethod.UINPUT -> connectUinput(callback)
+            TouchMethod.STEALTH -> connectStealth(callback)
+        }
+    }
+
+    /**
+     * Stealth(KPM 无痕)路径:结构与 connectUinput 的 root 分支相同,但
+     * 【无回退】—— 用户选 Stealth 要的就是无痕,静默降级 uinput 会在用户
+     * 以为无痕的状态下打有痕触摸。daemon 连接失败(su 不可用)在这里报;
+     * 通道自检失败(未装 .kpm / 盐不一致)在 initRemote() 阶段报。
+     */
+    private fun connectStealth(callback: InjectorCallback) {
+        try {
+            val kpmClient = KpmInjectorClient(context)
+            kpmClient.connect(object : InjectorCallback {
+                override fun onConnected() {
+                    delegate = kpmClient
+                    updateState(ConnectionState.CONNECTED)
+                    callback.onConnected()
+                }
+                override fun onDisconnected() {
+                    delegate = null
+                    updateState(ConnectionState.DISCONNECTED)
+                    callback.onDisconnected()
+                }
+                override fun onError(msg: String) {
+                    Log.e(TAG, "Stealth connect failed: $msg (需要 root;不降级)")
+                    updateState(ConnectionState.ERROR)
+                    callback.onError("Stealth: $msg")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Stealth init failed: ${e.message}")
+            updateState(ConnectionState.ERROR)
+            callback.onError("Stealth init failed: ${e.message}")
         }
     }
 

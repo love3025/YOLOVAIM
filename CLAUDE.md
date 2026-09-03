@@ -167,15 +167,36 @@ CMakeLists.txt                   # 3 targets: yolovaim (shared), uinput_inject (
 7. `TriggerController`: fires tap when crosshair enters detection box
 8. Hold-to-fire: physical finger must be in trigger zone before auto-aim activates
 
-### Touch Injection (Dual Path)
+### Touch Injection (Triple Path)
 
 ```
 FloatService
-    ├── RootInjectorClient (su + stdin/stdout)     ← preferred
-    │       └── root_daemon.cpp → touch_core.cpp
-    └── ShizukuInjectorClient (AIDL)               ← fallback
-            └── RemoteInjectorService.java → uinput_inject.cpp → touch_core.cpp
+    ├── UINPUT (default): RootInjectorClient (su + stdin/stdout)   ← preferred
+    │       └── falls back to ShizukuInjectorClient (AIDL)
+    ├── INPUT_MANAGER: InputManagerInjectorClient (Shizuku → injectInputEvent)
+    └── STEALTH (kernel KPM): KpmInjectorClient extends RootInjectorClient
+            └── same root_daemon process; STEALTH_* protocol commands →
+                touchc.cpp (vendored in src/injection/stealth/) → KPM syscall
+                channel (compiled pairing key, root-only caller) → kernel
+                injects via input_event on the REAL touchscreen device
 ```
+
+Stealth path specifics:
+- KPM channel requires a root caller (inputprobe.c checks uid==0) → touchc
+  must live in root_daemon, never the app process
+- Zone detection / consumeFireState / HUD fully reused: touch_core readers run
+  in reader-only mode (no EVIOCGRAB, no uinput device); slots 8/9 (aim/trigger)
+  are excluded from zone logic; `touch_get_joystick_finger_slots()` powers
+  auto-stop by injecting Up on the real finger's slot via KPM
+- No fallback: STEALTH_INIT failure (no .kpm / salt mismatch) surfaces as a
+  human-readable status, never silently degrades to uinput
+- Pairing salt: `stealth.pairSalt` in gitignored local.properties → CMake
+  `-DTOUCH_PAIR_SALT` (placeholder → FATAL_ERROR; CI passes
+  `-Pstealth.allowPlaceholder=true`). Sync to the KPM side with
+  `scripts/sync_touch_pairing.sh`, then rebuild inputprobe.kpm
+- touchc.cpp is vendored from the 无痕触摸源码 project with 3 slot extensions
+  (slot-parameterized Down/Move/Up, slot_max validation, per-slot confirm-up
+  bitmap) — see the vendoring note at the top of touchc.h
 
 `touch_core.cpp` is the shared native library used by both paths. Creates uinput device, EVIOCGRAB on real touch devices, zone detection, coordinate mapping with 90° rotation.
 

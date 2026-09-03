@@ -58,7 +58,7 @@ data class AppConfig(
     var autoStopEnabled: Boolean = false,
     var useCpuInference: Boolean = false,
     var cpuThreadCount: Int = 4,
-    var touchMethodIndex: Int = 0,  // 0=Uinput, 1=InputManager
+    var touchMethodIndex: Int = 0,  // 0=Uinput, 1=InputManager, 2=Stealth(KPM 无痕, 需 root+inputprobe.kpm)
     var kf: Float = 0.05f,          // PID feedforward gain (F term, 0.01-0.20)
     var showInferInfo: Boolean = false,  // render preprocess/infer/postprocess time + det count at top of overlay
     var useNativeHud: Boolean = true     // 防捕获 native HUD;false = 强制走普通悬浮窗路线(会被录屏捕获)

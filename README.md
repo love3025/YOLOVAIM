@@ -32,6 +32,26 @@
 
 ---
 
+## 触摸方式（三选一，主界面下拉切换）
+
+| 方式 | 要求 | 说明 |
+|------|------|------|
+| Uinput | Root（回退 Shizuku） | 虚拟输入设备注入，默认 |
+| InputManager | Shizuku | 适配面最广 |
+| **Stealth（无痕）** | Root + 内核 KPM | 报文经内核 `input_event` 直达真实触摸屏设备：不产生新输入节点、设备数量不变、免疫驱动「补刀」；防录屏 HUD 照常可用 |
+
+### Stealth 无痕方式的额外准备
+
+1. **内核装 KPM**：APatch 管理器 → KPM → 安装 `inputprobe.kpm`（KernelSU/Magisk 先刷 KPatch-Next-Module）。模块来自[无痕触摸库项目]，或自行用 kpm-src 源码构建。
+2. **配对盐**：通道只认用「相同包名 + 盐」编译出的 app 与 KPM。在本仓库 `local.properties` 里写：
+   ```
+   stealth.pairSalt=<你的私有盐>
+   ```
+   然后运行 `scripts/sync_touch_pairing.sh` 把配置渲染到 kpm-src 一侧，重编 `inputprobe.kpm` 刷入设备，再构建 app。**没配盐构建会直接报错**（CI 例外，其产物里 Stealth 不可用）。
+3. Stealth 失败**不降级**：内核没装 KPM 或盐不一致时，状态栏会显示人话原因，不会静默换有痕注入。
+
+---
+
 ## 导入模型
 
 应用第一次启动时模型列表是空的，需要你自己导入。

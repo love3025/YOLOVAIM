@@ -57,10 +57,13 @@ jobs:
 
       # 上游把 gradlew 提交成 100644，checkout 出来没有执行位。仓库里已经
       # 用 update-index --chmod=+x 修了，这里再兜一次，免得别的分支上又踩到。
+      # -Pstealth.allowPlaceholder=true：CI 里没有配对盐（盐只存在于本地
+      # local.properties），占位盐构建出的 APK 里 Stealth 触摸方式不可用，
+      # 其余功能不受影响；本地配了盐的构建不受此影响。
       - name: Build debug APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --stacktrace --no-daemon
+          ./gradlew assembleDebug --stacktrace --no-daemon -Pstealth.allowPlaceholder=true
 
       - name: Report APK
         if: success()

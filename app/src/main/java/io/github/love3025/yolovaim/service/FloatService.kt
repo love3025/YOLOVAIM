@@ -921,6 +921,7 @@ class FloatService : Service() {
                     try {
                         val initOk = touchService.initRemote()
                         Log.d(TAG, "RemoteInjector init: $initOk")
+                        if (!initOk) onInjectorInitFailed()
                         touchService.startGeteventListener()
                     } catch (e: Exception) {
                         Log.e(TAG, "initRemote error: ${e.message}")
@@ -933,6 +934,19 @@ class FloatService : Service() {
                     Log.e(TAG, "TouchInjector error: $msg")
                 }
             })
+        }
+    }
+
+    /**
+     * initRemote 失败的统一出口。目前只有 Stealth(KPM)路径会走到这里:
+     * 无痕通道自检失败按既定策略【明确失败、不降级】—— 状态文本换成人话
+     * 原因,主界面一眼能看到,不再只在 logcat 里躺着。
+     */
+    private fun onInjectorInitFailed() {
+        val reason = touchService.lastStealthError()
+        if (reason != null) {
+            ProjectionHolder.touchStatusText = "无痕通道不可用: $reason"
+            Log.e(TAG, "Stealth 通道不可用: $reason(不降级;检查 inputprobe.kpm 与两侧 touch_pairing.h)")
         }
     }
 
@@ -955,6 +969,7 @@ class FloatService : Service() {
                 try {
                     val initOk = touchService.initRemote()
                     Log.d(TAG, "RECONNECT: initRemote=$initOk")
+                    if (!initOk) onInjectorInitFailed()
                     touchService.startGeteventListener()
                     Log.d(TAG, "RECONNECT: $method 切换完成")
                 } catch (e: Exception) {

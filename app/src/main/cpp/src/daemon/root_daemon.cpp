@@ -28,6 +28,25 @@
  *     KEEP_ALIVE
  *     DESTROY
  *
+ *   Stealth (KPM kernel injection, see src/injection/stealth/):
+ *     STEALTH_INIT                (replies OK:<slot_max> on success;
+ *                                  ERR:stealth no_device|no_channel|internal
+ *                                  on failure — no fallback, the client
+ *                                  decides what to do)
+ *     STEALTH_DOWN <slot> <x> <y> (slot 8=aim, 9=trigger; also valid on a
+ *                                  real finger's slot for lift-joystick)
+ *     STEALTH_MOVE <slot> <x> <y> ('!' fire-and-forget, per-frame hot path)
+ *     STEALTH_UP <slot>           ('!' fire-and-forget)
+ *     STEALTH_SET_ORIENTATION <n> (0=portrait, 1=landscape, 2/3=180/270;
+ *                                  feeds both the stealth lib and the
+ *                                  touch_core zone coordinate system)
+ *     STEALTH_GRAB <0|1>          (EVIOCGRAB the real panel; injections do
+ *                                  NOT reach the game while grabbed)
+ *     In stealth mode zone queries (IS_FINGER_IN_* / GET_FIRE_STATE /
+ *     LIFT_JOYSTICK_FINGER) keep working through the touch_core readers
+ *     started by START_GETEVENT — the panel is opened read-only without
+ *     grab, so real fingers still reach the game.
+ *
  *   HUD (anti-capture overlay, see src/hud/):
  *     HUD_ON                       (replies OK / ERR:hud <rc>; one-shot setup)
  *     HUD_OFF
@@ -75,6 +94,7 @@
 #include <stdint.h>
 #include <signal.h>
 #include "touch_core.h"
+#include "../injection/stealth/stealth_backend.h"
 #include "../hud/hud_renderer.h"
 
 // Screen params (set via commands before OPEN_UINPUT)
@@ -227,7 +247,62 @@ static void handle_command(const char* cmd) {
         reply_int(touch_is_finger_in_joystick_zone() ? 1 : 0);
     }
     else if (strcmp(buf, "LIFT_JOYSTICK_FINGER") == 0) {
-        reply_int(touch_lift_joystick_finger() ? 1 : 0);
+        // stealth 模式下 uinput 投影不存在,touch_lift_joystick_finger 的
+        // "抹掉投影"无效果 —— 换成经 KPM 对真实手指 slot 发抬起
+        if (stealth_is_active()) {
+            reply_int(stealth_lift_joystick_finger() ? 1 : 0);
+        } else {
+            reply_int(touch_lift_joystick_finger() ? 1 : 0);
+        }
+    }
+    else if (strcmp(buf, "STEALTH_INIT") == 0) {
+        int slot_max = -1;
+        const StealthStatus st = stealth_init(g_screen_w, g_screen_h, &slot_max);
+        if (st == STEALTH_OK) {
+            char msg[32];
+            snprintf(msg, sizeof(msg), "OK:%d", slot_max);
+            reply(msg);
+        } else {
+            reply(st == STEALTH_NO_DEVICE   ? "ERR:stealth no_device"
+                : st == STEALTH_NO_CHANNEL  ? "ERR:stealth no_channel"
+                                            : "ERR:stealth internal");
+        }
+    }
+    else if (strncmp(buf, "STEALTH_DOWN ", 13) == 0) {
+        int slot, x, y;
+        if (sscanf(buf + 13, "%d %d %d", &slot, &x, &y) == 3) {
+            stealth_down(slot, x, y);
+            reply("OK");
+        } else {
+            reply("ERR:invalid args");
+        }
+    }
+    else if (strncmp(buf, "STEALTH_MOVE ", 13) == 0) {
+        int slot, x, y;
+        if (sscanf(buf + 13, "%d %d %d", &slot, &x, &y) == 3) {
+            stealth_move(slot, x, y);
+            reply("OK");
+        } else {
+            reply("ERR:invalid args");
+        }
+    }
+    else if (strncmp(buf, "STEALTH_UP ", 11) == 0) {
+        int slot;
+        if (sscanf(buf + 11, "%d", &slot) == 1) {
+            stealth_up(slot);
+            reply("OK");
+        } else {
+            reply("ERR:invalid args");
+        }
+    }
+    else if (strncmp(buf, "STEALTH_SET_ORIENTATION ", 26) == 0) {
+        int n = atoi(buf + 26);
+        stealth_set_orientation(n);
+        reply("OK");
+    }
+    else if (strncmp(buf, "STEALTH_GRAB ", 13) == 0) {
+        int enable = atoi(buf + 13);
+        reply(stealth_grab(enable) ? "OK" : "ERR:stealth grab failed");
     }
     else if (strcmp(buf, "KEEP_ALIVE") == 0) {
         reply("OK");
@@ -338,6 +413,7 @@ static void handle_command(const char* cmd) {
         }
     }
     else if (strcmp(buf, "DESTROY") == 0) {
+        stealth_close();
         touch_close();
         reply("OK");
         g_running = 0;
@@ -379,6 +455,7 @@ int main() {
     }
 
     hud::renderer_stop();
+    stealth_close();
     touch_close();
     return 0;
 }
