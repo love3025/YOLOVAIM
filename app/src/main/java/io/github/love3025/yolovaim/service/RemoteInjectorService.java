@@ -105,7 +105,13 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             // Native layer: always portrait dimensions + rotation
             int portraitW = Math.min(sw, sh);
             int portraitH = Math.max(sw, sh);
-            int rotation = sw > sh ? 1 : 0;
+            // 不能用 sw>sh 推:横屏有 90° 和 270° 两种,差一个 180°,
+            // 按同一个 rotation=1 算会让 inverseRotateForInject 把落点整体
+            // 镜像到屏幕对角(充电口换一边就全失效)。queryRotation() 读的是
+            // 系统真实值;失败回 0,再按横竖兜底。
+            int rotation = queryRotation();
+            if (sw > sh && rotation != 1 && rotation != 3) rotation = 1;
+            if (sw <= sh && rotation != 0 && rotation != 2) rotation = 0;
             screen_w = portraitW;
             screen_h = portraitH;
             displayRotation = rotation;
@@ -122,7 +128,11 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             // Will be fully configured by setResolution which follows immediately
             Log.d(TAG, "setOrientationConfig(IM): landscapeStart=" + landscapeStart + " (deferring to setResolution)");
         } else {
-            setLandscapeStart(landscapeStart ? 1 : 0);
+            // 参数名是历史包袱,native 侧要的是 Display.getRotation() 的 0..3
+            int rotation = queryRotation();
+            if (landscapeStart && rotation != 1 && rotation != 3) rotation = 1;
+            if (!landscapeStart && rotation != 0 && rotation != 2) rotation = 0;
+            setLandscapeStart(rotation);
         }
     }
 

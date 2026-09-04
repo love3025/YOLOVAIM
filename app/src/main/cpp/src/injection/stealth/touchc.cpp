@@ -68,7 +68,7 @@ Vector2 TouchManager::ConvertPhysicalToScreenAndScale(const Vector2 &corrd,
         case 0: pos = {scale_pos.x, scale_pos.y}; break;
         case 1: pos = {scale_pos.y, screen_size.y - scale_pos.x}; break;
         case 3: pos = {screen_size.x - scale_pos.y, scale_pos.x}; break;
-        default:
+        default:  // 2 = 180°(竖屏倒置):x/y 各自反向,不换轴
             pos = {screen_size.y - scale_pos.x, screen_size.x - scale_pos.y};
             break;
     }
@@ -471,9 +471,9 @@ Vector2 TouchManager::ConvertScreenToPhysicalNoScale(Vector2 screen_pos) {
             physical_pos.x = screen_pos.y;
             physical_pos.y = screen_size.x - screen_pos.x;
             break;
-        default:
-            physical_pos.x = screen_size.y - screen_pos.y;
-            physical_pos.y = screen_size.x - screen_pos.x;
+        default:  // 2 = 180°(竖屏倒置):x/y 各自反向,不换轴
+            physical_pos.x = screen_size.y - screen_pos.x;
+            physical_pos.y = screen_size.x - screen_pos.y;
             break;
     }
     return physical_pos;

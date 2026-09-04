@@ -96,7 +96,10 @@ static bool g_initialized = false;
 
 // Screen params
 static int g_screen_w = 0, g_screen_h = 0;
-static bool g_landscape = true;
+// Display.getRotation() 语义:0=自然方向 1=90° 2=180° 3=270°。
+// 旧实现只存一个 bool(横/竖),于是 rotation 1 和 3 共用同一张坐标表 ——
+// 两者相差 180°,结果是充电口换一边后所有注入点与 zone 判定整体点镜像。
+static int g_rotation = 1;
 
 // Physical-panel pressure / contact-size ranges, cloned from the real device.
 // 0 means the panel doesn't report that axis → we skip it (reporting a value
@@ -151,12 +154,51 @@ static int randInRange(int lo, int hi) {
     return lo + rand() % (hi - lo + 1);
 }
 
+// 面板(自然方向/竖屏)像素空间的两条边长。g_screen_w/g_screen_h 是当前
+// 旋转后的屏幕尺寸,会随横竖屏对调,所以这里显式取短边/长边。
+static inline float panelShortPx() {
+    return static_cast<float>(g_screen_w < g_screen_h ? g_screen_w : g_screen_h);
+}
+static inline float panelLongPx() {
+    return static_cast<float>(g_screen_w > g_screen_h ? g_screen_w : g_screen_h);
+}
+
 // Screen → portrait touch coords (rotation + scale)
 static void screenToTouch(int sx, int sy, float& tx, float& ty) {
-    float px = g_landscape ? static_cast<float>(g_screen_h - sy) : static_cast<float>(sx);
-    float py = g_landscape ? static_cast<float>(sx) : static_cast<float>(sy);
+    const float fx = static_cast<float>(sx);
+    const float fy = static_cast<float>(sy);
+    const float W0 = panelShortPx();   // 面板宽(竖屏 X 轴)
+    const float H0 = panelLongPx();    // 面板高(竖屏 Y 轴)
+    float px, py;
+    switch (g_rotation) {
+        case 1:  px = W0 - fy; py = fx;      break;  // 90°
+        case 2:  px = W0 - fx; py = H0 - fy; break;  // 180°
+        case 3:  px = fy;      py = H0 - fx; break;  // 270°
+        default: px = fx;      py = fy;      break;  // 0°
+    }
     tx = px * g_touchScale.x;
     ty = py * g_touchScale.y;
+}
+
+// 上面那张表的逆:面板设备单位 → 当前屏幕像素。zone 判定(触发区/开火区/
+// 摇杆区)全部走它,原先在三处各抄了一份只认 rotation 0/1 的版本。
+static void deviceToScreen(float devX, float devY, int touchMaxX, int touchMaxY,
+                           int& sx, int& sy) {
+    const float W0 = panelShortPx();
+    const float H0 = panelLongPx();
+    // 设备单位 → 竖屏像素(g_touchScale 的逆;这里直接用 max 值,避免依赖
+    // g_touchScale 已被赋值)
+    const float px = touchMaxX > 0 ? devX * W0 / static_cast<float>(touchMaxX) : 0.0f;
+    const float py = touchMaxY > 0 ? devY * H0 / static_cast<float>(touchMaxY) : 0.0f;
+    float fx, fy;
+    switch (g_rotation) {
+        case 1:  fx = py;      fy = W0 - px; break;
+        case 2:  fx = W0 - px; fy = H0 - py; break;
+        case 3:  fx = H0 - py; fy = px;      break;
+        default: fx = px;      fy = py;      break;
+    }
+    sx = static_cast<int>(fx);
+    sy = static_cast<int>(fy);
 }
 
 // ─── Upload (from native_touch.cpp) ─────────────────────────────────
@@ -266,16 +308,10 @@ static void updateZones() {
             if (!g_devices[d].fingers[f].isDown) continue;
             if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
 
-            float devX = g_devices[d].fingers[f].pos.x;
-            float devY = g_devices[d].fingers[f].pos.y;
             int sx, sy;
-            if (g_landscape) {
-                sx = static_cast<int>(devY * g_screen_w / touchMaxY);
-                sy = g_screen_h - static_cast<int>(devX * g_screen_h / touchMaxX);
-            } else {
-                sx = static_cast<int>(devX * g_screen_w / touchMaxX);
-                sy = static_cast<int>(devY * g_screen_h / touchMaxY);
-            }
+            deviceToScreen(g_devices[d].fingers[f].pos.x,
+                           g_devices[d].fingers[f].pos.y,
+                           touchMaxX, touchMaxY, sx, sy);
 
             if (pointInZone(g_trigger_zone, sx, sy)) g_trigger_zone.finger_inside = 1;
             if (pointInZone(g_fire_zone, sx, sy))    g_fire_zone.finger_inside = 1;
@@ -858,10 +894,11 @@ void touch_stop_readers(void) {
     LOGD("Stopped all readers");
 }
 
-void touch_set_screen_params(int w, int h, bool landscape) {
+void touch_set_screen_params(int w, int h, int rotation) {
     g_screen_w = w;
     g_screen_h = h;
-    g_landscape = landscape;
+    g_rotation = ((rotation % 4) + 4) % 4;
+    LOGD("screen params: %dx%d rotation=%d", w, h, g_rotation);
 }
 
 void touch_down(int slot, int id, int screenX, int screenY) {
@@ -920,16 +957,10 @@ bool touch_lift_joystick_finger(void) {
             if (!g_devices[d].fingers[f].isDown) continue;
             if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
 
-            float devX = g_devices[d].fingers[f].pos.x;
-            float devY = g_devices[d].fingers[f].pos.y;
             int sx, sy;
-            if (g_landscape) {
-                sx = static_cast<int>(devY * g_screen_w / touchMaxY);
-                sy = g_screen_h - static_cast<int>(devX * g_screen_h / touchMaxX);
-            } else {
-                sx = static_cast<int>(devX * g_screen_w / touchMaxX);
-                sy = static_cast<int>(devY * g_screen_h / touchMaxY);
-            }
+            deviceToScreen(g_devices[d].fingers[f].pos.x,
+                           g_devices[d].fingers[f].pos.y,
+                           touchMaxX, touchMaxY, sx, sy);
 
             if (pointInZone(g_joystick_zone, sx, sy)) {
                 g_devices[d].fingers[f].isDown = false;
@@ -962,16 +993,10 @@ int touch_get_joystick_finger_slots(int* outSlots, int maxSlots) {
             if (!g_devices[d].fingers[f].isDown) continue;
             if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
 
-            float devX = g_devices[d].fingers[f].pos.x;
-            float devY = g_devices[d].fingers[f].pos.y;
             int sx, sy;
-            if (g_landscape) {
-                sx = static_cast<int>(devY * g_screen_w / touchMaxY);
-                sy = g_screen_h - static_cast<int>(devX * g_screen_h / touchMaxX);
-            } else {
-                sx = static_cast<int>(devX * g_screen_w / touchMaxX);
-                sy = static_cast<int>(devY * g_screen_h / touchMaxY);
-            }
+            deviceToScreen(g_devices[d].fingers[f].pos.x,
+                           g_devices[d].fingers[f].pos.y,
+                           touchMaxX, touchMaxY, sx, sy);
 
             if (pointInZone(g_joystick_zone, sx, sy)) {
                 outSlots[count++] = f;

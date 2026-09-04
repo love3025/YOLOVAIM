@@ -179,6 +179,11 @@ class InputManagerInjectorClient(private val context: Context) : TouchInjectorIn
         } catch (e: Exception) { Log.e(TAG, "setResolution: ${e.message}") }
     }
 
+    override fun setDisplayRotation(rotation: Int) {
+        // AIDL 只有布尔接口;真实旋转由 RemoteInjectorService.queryRotation() 补齐
+        setOrientationConfig(rotation == 1 || rotation == 3)
+    }
+
     override fun setOrientationConfig(landscapeStart: Boolean) {
         try {
             remoteService?.setOrientationConfig(landscapeStart)

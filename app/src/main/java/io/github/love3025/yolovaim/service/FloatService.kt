@@ -111,6 +111,15 @@ class FloatService : Service() {
     }
     private val screenWidth get() = screenSize.x
     private val screenHeight get() = screenSize.y
+    /**
+     * 当前显示旋转(0/1/2/3)。注入层和 zone 判定都要它:横屏有 90° 和 270°
+     * 两种,只按 w>h 推会把两者算成同一张坐标表,落点整体点镜像。
+     */
+    fun currentDisplayRotation(): Int = displayRotation
+
+    private val displayRotation: Int get() = try {
+        @Suppress("DEPRECATION") wm.defaultDisplay.rotation
+    } catch (_: Exception) { if (screenWidth > screenHeight) 1 else 0 }
     private val screenDensity get() = resources.displayMetrics.densityDpi
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -248,8 +257,33 @@ class FloatService : Service() {
     private lateinit var inferenceManager: InferenceManager
     private lateinit var overlayManager: OverlayManager
 
+    /**
+     * 旋转 180°(横屏 ↔ 反向横屏 / 竖屏 ↔ 倒置竖屏)时屏幕尺寸与 Configuration
+     * 都不变,[onConfigurationChanged] 不会回调,注入层就一直按旧 rotation 算 ——
+     * 这正是「充电口换一边就全失效」里 onConfigurationChanged 兜不住的那一半。
+     * DisplayListener 的 onDisplayChanged 对纯旋转也会回调,补上这个缺口。
+     */
+    private var lastKnownRotation = -1
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            if (displayId != android.view.Display.DEFAULT_DISPLAY) return
+            val rot = displayRotation
+            if (rot == lastKnownRotation) return
+            lastKnownRotation = rot
+            Log.d(TAG, "display rotation -> $rot (${screenWidth}x${screenHeight})")
+            touchService.setDisplayRotation(rot)
+            // 区域是屏幕坐标,旋转后要按新坐标系重发,否则 zone 判定用的还是旧框
+            updateTriggerZone(); updateFireZone(); updateJoystickZone()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate(); wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        lastKnownRotation = displayRotation
+        (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+            .registerDisplayListener(displayListener, mainHandler)
         ConfigManager.init(this)
         loadConfigToService()
         createNotificationChannel(); startForeground(1, buildNotification())
@@ -909,7 +943,7 @@ class FloatService : Service() {
         executor.execute {
             touchService.connect(object : InjectorCallback {
                 override fun onConnected() {
-                    touchService.setOrientationConfig(captureW > captureH)
+                    touchService.setDisplayRotation(displayRotation)
                     touchService.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
                     touchService.setInputMethod(ProjectionHolder.selectedTouchMethod)
                     updateTriggerZone()
@@ -957,7 +991,7 @@ class FloatService : Service() {
         touchService.connect(object : InjectorCallback {
             override fun onConnected() {
                 Log.d(TAG, "RECONNECT: $method 已连接, 配置中...")
-                touchService.setOrientationConfig(captureW > captureH)
+                touchService.setDisplayRotation(displayRotation)
                 touchService.setResolution(captureW, captureH, deviceAbsMaxX, deviceAbsMaxY)
                 touchService.setInputMethod(method)
                 updateTriggerZone()
@@ -1817,7 +1851,7 @@ class FloatService : Service() {
         super.onConfigurationChanged(newConfig)
         Log.d(TAG, "orientation changed: display=${screenWidth}x${screenHeight} capture=${captureW}x${captureH}")
         // Use current display dimensions for orientation and resolution
-        touchService.setOrientationConfig(screenWidth > screenHeight)
+        touchService.setDisplayRotation(displayRotation)
         touchService.setResolution(screenWidth, screenHeight, deviceAbsMaxX, deviceAbsMaxY)
         centerX = captureW / 2f; centerY = captureH / 2f
 
@@ -1876,7 +1910,7 @@ class FloatService : Service() {
                 Log.w(TAG, "VirtualDisplay resize failed: ${e.message}")
             }
             captureW = curW; captureH = curH
-            touchService.setOrientationConfig(curW > curH)
+            touchService.setDisplayRotation(displayRotation)
             touchService.setResolution(curW, curH, deviceAbsMaxX, deviceAbsMaxY)
             centerX = captureW / 2f; centerY = captureH / 2f
             // native HUD 不在 WindowManager 里,旋转不会自动适配:重发采集
@@ -1888,6 +1922,10 @@ class FloatService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            (getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+                .unregisterDisplayListener(displayListener)
+        } catch (_: Exception) {}
         if (mediaRecorder != null) toggleRecording(false)
         inferRunning.set(false); wakeInferLoop(); executor.shutdown()
         try { imageReader?.setOnImageAvailableListener(null, null) } catch (_: Exception) {}

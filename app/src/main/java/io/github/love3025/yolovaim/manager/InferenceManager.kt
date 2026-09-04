@@ -483,7 +483,7 @@ class InferenceManager(
             }
             captureW = curW
             captureH = curH
-            service.touchService.setOrientationConfig(captureW > captureH)
+            service.touchService.setDisplayRotation(service.currentDisplayRotation())
             service.touchService.setResolution(captureW, captureH, service.deviceAbsMaxX, service.deviceAbsMaxY)
             centerX = captureW / 2f
             centerY = captureH / 2f

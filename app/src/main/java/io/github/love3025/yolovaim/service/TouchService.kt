@@ -256,6 +256,10 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
         delegate?.setOrientationConfig(landscapeStart)
     }
 
+    override fun setDisplayRotation(rotation: Int) {
+        delegate?.setDisplayRotation(rotation)
+    }
+
     override fun startGeteventListener() { delegate?.startGeteventListener() }
 
     override fun stopGeteventListener() { delegate?.stopGeteventListener() }

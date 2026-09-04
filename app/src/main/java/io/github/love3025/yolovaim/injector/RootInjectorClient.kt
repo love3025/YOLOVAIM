@@ -387,6 +387,10 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         execOk("SET_ORIENTATION ${if (landscapeStart) 1 else 0}")
     }
 
+    override fun setDisplayRotation(rotation: Int) {
+        execOk("SET_ORIENTATION $rotation")
+    }
+
     override fun startGeteventListener() {
         execOk("START_GETEVENT")
     }

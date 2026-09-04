@@ -38,10 +38,12 @@ Java_io_github_love3025_yolovaim_service_RemoteInjectorService_setScreenResoluti
 
 JNIEXPORT void JNICALL
 Java_io_github_love3025_yolovaim_service_RemoteInjectorService_setLandscapeStart(
-    JNIEnv*, jclass, jint isLandscape)
+    JNIEnv*, jclass, jint rotation)
 {
-    touch_set_screen_params(g_screen_w, g_screen_h, isLandscape != 0);
-    LOGD("setLandscapeStart: %d (screen=%dx%d)", isLandscape, g_screen_w, g_screen_h);
+    // 名字是历史包袱:参数已是 Display.getRotation() 的 0..3,不再是布尔。
+    // 只传横/竖会把 90° 和 270° 算成同一张坐标表(见 touch_core.h)。
+    touch_set_screen_params(g_screen_w, g_screen_h, rotation);
+    LOGD("setLandscapeStart: rotation=%d (screen=%dx%d)", rotation, g_screen_w, g_screen_h);
 }
 
 // ─── Lifecycle ──────────────────────────────────────────────────────

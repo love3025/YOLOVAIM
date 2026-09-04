@@ -307,6 +307,13 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
         }
     }
 
+    public void setDisplayRotation(int rotation) {
+        // Shizuku/AIDL 侧只有布尔接口;真实旋转由 RemoteInjectorService
+        // 自己 queryRotation() 补齐(见其 setResolution/setOrientationConfig)
+        setOrientationConfig(rotation == 1 || rotation == 3);
+    }
+
+    @Override
     public void setOrientationConfig(boolean landscapeStart) {
         if (remoteService != null) {
             try {
