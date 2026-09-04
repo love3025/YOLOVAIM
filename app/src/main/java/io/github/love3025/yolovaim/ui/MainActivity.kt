@@ -805,18 +805,32 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        rootAvailable = isRootAvailable()
-        if (!rootAvailable) {
-            try {
-                Shizuku.addRequestPermissionResultListener(shizukuListener)
-            } catch (_: Exception) {}
-            // 主动申请 Shizuku 权限
-            try {
-                if (Shizuku.pingBinder() && !isShizukuGranted()) {
-                    Shizuku.requestPermission(REQ_SHIZUKU)
+        // isRootAvailable() 会 exec("su -c id") 并 waitFor()，没有超时。root
+        // 管理器设为「询问」时（首次安装必然如此）su 会一直阻塞到用户点授权，
+        // 放在主线程就是把 UI 冻死等人操作 —— 5 秒后系统直接 ANR，用户根本
+        // 来不及点那个授权框，于是首装第一次进来什么都用不了，反复重启到某次
+        // 侥幸授上为止（授权一旦记住，su 立刻返回，就「好了」）。
+        // 放到后台线程等：授权框可以慢慢点，拿到结果再回主线程刷新状态。
+        Thread({
+            val ok = isRootAvailable()
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                rootAvailable = ok
+                if (!rootAvailable) {
+                    try {
+                        Shizuku.addRequestPermissionResultListener(shizukuListener)
+                    } catch (_: Exception) {}
+                    // 主动申请 Shizuku 权限
+                    try {
+                        if (Shizuku.pingBinder() && !isShizukuGranted()) {
+                            Shizuku.requestPermission(REQ_SHIZUKU)
+                        }
+                    } catch (_: Exception) {}
                 }
-            } catch (_: Exception) {}
-        }
+                updatePermissionStates()
+            }
+        }, "root-probe").start()
+        // 探测没回来之前也要先把已知权限画出来，别让界面空着
         updatePermissionStates()
     }
 

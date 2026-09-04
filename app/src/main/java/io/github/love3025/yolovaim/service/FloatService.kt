@@ -940,7 +940,13 @@ class FloatService : Service() {
     }
 
     private fun initTouchInjector() {
-        executor.execute {
+        // 刻意不走 executor：那是单线程的推理 executor，而 connect() 里的
+        // su 握手在首次安装时要等用户点授权框（可能是几十秒）。压在同一条
+        // 线程上会一起冻住两样东西：推理循环，以及 onStartCommand 里
+        // loadModel() 的 executor.submit{}.get() 屏障（那是主线程）。
+        // 结果就是「首装第一次完全没反应」。reconnectTouchInline 早就为了
+        // 同样的理由绕开了 executor，这里补齐。
+        Thread({
             touchService.connect(object : InjectorCallback {
                 override fun onConnected() {
                     touchService.setDisplayRotation(displayRotation)
@@ -968,7 +974,7 @@ class FloatService : Service() {
                     Log.e(TAG, "TouchInjector error: $msg")
                 }
             })
-        }
+        }, "touch-injector-connect").start()
     }
 
     /**

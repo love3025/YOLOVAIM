@@ -13,7 +13,10 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     companion object {
         private const val TAG = "RootInjector"
         private const val LAT_TAG = "YolovaimLatency"
-        private const val CONNECT_TIMEOUT_MS = 10000L
+        // 首次安装时这段等待里包含「用户在 root 管理器上点授权」的人类反应
+        // 时间，10s 太紧。connect() 现在跑在自己的线程上（见
+        // FloatService.initTouchInjector），等久一点不会拖住推理循环。
+        private const val CONNECT_TIMEOUT_MS = 60000L
 
         /**
          * Root 是否已授权（不是 su 二进制是否存在——是要真的能拿到 uid=0）。
@@ -71,19 +74,7 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
             daemonStdin!!.flush()
 
             // Wait for READY response with timeout
-            val startTime = System.currentTimeMillis()
-            var ready = false
-            while (System.currentTimeMillis() - startTime < CONNECT_TIMEOUT_MS) {
-                // Use a thread to read with timeout
-                val line = readLineWithTimeout(2000)
-                if (line != null) {
-                    Log.d(TAG, "Daemon response: $line")
-                    if (line == "READY") {
-                        ready = true
-                        break
-                    }
-                }
-            }
+            val ready = awaitReady(CONNECT_TIMEOUT_MS)
 
             if (!ready) {
                 callback.onError("Root daemon READY timeout")
@@ -121,16 +112,39 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         }
     }
 
-    private fun readLineWithTimeout(timeoutMs: Long): String? {
-        val future = java.util.concurrent.CompletableFuture<String?>()
+    /**
+     * 等 daemon 吐出 READY，整体一个截止时间。
+     *
+     * 旧实现是 `while (未超 10s) { 每次读 2s }`，有两个问题：
+     * 1. 那个 2s 读超时会**抛** TimeoutException，而它没被就地接住，直接穿到
+     *    connect() 的 catch(Exception) —— 于是外层 10s 窗口从来没有过第二次
+     *    迭代。首次安装等 root 授权框的场景 2 秒就判死，报「su not available」。
+     * 2. 就算接住了，每次迭代都会再起一个线程去读同一个 reader，多个线程抢
+     *    同一条流，而且全都泄漏在阻塞的 readLine 上。
+     *
+     * 现在：一条读线程循环读到 READY 或 EOF，外面只等一次。
+     */
+    private fun awaitReady(timeoutMs: Long): Boolean {
+        val future = java.util.concurrent.CompletableFuture<Boolean>()
         Thread({
+            var ok = false
             try {
-                future.complete(daemonReader?.readLine())
+                while (true) {
+                    val line = daemonReader?.readLine() ?: break  // EOF
+                    Log.d(TAG, "Daemon response: $line")
+                    if (line == "READY") { ok = true; break }
+                }
             } catch (e: Exception) {
-                future.complete(null)
+                Log.e(TAG, "awaitReady read error: ${e.message}")
             }
-        }).start()
-        return future.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            future.complete(ok)
+        }, "root-daemon-ready").start()
+        return try {
+            future.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            Log.e(TAG, "awaitReady timeout/error: ${e.message}")
+            false
+        }
     }
 
     override fun isConnected(): Boolean = connected && process != null
