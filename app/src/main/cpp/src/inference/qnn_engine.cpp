@@ -85,7 +85,7 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
     qnn_options.backend_type = kHtpBackend;
     qnn_options.skel_library_dir = m_native_lib_dir;
-    qnn_options.cache_dir = "/data/data/team.maodie.aimbot/cache/qnn";
+    qnn_options.cache_dir = "/data/data/io.github.love3025.yolovaim/cache/qnn";
     // Per-model token isolates the QNN HTP graph cache: cache_dir/<token>_<fingerprint>.bin.
     // Each model gets its own token (driven by its basename in aimbot.cpp),
     // so warm-up compiles once and every subsequent load is a fingerprint-skip.

@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -24,11 +25,21 @@
 #define LOG_TAG "TouchCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "AimbotLatency", __VA_ARGS__)
+#define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACELAT(...) __android_log_print(ANDROID_LOG_DEBUG, "YolovaimLatency", __VA_ARGS__)
+#else
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 #else
 #define LOGD(...) do { fprintf(stderr, "D/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
 #define LOGE(...) do { fprintf(stderr, "E/" LOG_TAG ": " __VA_ARGS__); fputc('\n', stderr); } while(0)
-#define LOGLAT(...) do { fprintf(stderr, "D/AimbotLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#define LOGLAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACELAT(...) do { fprintf(stderr, "D/YolovaimLatency: " __VA_ARGS__); fputc('\n', stderr); } while(0)
+#else
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 #endif
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -85,7 +96,10 @@ static bool g_initialized = false;
 
 // Screen params
 static int g_screen_w = 0, g_screen_h = 0;
-static bool g_landscape = true;
+// Display.getRotation() 语义:0=自然方向 1=90° 2=180° 3=270°。
+// 旧实现只存一个 bool(横/竖),于是 rotation 1 和 3 共用同一张坐标表 ——
+// 两者相差 180°,结果是充电口换一边后所有注入点与 zone 判定整体点镜像。
+static int g_rotation = 1;
 
 // Physical-panel pressure / contact-size ranges, cloned from the real device.
 // 0 means the panel doesn't report that axis → we skip it (reporting a value
@@ -140,12 +154,51 @@ static int randInRange(int lo, int hi) {
     return lo + rand() % (hi - lo + 1);
 }
 
+// 面板(自然方向/竖屏)像素空间的两条边长。g_screen_w/g_screen_h 是当前
+// 旋转后的屏幕尺寸,会随横竖屏对调,所以这里显式取短边/长边。
+static inline float panelShortPx() {
+    return static_cast<float>(g_screen_w < g_screen_h ? g_screen_w : g_screen_h);
+}
+static inline float panelLongPx() {
+    return static_cast<float>(g_screen_w > g_screen_h ? g_screen_w : g_screen_h);
+}
+
 // Screen → portrait touch coords (rotation + scale)
 static void screenToTouch(int sx, int sy, float& tx, float& ty) {
-    float px = g_landscape ? static_cast<float>(g_screen_h - sy) : static_cast<float>(sx);
-    float py = g_landscape ? static_cast<float>(sx) : static_cast<float>(sy);
+    const float fx = static_cast<float>(sx);
+    const float fy = static_cast<float>(sy);
+    const float W0 = panelShortPx();   // 面板宽(竖屏 X 轴)
+    const float H0 = panelLongPx();    // 面板高(竖屏 Y 轴)
+    float px, py;
+    switch (g_rotation) {
+        case 1:  px = W0 - fy; py = fx;      break;  // 90°
+        case 2:  px = W0 - fx; py = H0 - fy; break;  // 180°
+        case 3:  px = fy;      py = H0 - fx; break;  // 270°
+        default: px = fx;      py = fy;      break;  // 0°
+    }
     tx = px * g_touchScale.x;
     ty = py * g_touchScale.y;
+}
+
+// 上面那张表的逆:面板设备单位 → 当前屏幕像素。zone 判定(触发区/开火区/
+// 摇杆区)全部走它,原先在三处各抄了一份只认 rotation 0/1 的版本。
+static void deviceToScreen(float devX, float devY, int touchMaxX, int touchMaxY,
+                           int& sx, int& sy) {
+    const float W0 = panelShortPx();
+    const float H0 = panelLongPx();
+    // 设备单位 → 竖屏像素(g_touchScale 的逆;这里直接用 max 值,避免依赖
+    // g_touchScale 已被赋值)
+    const float px = touchMaxX > 0 ? devX * W0 / static_cast<float>(touchMaxX) : 0.0f;
+    const float py = touchMaxY > 0 ? devY * H0 / static_cast<float>(touchMaxY) : 0.0f;
+    float fx, fy;
+    switch (g_rotation) {
+        case 1:  fx = py;      fy = W0 - px; break;
+        case 2:  fx = W0 - px; fy = H0 - py; break;
+        case 3:  fx = H0 - py; fy = px;      break;
+        default: fx = px;      fy = py;      break;
+    }
+    sx = static_cast<int>(fx);
+    sy = static_cast<int>(fy);
 }
 
 // ─── Upload (from native_touch.cpp) ─────────────────────────────────
@@ -199,23 +252,53 @@ static void upload() {
     pushEvent(count, EV_KEY, BTN_TOOL_QUADTAP, activeFingerCount == 4 ? 1 : 0);
     pushEvent(count, EV_KEY, BTN_TOOL_QUINTTAP, activeFingerCount >= 5 ? 1 : 0);
     pushEvent(count, EV_SYN, SYN_REPORT, 0);
+    // This log used to fire on every successful uinput write — i.e. once per
+    // aim frame — and it runs inside the injector process, in the exact window
+    // where the caller was blocked waiting for the round-trip. It put a logd
+    // socket write on the injection critical path.
+#ifdef YOLOVAIM_TRACE
     long long tWriteStart = touchTimeUs();
+#endif
     int wr = write(g_outputFd, g_inputBuffer.event, sizeof(input_event) * count);
-    long long tWriteEnd = touchTimeUs();
     if (wr < 0) {
         LOGE("upload: write failed errno=%d", errno);
     } else {
-        LOGLAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+#ifdef YOLOVAIM_TRACE
+        long long tWriteEnd = touchTimeUs();
+        LOGTRACELAT("uinput write | events=%d us=%.2fms", count, (tWriteEnd - tWriteStart) / 1e3);
+#endif
     }
 }
 
 // ─── Zone detection ─────────────────────────────────────────────────
 
+// 开火区上升沿计数。
+//
+// updateZones() 挂在每个 SYN_REPORT 上，也就是 120-240Hz 的真实触摸事件率；
+// 应用侧却只能按推理帧率(30-60Hz)查 g_fire_zone.finger_inside 这个电平。
+// 于是半自动连点被按「按压时长」而非「点击次数」计量：30fps 下短于 33ms 的
+// 点击会整帧落空，那一枪的压枪根本没算，而漏与不漏取决于点击与推理帧的相位。
+// 在这一层数上升沿，240Hz 下 15ms 的点击也不会丢。
+//
+// g_fire_prev 只在 updateZones() 里读写，而 updateZones() 的调用方
+// (readerThread) 始终持有 g_mutex，所以普通 int 即可。
+// g_fire_taps 则要被 IPC 线程以读-改-写方式取走(consume)，与 reader 线程的
+// 自增并发，必须是原子的 —— 现有的 touch_is_finger_in_fire_zone() 不加锁是
+// 因为它只是单次纯读，consume 没这个豁免。
+static std::atomic<int> g_fire_taps{0};
+static int g_fire_prev = 0;
+
+static inline void countFireEdgeLocked() {
+    const int now = g_fire_zone.finger_inside;
+    if (now && !g_fire_prev) g_fire_taps.fetch_add(1, std::memory_order_relaxed);
+    g_fire_prev = now;
+}
+
 static void updateZones() {
     g_trigger_zone.finger_inside = 0;
     g_fire_zone.finger_inside = 0;
     g_joystick_zone.finger_inside = 0;
-    if (g_devices.empty()) return;
+    if (g_devices.empty()) { countFireEdgeLocked(); return; }
 
     int touchMaxX = g_devices[0].absX.maximum;
     int touchMaxY = g_devices[0].absY.maximum;
@@ -225,22 +308,18 @@ static void updateZones() {
             if (!g_devices[d].fingers[f].isDown) continue;
             if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
 
-            float devX = g_devices[d].fingers[f].pos.x;
-            float devY = g_devices[d].fingers[f].pos.y;
             int sx, sy;
-            if (g_landscape) {
-                sx = static_cast<int>(devY * g_screen_w / touchMaxY);
-                sy = g_screen_h - static_cast<int>(devX * g_screen_h / touchMaxX);
-            } else {
-                sx = static_cast<int>(devX * g_screen_w / touchMaxX);
-                sy = static_cast<int>(devY * g_screen_h / touchMaxY);
-            }
+            deviceToScreen(g_devices[d].fingers[f].pos.x,
+                           g_devices[d].fingers[f].pos.y,
+                           touchMaxX, touchMaxY, sx, sy);
 
             if (pointInZone(g_trigger_zone, sx, sy)) g_trigger_zone.finger_inside = 1;
             if (pointInZone(g_fire_zone, sx, sy))    g_fire_zone.finger_inside = 1;
             if (pointInZone(g_joystick_zone, sx, sy)) g_joystick_zone.finger_inside = 1;
         }
     }
+
+    countFireEdgeLocked();
 }
 
 // ─── Device scanning ────────────────────────────────────────────────
@@ -298,8 +377,11 @@ static bool detectTouchDeviceViaGetevent(char* outPath, size_t pathSize,
             hasSlot = hasX = hasY = false;
             maxX = maxY = 0;
         }
-        // Skip our own previously-created virtual device
-        if (strstr(line, "name:") && strstr(line, "Aimbot")) {
+        // NOTE: 遗留过滤器。早期版本把虚拟设备命名为品牌名，此处按名字跳过自己。
+        // 现在设备名克隆自真实触摸设备（见下方 EVIOCGNAME 分支）或为随机串，
+        // 所以这个条件实际已经匹配不到任何东西。改名时一并更新以免留下旧品牌，
+        // 行为未变；要真正修复应改为按 uinput fd / devpath 排除自身。
+        if (strstr(line, "name:") && strstr(line, "YOLOVAIM")) {
             hasSlot = hasX = hasY = false;
             maxX = maxY = 0;
         }
@@ -726,6 +808,62 @@ void touch_close(void) {
     closeTouchLocked();
 }
 
+// Reader-only 初始化(stealth/KPM 注入路径用),与 touch_init 只差两处:
+// 1) 面板 fd 只 O_RDONLY 打开,不 EVIOCGRAB —— uinput 路径靠 grab 让
+//    InputReader 忽略真手指(游戏只看 uinput 投影);stealth 路径注入与真触摸
+//    同源同路径,真手指必须继续送达游戏,grab 了游戏就收不到任何触摸。
+//    代价:本读者会同时看到真手指与 KPM 注入报文,靠 slot 8/9 排除表区分
+//    (updateZones / touch_lift_joystick_finger 已排除,无需改动)。
+// 2) 不创建 uinput 设备,g_outputFd 保持 0 —— upload() 开头的
+//    `if (g_outputFd <= 0) return;` 让读者线程里的 upload 全程 no-op,
+//    zone 检测 / fire 边沿计数零改动复用。
+bool touch_init_reader_only(int screenW, int screenH) {
+    if (screenW <= 0 || screenH <= 0) {
+        LOGE("touch_init_reader_only: invalid screen size %dx%d", screenW, screenH);
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(g_mutex);
+    closeTouchLocked();
+
+    Vec2 size(static_cast<float>(screenW), static_cast<float>(screenH));
+    g_screenSize = size.x > size.y ? size : Vec2(size.y, size.x);
+    g_screen_w = screenW;
+    g_screen_h = screenH;
+
+    int touchMaxX = screenW;
+    int touchMaxY = screenH;
+    char touchPath[256] = "";
+    if (!detectTouchDeviceViaGetevent(touchPath, sizeof(touchPath), touchMaxX, touchMaxY) ||
+        touchPath[0] == '\0') {
+        // uinput 路径探测失败可以继续(只是没有 zone 检测);stealth 路径的
+        // 读者是全部意义所在,没有面板 fd 就没有存在的必要
+        LOGE("touch_init_reader_only: no touch device detected");
+        return false;
+    }
+
+    int fd = open(touchPath, O_RDONLY);
+    if (fd < 0) {
+        LOGE("touch_init_reader_only: open %s failed errno=%d", touchPath, errno);
+        return false;
+    }
+
+    Device device{};
+    device.fd = fd;
+    device.absX.maximum = touchMaxX;
+    device.absY.maximum = touchMaxY;
+    strncpy(device.path, touchPath, sizeof(device.path) - 1);
+    device.path[sizeof(device.path) - 1] = '\0';
+    g_devices.push_back(device);
+
+    Vec2 logical = size;
+    if (logical.x > logical.y) std::swap(logical.x, logical.y);
+    g_touchScale.x = static_cast<float>(touchMaxX) / std::max(1.0f, logical.x);
+    g_touchScale.y = static_cast<float>(touchMaxY) / std::max(1.0f, logical.y);
+    g_initialized = true;
+    LOGD("touch(reader-only) ready scale=%.3f,%.3f", g_touchScale.x, g_touchScale.y);
+    return true;
+}
+
 bool touch_is_initialized(void) { return g_initialized; }
 int  touch_get_output_fd(void)   { return g_outputFd; }
 
@@ -756,10 +894,11 @@ void touch_stop_readers(void) {
     LOGD("Stopped all readers");
 }
 
-void touch_set_screen_params(int w, int h, bool landscape) {
+void touch_set_screen_params(int w, int h, int rotation) {
     g_screen_w = w;
     g_screen_h = h;
-    g_landscape = landscape;
+    g_rotation = ((rotation % 4) + 4) % 4;
+    LOGD("screen params: %dx%d rotation=%d", w, h, g_rotation);
 }
 
 void touch_down(int slot, int id, int screenX, int screenY) {
@@ -795,6 +934,14 @@ void touch_set_joystick_zone(int l, int t, int r, int b) { g_joystick_zone = {l,
 
 bool touch_is_finger_in_trigger_zone(void)  { return g_trigger_zone.finger_inside; }
 bool touch_is_finger_in_fire_zone(void)     { return g_fire_zone.finger_inside; }
+
+// 一次往返同时取走电平和点击数：(taps << 1) | level。
+// 拆成两条命令会让推理热路径每帧多一次阻塞式 IPC 往返，正是 4ee9e9e 刚
+// 消除掉的那类浪费(execCmd 是 write + readLine，且在 cmdLock 上串行)。
+int touch_consume_fire_state(void) {
+    const int taps = g_fire_taps.exchange(0, std::memory_order_relaxed);
+    return (taps << 1) | (g_fire_zone.finger_inside ? 1 : 0);
+}
 bool touch_is_finger_in_joystick_zone(void) { return g_joystick_zone.finger_inside; }
 
 bool touch_lift_joystick_finger(void) {
@@ -810,16 +957,10 @@ bool touch_lift_joystick_finger(void) {
             if (!g_devices[d].fingers[f].isDown) continue;
             if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
 
-            float devX = g_devices[d].fingers[f].pos.x;
-            float devY = g_devices[d].fingers[f].pos.y;
             int sx, sy;
-            if (g_landscape) {
-                sx = static_cast<int>(devY * g_screen_w / touchMaxY);
-                sy = g_screen_h - static_cast<int>(devX * g_screen_h / touchMaxX);
-            } else {
-                sx = static_cast<int>(devX * g_screen_w / touchMaxX);
-                sy = static_cast<int>(devY * g_screen_h / touchMaxY);
-            }
+            deviceToScreen(g_devices[d].fingers[f].pos.x,
+                           g_devices[d].fingers[f].pos.y,
+                           touchMaxX, touchMaxY, sx, sy);
 
             if (pointInZone(g_joystick_zone, sx, sy)) {
                 g_devices[d].fingers[f].isDown = false;
@@ -831,4 +972,37 @@ bool touch_lift_joystick_finger(void) {
 
     if (lifted) upload();
     return lifted;
+}
+
+// 当前真实手指(排除虚拟 slot 8/9)中位于摇杆区内的面板 slot 号列表。
+// uinput 路径自己用 touch_lift_joystick_finger() 抹掉 uinput 投影即可;
+// stealth 路径没有 uinput 投影,真手指直通游戏 —— 调用方拿本函数返回的
+// slot 后,经 KPM 内核通道对这些 slot 各发一次抬起来完成同样的"自动停枪"。
+// 返回写入 outSlots 的个数(0 = 摇杆区没有真实手指)。
+int touch_get_joystick_finger_slots(int* outSlots, int maxSlots) {
+    if (outSlots == nullptr || maxSlots <= 0) return 0;
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if (!g_initialized || g_devices.empty()) return 0;
+
+    int count = 0;
+    int touchMaxX = g_devices[0].absX.maximum;
+    int touchMaxY = g_devices[0].absY.maximum;
+
+    for (size_t d = 0; d < g_devices.size() && count < maxSlots; d++) {
+        for (int f = 0; f < maxF && count < maxSlots; f++) {
+            if (!g_devices[d].fingers[f].isDown) continue;
+            if (d == 0 && (f == TOUCH_VIRTUAL_SLOT || f == TOUCH_TRIGGER_SLOT)) continue;
+
+            int sx, sy;
+            deviceToScreen(g_devices[d].fingers[f].pos.x,
+                           g_devices[d].fingers[f].pos.y,
+                           touchMaxX, touchMaxY, sx, sy);
+
+            if (pointInZone(g_joystick_zone, sx, sy)) {
+                outSlots[count++] = f;
+                LOGD("joystickFingerSlot: dev%zu finger%d at (%d,%d)", d, f, sx, sy);
+            }
+        }
+    }
+    return count;
 }

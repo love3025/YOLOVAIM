@@ -8,15 +8,39 @@
 #include <sys/time.h>
 #include <android/log.h>
 
-#define LOG_TAG "Aimbot"
+#define LOG_TAG "YOLOVAIM"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  LOG_TAG, __VA_ARGS__)
 
 // Per-stage latency log. Use only with `us` and `count` arguments so the format
-// matches the Kotlin side ("AimbotLatency") for easy grep.
-#define LAT_TAG "AimbotLatency"
+// matches the Kotlin side ("YolovaimLatency") for easy grep.
+#define LAT_TAG "YolovaimLatency"
 #define LOGLAT(...) __android_log_print(ANDROID_LOG_DEBUG, LAT_TAG, __VA_ARGS__)
+
+// Per-frame trace logging — compiled out by default in *every* build type.
+//
+// These sites fire once per inference frame (100-300/s on QNN HTP). Each costs
+// a printf-style format plus an __android_log_write socket round-trip, on the
+// same core the inference loop runs on, and logd burns comparable CPU on the
+// other end. Nothing strips them in release either: the app sets
+// isMinifyEnabled = false and no NDEBUG guard existed here. At that rate the
+// output is unreadable as a debugging aid anyway.
+//
+// They are also measured nowhere: every one of these sits *outside* the
+// tPreStart..tPostEnd window that getInferTimings() reports, so the cost never
+// showed up in the in-app "推理 xx fps" readout.
+//
+// Build with -DYOLOVAIM_TRACE to turn them back on. Low-frequency init and
+// error logging deliberately keeps using LOGD/LOGE so release builds stay
+// diagnosable.
+#ifdef YOLOVAIM_TRACE
+#define LOGTRACE(...)    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGTRACELAT(...) __android_log_print(ANDROID_LOG_DEBUG, LAT_TAG, __VA_ARGS__)
+#else
+#define LOGTRACE(...)    do {} while (0)
+#define LOGTRACELAT(...) do {} while (0)
+#endif
 
 struct Detection {
     float x1, y1, x2, y2, score, classId;
