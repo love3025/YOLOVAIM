@@ -119,8 +119,9 @@ class InputManagerInjectorClient(private val context: Context) : TouchInjectorIn
         try { remoteService?.triggerUp() } catch (e: Exception) { Log.e(TAG, "triggerUp: ${e.message}") }
     }
 
-    override fun triggerTap(x: Int, y: Int, durationMs: Int) {
-        try { remoteService?.triggerTap(x, y, durationMs) } catch (e: Exception) { Log.e(TAG, "triggerTap: ${e.message}") }
+    override fun triggerTap(x: Int, y: Int, durationMs: Int): Boolean {
+        return try { remoteService?.triggerTap(x, y, durationMs); remoteService != null }
+        catch (e: Exception) { Log.e(TAG, "triggerTap: ${e.message}"); false }
     }
 
     override fun setTriggerZone(left: Int, top: Int, right: Int, bottom: Int) {

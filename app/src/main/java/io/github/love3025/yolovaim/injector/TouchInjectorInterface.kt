@@ -21,7 +21,14 @@ interface TouchInjectorInterface {
 
     fun triggerDown(x: Int, y: Int)
     fun triggerUp()
-    fun triggerTap(x: Int, y: Int, durationMs: Int)
+    /**
+     * 开一枪(DOWN + 触摸时长 + UP)。
+     *
+     * @return 这一枪**是否真的被派发**。`false` = 上一枪还没走完而被丢弃
+     *   (见 TouchService 的 tapInFlight)。调用方必须区分:把丢弃当成开成功会
+     *   静默吃掉一整个冷却周期。
+     */
+    fun triggerTap(x: Int, y: Int, durationMs: Int): Boolean
 
     fun setTriggerZone(left: Int, top: Int, right: Int, bottom: Int)
     fun isFingerInTriggerZone(): Boolean

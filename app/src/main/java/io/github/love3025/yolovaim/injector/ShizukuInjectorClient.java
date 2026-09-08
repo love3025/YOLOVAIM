@@ -210,10 +210,12 @@ public class ShizukuInjectorClient implements TouchInjectorInterface {
         }
     }
 
-    public void triggerTap(int x, int y, int durationMs) {
+    public boolean triggerTap(int x, int y, int durationMs) {
         if (remoteService != null) {
-            try { remoteService.triggerTap(x, y, durationMs); } catch (Exception e) { Log.e(TAG, "triggerTap: " + e.getMessage()); }
+            try { remoteService.triggerTap(x, y, durationMs); return true; }
+            catch (Exception e) { Log.e(TAG, "triggerTap: " + e.getMessage()); }
         }
+        return false;
     }
 
     public void setTriggerZone(int left, int top, int right, int bottom) {

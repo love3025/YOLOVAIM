@@ -55,6 +55,44 @@ class FloatService : Service() {
          * actually want a frame-by-frame trace.
          */
         const val TRACE = false
+
+        /**
+         * 链路延迟仪表(每 [LAT_WINDOW] 帧一条聚合日志)。与 [TRACE] 是两个
+         * 独立开关，因为代价差一个数量级：TRACE 每帧一次 String.format +
+         * logd socket 写；这里每帧只多 ~8 次 nanoTime(aarch64 上 20-30ns 一
+         * 次，合计 <0.3µs)，一整个窗口才出一条日志。
+         *
+         * **聚合里 max 比 avg 重要。** 要抓的是尾部事件 —— execCmd 的
+         * CMD_TIMEOUT_MS=500 判死、URGENT_DISPLAY 推理线程等默认优先级
+         * readerExec 的优先级反转、HUD 掩码大块写把 cmdLock 占住 —— 这些在
+         * 均值里全被 60 帧摊平看不见。所以每一段都同时记 avg 和 max。
+         *
+         * 旧的 T0-T6 那套在 InferenceManager 里，而那份推理循环从来没被
+         * 调用过(startInferLoop 只被自己内部调)，所以真跑的循环一直没有
+         * 仪表。重建时按现在真正想回答的问题重新分段：多出 fire/hold 两段
+         * 阻塞 IPC 和 hud 一段，那三处是当前的可疑点。
+         */
+        const val TRACE_LAT = false
+        const val LAT_TAG = "YolovaimLatency"
+        /** 聚合窗口(帧)。60 帧 ≈ 0.5-2s，一条日志/窗口，logcat 读得过来。 */
+        const val LAT_WINDOW = 60
+
+        // 分段下标。idle 是「上一帧干完 → 这一帧拿到图」的真实空闲，
+        // 不是单次 acquire 耗时：循环是事件驱动的(awaitFrame park)，
+        // 空闲大 = 被采集帧率喂不饱，空闲趋零 = 推理已经吃满采集。
+        const val LAT_IDLE = 0
+        const val LAT_FIRE = 1   // consumeFireState 阻塞往返
+        const val LAT_HOLD = 2   // isFingerInTriggerZone 阻塞往返(仅按住激发开启)
+        const val LAT_JNI  = 3   // detect(): 预处理+推理+后处理
+        const val LAT_HUD  = 4   // pushInferInfo + publishDetections
+        const val LAT_AIM  = 5   // 选靶 + PID/Bezier + MOVE 管道写
+        const val LAT_TRIG = 6   // processTrigger(triggerTap 已异步，应接近 0)
+        const val LAT_TOTAL = 7  // 拿到图 → 本帧活干完
+        // 上面各段之和曾比 total 少 1.64ms/帧(7.7%)。差额落在这两处没插桩的
+        // 必付开销上，加桩把它算清楚，别再让它以「未计入」的名义待在账里。
+        const val LAT_ACQ = 8    // image.planes[0] + plane.buffer + 裁剪区换算
+        const val LAT_TD  = 9    // hwBuf.close() + image.close()(缓冲还池)
+        const val LAT_N = 10
     }
 
     private lateinit var wm: WindowManager
@@ -149,7 +187,11 @@ class FloatService : Service() {
 
     // PID auto-aim state
     private var aimOffsetYRatio = 0f; private var aimSwayAmplitude = 0; private var aimPrediction = 0; private var triggerOffsetYRatio = 0f
-    private var kp = 0.07f; private var ki = 0.001f; private var kd = 0.05f; private var kf = 0.05f
+    private var kp = 0.07f; private var ki = 0.001f; private var kf = 0.05f
+    /** 平滑度(唯一的阻尼旋钮)。旧配置里的 kd 在 ConfigManager.load 折算进来。 */
+    private var aimDamping = 0.4f
+    /** 接近段增强,默认关。见 AimController.approachAssistEnabled。 */
+    private var approachAssist = false
     private var aimHoldEnabled = false
     private var recoilEnabled = false; private var recoilStrength = 0.5f
     private var recoilSpeed = 0.5f; private var recoilResetIntervalMs = 300
@@ -243,6 +285,7 @@ class FloatService : Service() {
     private var triggerEnabled = false; private var triggerReactionSpeed = 100; private var triggerCooldown = 200
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
     private var triggerTouchDuration = 10; private var triggerTouchRange = 100
+    private var triggerRadiusPx = 0
     private var triggerShowArea = false
     private var autoStopEnabled = false
     private var triggerOverlay: TriggerOverlayView? = null
@@ -348,7 +391,8 @@ class FloatService : Service() {
         // AimController
         aimController.kp = kp
         aimController.ki = ki
-        aimController.kd = kd
+        aimController.aimDamping = aimDamping
+        aimController.approachAssistEnabled = approachAssist
         aimController.kf = kf
         aimController.aimMode = aimMode
         aimController.bezierDuration = bezierDuration
@@ -379,6 +423,7 @@ class FloatService : Service() {
         triggerController.triggerUpFluct = triggerUpFluct
         triggerController.triggerDownFluct = triggerDownFluct
         triggerController.triggerTouchDuration = triggerTouchDuration
+        triggerController.triggerRadiusPx = triggerRadiusPx
         triggerController.autoStopEnabled = autoStopEnabled
         triggerController.triggerOffsetYRatio = triggerOffsetYRatio
         triggerController.triggerClasses = triggerClasses.toMutableSet()
@@ -397,6 +442,7 @@ class FloatService : Service() {
         triggerDownFluct = cfg.triggerDownFluctuation
         triggerTouchDuration = cfg.triggerTouchDuration
         triggerTouchRange = cfg.triggerTouchRange
+        triggerRadiusPx = cfg.triggerRadiusPx
         triggerShowArea = cfg.triggerShowArea
         autoStopEnabled = cfg.autoStopEnabled
         aimHoldEnabled = cfg.aimHoldEnabled
@@ -408,7 +454,8 @@ class FloatService : Service() {
         recoilStrength = cfg.recoilStrength
         recoilSpeed = cfg.recoilSpeed
         recoilResetIntervalMs = cfg.recoilResetIntervalMs
-        ki = cfg.ki; kd = cfg.kd; kf = cfg.kf
+        ki = cfg.ki; kf = cfg.kf
+        aimDamping = cfg.aimDamping; approachAssist = cfg.approachAssist
         aimMode = cfg.aimMode
         bezierDuration = cfg.bezierDuration
         bezierControlOffset = cfg.bezierControlOffset
@@ -421,7 +468,7 @@ class FloatService : Service() {
         showInferInfo = cfg.showInferInfo
         showDetectionBox = cfg.showDetectionBox
         touchDisplayEnabled = cfg.aimTouchDisplay
-        cachedRangePx = ((cfg.range.coerceIn(48, 800) + 8) / 16) * 16
+        cachedRangePx = normalizeRangePx(cfg.range)
         aimbotOn.set(cfg.aimbotEnabled)
         aimClasses = cfg.aimClasses.toMutableSet()
         priorityClass = cfg.priorityClass
@@ -657,7 +704,9 @@ class FloatService : Service() {
         if (ok) {
             Log.i(TAG, "HUD: native anti-capture layer active")
             ProjectionHolder.updateHudState(true, null)
-            replayHudState(client)
+            // 门闩先清、再重放。反过来的话 replayHudState() 里刚记下的
+            // lastHudFov 会被这里的 -1 冲掉,那行赋值成了死代码,而且下一帧还会
+            // 把同一个半径再发一遍。
             hudSelfCheckPending = true
             hudCheckStage = 0
             hudCheckFrames = 0
@@ -666,6 +715,7 @@ class FloatService : Service() {
             lastHudFov = -1
             hudBoxesSent = false
             lastHudInfoText = null
+            replayHudState(client)
             mainHandler.post {
                 // 撤掉兜底渲染:两套叠加同屏会互相污染(兜底元素烧进采集帧)
                 try { if (overlayAdded) { wm.removeView(overlayView); overlayAdded = false } } catch (_: Exception) {}
@@ -701,7 +751,7 @@ class FloatService : Service() {
         client.hudToggle("fov", cfg.showFov)
         client.hudToggle("inferInfo", cfg.showInferInfo)
         client.hudGeo(captureW, captureH)
-        client.hudRange(cfg.range.coerceIn(50, 800))
+        client.hudRange(normalizeRangePx(cfg.range))
         val fov = aimController.effectiveFov
         lastHudFov = fov
         client.hudFov(fov)
@@ -773,12 +823,20 @@ class FloatService : Service() {
         hudBoxesSent = true
     }
 
-    /** FOV 半径发布:native 路径值变才发(动态 FOV 动画结束后值恒定)。 */
+    /**
+     * FOV 半径发布:native 路径值变才发(动态 FOV 动画结束后值恒定)。
+     *
+     * [lastHudFov] 只在真的发出去时才推。圈没显示时这里不发 —— 动态 FOV
+     * 收放期间那是每帧一条 IPC,画都没画的东西不值得占 cmdLock —— 但要是
+     * 顺手把门闩也推了,daemon 端存的半径就永远停在隐藏前那一刻:再打开时
+     * 门闩认为「已经发过」,过期半径不会被任何后续帧纠正
+     * (daemon 侧 hud_renderer.h set_fov 隐藏时也存值,存的前提是收得到)。
+     */
     private fun publishFov(r: Int) {
         if (hudNative) {
-            if (r != lastHudFov) {
+            if (r != lastHudFov && showFov) {
                 lastHudFov = r
-                if (showFov) hud()?.hudFov(r)
+                hud()?.hudFov(r)
             }
         } else {
             overlayView.fovRadius = r
@@ -1243,6 +1301,7 @@ class FloatService : Service() {
         guiPanel.triggerDownFluctuation = cfg.triggerDownFluctuation
         guiPanel.triggerTouchDuration = cfg.triggerTouchDuration
         guiPanel.triggerTouchRange = cfg.triggerTouchRange
+        guiPanel.triggerRadiusPx = cfg.triggerRadiusPx
         guiPanel.triggerShowArea = cfg.triggerShowArea
         guiPanel.autoStopEnabled = cfg.autoStopEnabled
         guiPanel.aimHoldEnabled = cfg.aimHoldEnabled
@@ -1254,7 +1313,9 @@ class FloatService : Service() {
         guiPanel.aimSwayAmplitude = cfg.aimSwayAmplitude
         guiPanel.aimPrediction = cfg.aimPrediction
         guiPanel.triggerOffsetYRatio = cfg.triggerOffsetYRatio
-        guiPanel.ki = cfg.ki; guiPanel.kd = cfg.kd; guiPanel.kf = cfg.kf
+        guiPanel.ki = cfg.ki; guiPanel.kf = cfg.kf
+        guiPanel.aimDamping = cfg.aimDamping
+        guiPanel.approachAssist = cfg.approachAssist
         guiPanel.aimMode = cfg.aimMode
         guiPanel.bezierDuration = cfg.bezierDuration
         guiPanel.bezierControlOffset = cfg.bezierControlOffset
@@ -1330,6 +1391,7 @@ class FloatService : Service() {
         guiPanel.onTriggerUpFluctuation = { triggerUpFluct = it; triggerController.triggerUpFluct = it; ConfigManager.updateConfig { triggerUpFluctuation = it } }
         guiPanel.onTriggerDownFluctuation = { triggerDownFluct = it; triggerController.triggerDownFluct = it; ConfigManager.updateConfig { triggerDownFluctuation = it } }
         guiPanel.onTriggerTouchDuration = { triggerTouchDuration = it; triggerController.triggerTouchDuration = it; ConfigManager.updateConfig { triggerTouchDuration = it } }
+        guiPanel.onTriggerRadiusPx = { triggerRadiusPx = it; triggerController.triggerRadiusPx = it; ConfigManager.updateConfig { triggerRadiusPx = it } }
         guiPanel.onTriggerTouchRange = { px -> triggerTouchRange = px; updateTriggerOverlaySize(); ConfigManager.updateConfig { triggerTouchRange = px } }
         guiPanel.onTriggerShowArea = { show -> triggerShowArea = show; if (show) setupTriggerOverlay(); updateTriggerOverlayVisibility(); ConfigManager.updateConfig { triggerShowArea = show } }
         guiPanel.onAutoStopEnabledChanged = { autoStopEnabled = it; triggerController.autoStopEnabled = it; ConfigManager.updateConfig { autoStopEnabled = it } }
@@ -1338,7 +1400,8 @@ class FloatService : Service() {
         guiPanel.onAimPredictionChanged = { aimPrediction = it; aimController.aimPrediction = it; ConfigManager.updateConfig { aimPrediction = it } }
         guiPanel.onTriggerOffsetYRatioChanged = { triggerOffsetYRatio = it; triggerController.triggerOffsetYRatio = it; ConfigManager.updateConfig { triggerOffsetYRatio = it } }
         guiPanel.onKiChanged = { ki = it; guiPanel.ki = it; aimController.ki = it; ConfigManager.updateConfig { ki = it } }
-        guiPanel.onKdChanged = { kd = it; guiPanel.kd = it; aimController.kd = it; ConfigManager.updateConfig { kd = it } }
+        guiPanel.onAimDampingChanged = { aimDamping = it; guiPanel.aimDamping = it; aimController.aimDamping = it; ConfigManager.updateConfig { aimDamping = it } }
+        guiPanel.onApproachAssistChanged = { approachAssist = it; guiPanel.approachAssist = it; aimController.approachAssistEnabled = it; ConfigManager.updateConfig { approachAssist = it } }
         guiPanel.onKfChanged = { kf = it; guiPanel.kf = it; aimController.kf = it; ConfigManager.updateConfig { kf = it } }
         guiPanel.onAimModeChanged = { aimMode = it; aimController.aimMode = it; ConfigManager.updateConfig { aimMode = it } }
         guiPanel.onBezierDurationChanged = { bezierDuration = it; aimController.bezierDuration = it; ConfigManager.updateConfig { bezierDuration = it } }
@@ -1351,13 +1414,19 @@ class FloatService : Service() {
             aimFov = v
             aimController.aimFov = v
             overlayView.fovRadius = v
-            if (!hudNative) overlayView.postInvalidate() else { lastHudFov = v; if (showFov) hud()?.hudFov(v) }
+            // 同 publishFov:没发就不能推门闩(否则隐藏期间拖过的半径丢在半路)
+            if (!hudNative) overlayView.postInvalidate() else if (showFov) { lastHudFov = v; hud()?.hudFov(v) }
             ConfigManager.updateConfig { aimFov = v }
         }
         guiPanel.onShowFovChanged = { on ->
             showFov = on
             overlayView.showFov = on
-            if (!hudNative) overlayView.postInvalidate() else hud()?.hudToggle("fov", on)
+            if (!hudNative) overlayView.postInvalidate() else {
+                // 先补半径再开开关:隐藏期间 publishFov 不发,daemon 存的还是
+                // 隐藏前那个值,不补会先画一帧过期的圈。
+                if (on) { lastHudFov = aimController.effectiveFov; hud()?.hudFov(lastHudFov) }
+                hud()?.hudToggle("fov", on)
+            }
             ConfigManager.updateConfig { showFov = on }
         }
         guiPanel.onDynamicFovChanged = { on ->
@@ -1632,11 +1701,19 @@ class FloatService : Service() {
             var prevFingerOnFire = false
             // 排障用，只被下面那条每 30 帧一次的日志读取
             var dbgHeld = false; var dbgTaps = 0; var dbgRaw = -1
+            // 链路仪表(TRACE_LAT)。窗口内累加与取峰，出一条日志后清零。
+            // 分配在循环外：每帧新建数组会把仪表自己变成 GC 噪声源。
+            val latSum = LongArray(LAT_N)
+            val latMax = LongArray(LAT_N)
+            var latFrames = 0
+            var latDropped = 0      // 窗口内 detect() 返回 null 的帧数
+            var tPrevFrameEnd = 0L
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
                 if (aliveCtr % 30 == 0) { Log.d(TAG, "recoil on=$recoilEnabled held=$dbgHeld taps=$dbgTaps offset=${aimController.recoilOffsetDebug} raw=$dbgRaw") }
                 val currentRange = guiPanel.range
-                if (currentRange != cachedRangePx) { cachedRangePx = currentRange; cachedRange = currentRange.toFloat() }
+                val normRange = normalizeRangePx(currentRange)
+                if (normRange != cachedRangePx) { cachedRangePx = normRange; cachedRange = normRange.toFloat() }
 
                 // Clear the flag *before* acquiring: a frame that lands in the
                 // window between here and acquireLatestImage() is picked up by
@@ -1646,6 +1723,35 @@ class FloatService : Service() {
                 clearFrameFlag()
                 val image = imageReader?.acquireLatestImage()
                 if (image == null) { awaitFrame(); continue }
+
+                // 扳机的反应速度从**本帧采集时刻**起算，不是从推理算完起算
+                // (见 TriggerController 的「时间基」说明)：否则采集+推理这段
+                // 延迟是叠加在反应速度之上的，而它每帧都在抖，出枪延迟就跟着抖。
+                // Image.getTimestamp() 是 CLOCK_MONOTONIC 纳秒，与
+                // System.nanoTime() 同一时基。OEM 的采集路径偶有不可信值
+                // (0 / 未来 / 另一套时基)，所以只接受「刚过去 0~500ms」这个区间，
+                // 区间外退回 nanoTime() —— 退化成「以拿到图的时刻起算」，仍然
+                // 比「以推理算完起算」稳。
+                val tsRaw = try { image.timestamp } catch (_: Exception) { 0L }
+                val tsNow = System.nanoTime()
+                val frameCaptureNs =
+                    if (tsRaw > 0L && (tsNow - tsRaw) in 0L..500_000_000L) tsRaw else tsNow
+
+                // 仪表：拿到图的时刻。idle 用上一帧结束时刻算，所以
+                // acquire 失败 + awaitFrame 的那些空转迭代自然被算进空闲，
+                // 不会被当成额外的帧。
+                val tFrameGot = if (TRACE_LAT) System.nanoTime() else 0L
+                var tHudNs = 0L     // 本帧 HUD 发布累计(两处相加)
+                var tFireNs = 0L
+                var tHoldNs = 0L
+                var tJniNs = 0L
+                var tAimNs = 0L
+                var tTrigNs = 0L
+                var tAcqNs = 0L
+                var tTdNs = 0L
+                // detect() 返回 null 的帧(引擎没就绪/推理失败)不该和正常帧
+                // 混在一起看均值 —— 它们的 jni 段是失败路径的耗时。
+                var frameHadResult = false
 
                 // 防捕获 HUD 首次启用自检:在真实采集帧上找 HUD 像素,
                 // 验证 AUTO_MIRROR 路径确实排除了该 layer(改进方案.md §6.1)
@@ -1666,7 +1772,15 @@ class FloatService : Service() {
                 // recording and dataset paths need it, and both are off in
                 // normal use, so fetching it unconditionally was per-frame waste.
                 val needHwBuf = (recordEnabled && recordSurface != null) || autoSaveDataset
-                val hwBuf = if (needHwBuf) image.hardwareBuffer else null
+                // getHardwareBuffer() 会抛(image 已关闭等)。原先它在 try 之外,
+                // 抛出来就跳过了 finally 的 image.close():ImageReader 只有 2 个
+                // buffer,漏掉一个之后 acquireLatestImage() 迟早恒返回 null,推理
+                // 循环退化成空转 awaitFrame() —— 不崩溃、无异常日志、完全没效果。
+                val hwBuf = if (needHwBuf) {
+                    try { image.hardwareBuffer } catch (e: Exception) {
+                        Log.w(TAG, "hardwareBuffer 获取失败: ${e.message}"); null
+                    }
+                } else null
                 try {
                     // 帧时基。压枪按时间累加，需要真实的墙钟帧间隔 —— 下面推理
                     // 信息里那个 inferFps 是从 pre+infer+post 算出来的"理论吞吐"
@@ -1686,6 +1800,7 @@ class FloatService : Service() {
                     // 优先用注入层的上升沿计数(120-240Hz，短点击不会漏)。注入层不
                     // 支持时返回 -1，退回电平查询 + 应用侧数边沿 —— 后者采样率就是
                     // 推理帧率，短于一个帧间隔的点击仍会漏，但通路是已验证的。
+                    val tFire0 = if (TRACE_LAT) System.nanoTime() else 0L
                     val packed = touchService.consumeFireState()
                     val fingerOnFire: Boolean
                     val fireTaps: Int
@@ -1696,6 +1811,9 @@ class FloatService : Service() {
                         fingerOnFire = touchService.isFingerInFireZone()
                         fireTaps = if (fingerOnFire && !prevFingerOnFire) 1 else 0
                     }
+                    // 回退分支里 isFingerInFireZone 也是一次阻塞往返，一起计入
+                    // fire 段 —— 两条路走同一个「每帧问一次开火状态」的代价。
+                    if (TRACE_LAT) tFireNs = System.nanoTime() - tFire0
                     prevFingerOnFire = fingerOnFire
                     val recoilHeld = fingerOnFire || triggerController.triggerFired
                     dbgHeld = recoilHeld; dbgTaps = fireTaps; dbgRaw = packed
@@ -1719,11 +1837,24 @@ class FloatService : Service() {
                         } catch (_: Exception) {}
                     }
                     hasDetects.set(false)
+                    val tAcq0 = if (TRACE_LAT) System.nanoTime() else 0L
                     val plane = image.planes[0]; val buffer = plane.buffer
-                    val regionW = cachedRangePx * 2; val regionH = cachedRangePx * 2
+                    // 裁剪区必须整块落在采集画面内。offsetX/offsetY 是 native 侧的
+                    // 读取起点(litert 的 srcX/srcY_lut、ncnn 的 src_ptr),两边都不做
+                    // 边界检查 —— 负的 offset 就是从 buffer 之前开始读。
+                    // 滑条上限 800 → 边长 1600px,而横屏采集高度典型 1080,所以滑条
+                    // 拖过 540 就已经越界(720p 宽的机器 360 就开始)。
+                    // 夹成正方形而不是分别夹:整条链路(HUD 的截取范围圆、坐标回映)
+                    // 都按方形裁剪区写的,只在这里按短边收一下最不意外。
+                    val half = cachedRangePx.coerceAtMost(minOf(captureW, captureH) / 2)
+                    val regionW = half * 2; val regionH = half * 2
                     val offsetX = (captureW - regionW) / 2; val offsetY = (captureH - regionH) / 2
+                    if (TRACE_LAT) tAcqNs = System.nanoTime() - tAcq0
 
+                    val tJni0 = if (TRACE_LAT) System.nanoTime() else 0L
                     val result = JniCallBack.detect(buffer, offsetX, offsetY, regionW, regionH, captureW, captureH, plane.rowStride, plane.pixelStride)
+                    if (TRACE_LAT) tJniNs = System.nanoTime() - tJni0
+                    if (TRACE_LAT && result != null) frameHadResult = true
 
                     // Per-stage inference-info overlay. Only fetched + posted
                     // when the user toggled "显示推理信息" on — when off, this
@@ -1731,6 +1862,7 @@ class FloatService : Service() {
                     // pays nothing for the toggle being disabled (no extra JNI
                     // calls, no String formatting, no MainThread post).
                     if (showInferInfo) {
+                        val tHud0 = if (TRACE_LAT) System.nanoTime() else 0L
                         val count = if (result != null) result.size / 6 else 0
                         val timings = JniCallBack.getInferTimings()
                         val pre = timings?.getOrNull(0) ?: 0f
@@ -1760,11 +1892,31 @@ class FloatService : Service() {
                             inferFps, pre, post, count
                         )
                         pushInferInfo(text)
+                        // 掩码渲染(w*h 逐像素取 alpha)+ 持 cmdLock 写 16-50KB
+                        // 进管道全在这一段里 —— 这是 HUD 与注入命令抢通道的
+                        // 那一处，单独可见才判断得出「推理信息开关贵不贵」。
+                        if (TRACE_LAT) tHudNs += System.nanoTime() - tHud0
                     }
 
                     // 按住激发: 物理手指按在触发区时才能自瞄（提到外层，使 lift 条件也能读到）
+                        val tHold0 = if (TRACE_LAT) System.nanoTime() else 0L
                         val holdToAimActive = if (aimHoldEnabled) touchService.isFingerInTriggerZone() else true
+                        // 关掉按住激发时这一段恒为 0(没有 IPC)，正好用来对比
+                        // 开启它多付的那次阻塞往返。
+                        if (TRACE_LAT) tHoldNs = System.nanoTime() - tHold0
 
+                        // target 提到分支外:下面的动态 FOV 每帧都要 tick,
+                        // 包含 result == null(画面里一个目标都没有)的帧。
+                        var target: DetectionInfo? = null
+                        // 自瞄本帧的瞄点(含框内偏移 / Y偏移 / 压枪)。扳机判定要用
+                        // **同一个点**，不能各自按框再算一遍 —— 那正是两套判据漂开的
+                        // 老路。只在 target != null 时被写入，与 target 严格同生。
+                        var aimPointX = 0f
+                        var aimPointY = 0f
+                        // 本帧的收敛容差(逐轴、按目标框缩放)。自瞄和扳机共用这两个数，
+                        // 见 AimController.convergeTolerance。
+                        var aimTolX = 0f
+                        var aimTolY = 0f
                         if (result != null) {
                             val count = result.size / 6
                             if (TRACE && count > 0) {
@@ -1786,7 +1938,12 @@ class FloatService : Service() {
                             // (it ends in postInvalidateOnAnimation), so the
                             // mainHandler.post hop was a lambda + Message + main
                             // looper wake-up per frame for nothing.
+                            val tHudBox0 = if (TRACE_LAT) System.nanoTime() else 0L
                             publishDetections(lastDetections)
+                            // native HUD 路径这是一条 HUD_BOXES(几百字节)，
+                            // 兜底路径是一次 postInvalidateOnAnimation。两者
+                            // 都算进 hud 段，和上面的推理信息掩码合并计。
+                            if (TRACE_LAT) tHudNs += System.nanoTime() - tHudBox0
 
                             if (autoSaveDataset && detCount > 0 && hwBuf != null) {
                                 saveDatasetFrame(hwBuf, result, count)
@@ -1796,35 +1953,66 @@ class FloatService : Service() {
                             val aimDets = if (aimClasses.isEmpty()) lastDetections
                                 else lastDetections.filter { it.classId in aimClasses }
 
-                            val target: DetectionInfo? = if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
+                            target = if (aimbotOn.get() && aimDets.isNotEmpty() && holdToAimActive) {
+                                val tAim0 = if (TRACE_LAT) System.nanoTime() else 0L
                                 val t = aimController.selectTarget(aimDets, centerX, centerY)
                                 if (t != null) {
                                     val tcx = t.rect.centerX(); val tcy = t.rect.centerY()
-                                    var boxH = 0f; var minD = Float.MAX_VALUE
-                                    for (det in aimDets) {
-                                        val r = det.rect
-                                        val d = (r.centerX() - tcx).let { it * it } + (r.centerY() - tcy).let { it * it }
-                                        if (d < minD) { minD = d; boxH = r.height() }
-                                    }
+                                    // boxH 就是目标框自己的高。旧版这里在 aimDets 里找
+                                    // 离 t 中心最近的框 —— 但 t 自己就在集合里且距离恒为 0，
+                                    // 结果恒等于 t.rect.height()，白扫一遍 O(n)。
+                                    val boxH = t.rect.height()
                                     val classOffset = aimController.classAimOffsets[t.classId] ?: aimController.aimOffsetYRatio
                                     val classBoxRatio = aimController.classBoxAimRatios[t.classId] ?: aimController.boxAimRatio
                                     val aimX = tcx
                                     val aimY = (tcy - boxH * 0.5f) + boxH * (1f - classBoxRatio) - boxH * classOffset
-                                    aimController.aimingState.updateVelocity(tcx, tcy)
-                                    aimController.executeAiming(aimX, aimY, centerX, centerY)
+                                    aimPointX = aimX
+                                    // 压枪偏移是 executeAiming 内部加的，扳机必须看到
+                                    // 加完之后的值，否则持续开火时两边又会差一个
+                                    // recoilOffsetY(可累到上百 px)。
+                                    aimPointY = aimController.effectiveAimY(aimY)
+                                    // 死区按框缩放：绝对 10px 在远距离(框高 15~20px)
+                                    // 是半个框，自瞄会系统性地停在框边缘。boxH 与算
+                                    // 瞄点时用的是同一个，宽度直接取目标框的。
+                                    aimTolX = aimController.convergeTolerance(t.rect.width())
+                                    aimTolY = aimController.convergeTolerance(boxH)
+                                    // 速度估计与 dt 都由 executeAiming 内部推进
+                                    // (它是唯一知道本轮 dt 的地方)；这里只把
+                                    // **未加瞄点偏移**的框中心传进去 —— 框高每帧
+                                    // 在抖,拿 aimY 去差分等于把框高噪声算进目标速度。
+                                    aimController.executeAiming(
+                                        aimX, aimY, centerX, centerY, aimTolX, aimTolY,
+                                        frameCaptureNs = frameCaptureNs,
+                                        boxCenterX = tcx, boxCenterY = tcy
+                                    )
                                 }
+                                // 含选靶 + 瞄点 + PID/Bezier + MOVE 管道写。
+                                // MOVE 是 '!' 无回复，所以这一段**不含** daemon
+                                // 的执行时间 —— 它只是「交出去」的代价。
+                                if (TRACE_LAT) tAimNs = System.nanoTime() - tAim0
                                 t
                             } else null
-
-                            // Dynamic FOV ticks every inference frame regardless of
-                            // aimbot state — so the FOV can expand back to normal
-                            // even after the target is lost or aimbot is toggled off.
-                            aimController.updateDynamicFov(target, System.currentTimeMillis())
-                            publishFov(aimController.effectiveFov)
                         } else {
                             hasDetects.set(false); lastDetections = emptyList()
+                            val tHudClr0 = if (TRACE_LAT) System.nanoTime() else 0L
                             publishDetections(lastDetections)
+                            if (TRACE_LAT) tHudNs += System.nanoTime() - tHudClr0
                         }
+
+                        // Dynamic FOV ticks every inference frame regardless of
+                        // aimbot state — so the FOV can expand back to normal
+                        // even after the target is lost or aimbot is toggled off.
+                        //
+                        // 「每帧」是字面意思。这两行原先在 result != null 分支里,
+                        // 而画面里没有目标时 detect() 返回的就是 null(native 侧
+                        // yolovaim.cpp: detections.empty() → nullptr)—— 也就是
+                        // 「目标丢了」最常见的那条路恰好一次都不 tick:圈冻在收缩
+                        // 后的半径上等人回来,fovZoomDelay 的回弹从来没生效过;
+                        // 启动后没人的那段同理,配置里的半径要等画面里出现第一个
+                        // 目标才会被发到 HUD。
+                        aimController.updateDynamicFov(target, System.currentTimeMillis())
+                        publishFov(aimController.effectiveFov)
+                        if (target == null) aimController.clearFinishHistory()
 
                         // 抬起条件：按下虚拟触摸但瞄准条件任一不满足都应释放（修了按住激发中途松手后触摸点卡住的 bug）
                         if (aimController.aimingState.pointerDown &&
@@ -1832,22 +2020,113 @@ class FloatService : Service() {
                             aimController.lift()
                         }
 
-                        // detection-based trigger: center in any detection box (filtered by aimClasses)
+                        // detection-based trigger: 准星落在任一检测框内即在靶
+                        // (按 triggerClasses 过滤，不是 aimClasses —— 两套类别集合独立)。
+                        // 自瞄正在 steer 的那个框额外并上自瞄的收敛区，见 processTrigger。
                         // The fire-zone state is queried once per frame (at the
                         // top of the loop, where the recoil state machine needs
                         // it) and handed down here. It used to be re-queried over
                         // IPC; both reads happen in the same frame and describe
                         // the same physical finger, so the second round-trip
                         // could only ever return the same answer.
-                        triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get(), fingerOnFire)
+                        val tTrig0 = if (TRACE_LAT) System.nanoTime() else 0L
+                        triggerController.processTrigger(
+                            lastDetections, centerX, centerY, hasDetects.get(), fingerOnFire,
+                            aimTarget = target,
+                            aimPointX = aimPointX,
+                            aimPointY = aimPointY,
+                            aimToleranceX = aimTolX,
+                            aimToleranceY = aimTolY,
+                            frameCaptureNs = frameCaptureNs
+                        )
+                        // triggerTap 已经在 TouchService 里改成投到 tapExecutor，
+                        // 所以这一段应当接近 0。如果它不是 0，说明那条异步化
+                        // 回退了或者 tapInFlight 一直被占。
+                        if (TRACE_LAT) tTrigNs = System.nanoTime() - tTrig0
                 } catch (e: Exception) { Log.e(TAG, "推理帧异常: ${e.message}") }
-                finally { hwBuf?.close(); image.close() }
+                finally {
+                    val tTd0 = if (TRACE_LAT) System.nanoTime() else 0L
+                    hwBuf?.close(); image.close()
+                    if (TRACE_LAT) {
+                        tTdNs = System.nanoTime() - tTd0
+                        // buffer 释放也算进 total —— 它是每帧都要付的真实开销。
+                        val tEnd = System.nanoTime()
+                        if (tPrevFrameEnd != 0L) {
+                            val idle = tFrameGot - tPrevFrameEnd
+                            latSum[LAT_IDLE] += idle
+                            if (idle > latMax[LAT_IDLE]) latMax[LAT_IDLE] = idle
+                        }
+                        tPrevFrameEnd = tEnd
+                        // 逐段直接累加，不建临时数组 —— 仪表本身不该在热路径上
+                        // 每帧多一个短命对象。
+                        fun acc(k: Int, v: Long) {
+                            latSum[k] += v
+                            if (v > latMax[k]) latMax[k] = v
+                        }
+                        acc(LAT_FIRE, tFireNs); acc(LAT_HOLD, tHoldNs)
+                        acc(LAT_JNI, tJniNs);   acc(LAT_HUD, tHudNs)
+                        acc(LAT_AIM, tAimNs);   acc(LAT_TRIG, tTrigNs)
+                        acc(LAT_ACQ, tAcqNs);   acc(LAT_TD, tTdNs)
+                        acc(LAT_TOTAL, tEnd - tFrameGot)
+                        if (!frameHadResult) latDropped++
+                        if (++latFrames >= LAT_WINDOW) {
+                            latEmit(latSum, latMax, latFrames, latDropped, lastDetections.size)
+                            java.util.Arrays.fill(latSum, 0L)
+                            java.util.Arrays.fill(latMax, 0L)
+                            latFrames = 0; latDropped = 0
+                        }
+                    }
+                }
             }
             inferRunning.set(false)
         }
     }
 
+    /**
+     * 输出一个窗口的链路延迟聚合。每 [LAT_WINDOW] 帧一条，只在 [TRACE_LAT] 下调用。
+     *
+     * 每段两个数：avg/max(ms)。**看的时候先看 max。** avg 只说明「平时贵不贵」，
+     * 而要判断的几件事都是尾部现象：
+     *   fire/hold 的 max 远大于 avg → 阻塞往返被调度掐住(推理线程是
+     *     URGENT_DISPLAY，readerExec 是默认优先级，典型优先级反转)。
+     *     max 逼近 500 就是 execCmd 的 CMD_TIMEOUT_MS，那一帧注入通道会被判死。
+     *   hud 的 max 大 → 推理信息掩码那块 16-50KB 的写在 cmdLock 上把注入挤住了。
+     *   idle 趋零 → 推理已经吃满采集，提不动了；idle 大 → 瓶颈在采集侧。
+     *   total ≈ 各段之和 → 没有漏计的大头；差很多说明开销在没插桩的地方。
+     *   acq/td 是每帧必付的采集侧开销(取 plane、还缓冲)，不是可省的浪费 ——
+     *     加桩是为了让 total 的账能对上，之前那 1.64ms 的差额就落在这里。
+     */
+    private fun latEmit(sum: LongArray, max: LongArray, frames: Int, dropped: Int, dets: Int) {
+        val n = frames.coerceAtLeast(1)
+        fun a(i: Int) = sum[i] / n / 1e6
+        fun m(i: Int) = max[i] / 1e6
+        Log.d(LAT_TAG, String.format(
+            java.util.Locale.US,
+            "n=%d drop=%d d=%d | idle %.2f/%.2f | fire %.2f/%.2f | hold %.2f/%.2f | " +
+            "jni %.2f/%.2f | hud %.2f/%.2f | aim %.2f/%.2f | trig %.2f/%.2f | " +
+            "acq %.2f/%.2f | td %.2f/%.2f | total %.2f/%.2f (avg/max ms)",
+            frames, dropped, dets,
+            a(LAT_IDLE), m(LAT_IDLE), a(LAT_FIRE), m(LAT_FIRE), a(LAT_HOLD), m(LAT_HOLD),
+            a(LAT_JNI), m(LAT_JNI), a(LAT_HUD), m(LAT_HUD), a(LAT_AIM), m(LAT_AIM),
+            a(LAT_TRIG), m(LAT_TRIG), a(LAT_ACQ), m(LAT_ACQ), a(LAT_TD), m(LAT_TD),
+            a(LAT_TOTAL), m(LAT_TOTAL)
+        ))
+    }
+
     private fun makeParams(w: Int, h: Int, flags: Int) = WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT).allowDisplayCutout()
+
+    /**
+     * 「截取范围」滑条值 → 实际用的裁剪半边长(px)。
+     *
+     * 夹紧到滑条自己的区间(见 GuiPanelView 的 48f..800f)再对齐到 16 的倍数。
+     * 抽成一处是因为原来有两条路:配置载入时夹紧+对齐,而运行时改滑条直接用
+     * 原值 —— 同一个滑条位置在启动后和拖动后算出的裁剪区大小能差最多 8px。
+     *
+     * 注意这里**不**按采集尺寸夹:采集尺寸会随旋转变,而这个值是用户设置的
+     * 意图值,要原样存进配置。跟画面边界的夹紧发生在用它算 offset 的地方。
+     */
+    private fun normalizeRangePx(v: Int) = ((v.coerceIn(48, 800) + 8) / 16) * 16
+
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val ch = NotificationChannel(CH_ID, "YOLOVAIM", NotificationManager.IMPORTANCE_LOW); (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch) } }
@@ -1936,6 +2215,7 @@ class FloatService : Service() {
         inferRunning.set(false); wakeInferLoop(); executor.shutdown()
         try { imageReader?.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
         readerThread?.quitSafely(); readerThread = null; readerHandler = null
+        triggerController.shutdown()
         touchService.stopGeteventListener()
         touchService.destroyRemote()
         touchService.disconnect()

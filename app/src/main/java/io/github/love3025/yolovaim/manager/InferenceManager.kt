@@ -293,6 +293,12 @@ class InferenceManager(
                     }
 
                     // detection-based trigger: center in any detection box (filtered by aimClasses)
+                    //
+                    // 这份循环是死代码(startInferLoop 只被自己内部调，真跑的是
+                    // FloatService.startInferLoop)，所以这里**没有**跟着补
+                    // aimTarget/aimPoint —— 新参数都有默认值，走的是旧判据。
+                    // 若哪天要复活这份循环，必须照 FloatService 那边把瞄点传进来，
+                    // 否则自瞄收敛点与扳机判定区错位的老问题会一起复活。
                     triggerController.processTrigger(lastDetections, centerX, centerY, hasDetects.get())
 
                     if (result == null) {

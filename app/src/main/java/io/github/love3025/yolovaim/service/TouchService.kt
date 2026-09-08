@@ -214,18 +214,25 @@ class TouchService(private val context: Context) : TouchInjectorInterface {
 
     override fun triggerUp() { delegate?.triggerUp() }
 
-    override fun triggerTap(x: Int, y: Int, durationMs: Int) {
-        val d = delegate ?: return
-        if (!tapInFlight.compareAndSet(false, true)) return
-        try {
+    /**
+     * @return 是否真的把这一枪投给了 tapExecutor。**丢弃必须让调用方知道** ——
+     *   TriggerController 靠这个返回值决定要不要推进冷却计时:把丢弃当成开成功
+     *   会静默吃掉一整个冷却周期,表现是「该响的时候没响」。
+     */
+    override fun triggerTap(x: Int, y: Int, durationMs: Int): Boolean {
+        val d = delegate ?: return false
+        if (!tapInFlight.compareAndSet(false, true)) return false
+        return try {
             tapExecutor.execute {
                 try { d.triggerTap(x, y, durationMs) }
                 catch (e: Exception) { Log.e(TAG, "triggerTap: ${e.message}") }
                 finally { tapInFlight.set(false) }
             }
+            true
         } catch (e: Exception) {
             tapInFlight.set(false)
             Log.e(TAG, "triggerTap dispatch: ${e.message}")
+            false
         }
     }
 

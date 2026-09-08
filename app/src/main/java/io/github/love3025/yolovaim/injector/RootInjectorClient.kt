@@ -13,6 +13,17 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     companion object {
         private const val TAG = "RootInjector"
         private const val LAT_TAG = "YolovaimLatency"
+
+        /**
+         * 每条阻塞往返拆成 write/wait 两半打日志。默认关 —— 开火状态查询是
+         * 每帧一次的，开着就是每帧一条 String.format + logd 写。
+         *
+         * **要和 FloatService.TRACE_LAT 一起翻。** 那边给的是每帧分段的
+         * avg/max(看哪一段贵)，这边给的是单次往返的内部拆分(看那一段贵在
+         * 哪一半)。本仓的惯例是每个文件各自一个 trace 常量(见
+         * FloatService.TRACE / AimController.TRACE)，所以不做成同一个开关。
+         */
+        private const val TRACE_LAT = false
         // 首次安装时这段等待里包含「用户在 root 管理器上点授权」的人类反应
         // 时间，10s 太紧。connect() 现在跑在自己的线程上（见
         // FloatService.initTouchInjector），等久一点不会拖住推理循环。
@@ -45,8 +56,18 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
     private val cmdLock = Object()
 
     // 单线程复用，不是每次调用起一个线程 —— 这条路径是每帧走的。
+    //
+    // 优先级必须跟推理线程齐平。execCmd 里是 URGENT_DISPLAY(-8) 的推理线程
+    // 同步 fut.get() 等这条线程读回包，留默认优先级(0) 就是标准的优先级反转:
+    // 实测 GET_FIRE_STATE 的往返 mean=1.21ms 里 wait 占 1.04ms(p95 3.04ms),
+    // 而 daemon 那边只是读一个缓存标志 —— 等的不是干活，是这条线程被调度。
+    // 必须在线程自己身上调 Process.setThreadPriority: Thread.priority 在
+    // Android 上映射不到 Linux nice 值，设了没用。
     private val readerExec = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread(r, "root-daemon-reader").apply { isDaemon = true }
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            r.run()
+        }, "root-daemon-reader").apply { isDaemon = true }
     }
 
     // daemon 正常回复在 1ms 内（execCmd 里 >0.5ms 就打日志了）。
@@ -159,17 +180,31 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
      *
      * 超时后把 connected 置 false：读线程已经卡死在 readLine 上，
      * cancel(true) 对阻塞的 InputStream 读无效，后续命令会排在它后面。
+     * readerExec 是单线程的，所以那条卡死的任务会把后面所有 submit 都堵住 ——
+     * 这也是必须整条连接判死、而不是重试的原因。
      * 与其每帧再挂一次，不如直接进入断开状态，让上层看到真实情况。
      */
     private fun execCmd(cmd: String, timeoutMs: Long = CMD_TIMEOUT_MS): String? {
+        var resp: String? = null
+        var t0 = 0L
+        var tWrote = 0L
+        var tDone = 0L
         synchronized(cmdLock) {
             if (!connected) return null
-            val t0 = System.nanoTime()
+            t0 = System.nanoTime()
             try {
                 daemonStdin!!.write("$cmd\n".toByteArray())
                 daemonStdin!!.flush()
+                // 把一次往返拆成「写进管道」和「等回复」两半(仅 TRACE_LAT)。
+                // FloatService 的 fire/hold 段只能说明整趟慢了，拆开才知道慢在
+                // 哪一半：write 慢 = 管道满/daemon 没在读；wait 慢 = daemon 被
+                // 调度掐住，或者 readerExec 这条线程醒得晚(它已经和推理线程一样
+                // 是 URGENT_DISPLAY，见上面的线程工厂；仍慢就是真的在等 daemon)。
+                // 注意这一半仍分不开「daemon 干活慢」和「daemon 没被调度」——
+                // 那需要 daemon 回带自己的时间戳，是协议改动，先不做。
+                tWrote = if (TRACE_LAT) System.nanoTime() else 0L
                 val fut = readerExec.submit<String?> { daemonReader?.readLine() }
-                val resp = try {
+                resp = try {
                     fut.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
                 } catch (te: java.util.concurrent.TimeoutException) {
                     fut.cancel(true)
@@ -177,18 +212,36 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
                     connected = false
                     return null
                 }
-                val dtMs = (System.nanoTime() - t0) / 1e6
-                // Log slow commands. Daemon IPC is usually <1ms; >1ms indicates daemon is behind.
-                if (dtMs > 0.5) {
-                    Log.d(LAT_TAG, String.format(java.util.Locale.US, "RootIPC %s = %.2fms", cmd.split(" ").firstOrNull() ?: cmd, dtMs))
-                }
-                return resp
+                tDone = System.nanoTime()
             } catch (e: Exception) {
                 Log.e(TAG, "execCmd error: ${e.message}")
                 connected = false
                 return null
             }
         }
+        // 日志一律在锁外打。锁内打等于每帧多占 cmdLock 一次 String.format +
+        // 一次 logd socket 写，而排在这把锁后面的正是每帧的 MOVE 注入 ——
+        // 仪表会把它想量的那个延迟自己制造出来。原来那条 >0.5ms 的慢命令
+        // 日志也在锁内，一并挪出来：内容和触发条件都没变。
+        if (tDone != 0L) {
+            val dtMs = (tDone - t0) / 1e6
+            if (TRACE_LAT) {
+                Log.d(LAT_TAG, String.format(
+                    java.util.Locale.US, "RootIPC %s write=%.2f wait=%.2f total=%.2fms",
+                    cmd.split(" ").firstOrNull() ?: cmd,
+                    (tWrote - t0) / 1e6, (tDone - tWrote) / 1e6, dtMs
+                ))
+            }
+            // Log slow commands. 阈值原来是 0.5ms，基于「daemon IPC 通常 <1ms」
+            // 这个假设 —— 实测反驳了它: GET_FIRE_STATE p50=0.89ms、mean=1.21ms，
+            // 结果这条本该记异常的日志在 8252/9296 = 89% 的帧上触发，等于每帧一次
+            // String.format 分配加一次 logd 写，而且不受 TRACE_LAT 控制、正式包里
+            // 也在跑。抬到 p90(2.31ms) 之上，恢复它「只记异常」的本意。
+            if (dtMs > 3.0) {
+                Log.d(LAT_TAG, String.format(java.util.Locale.US, "RootIPC %s = %.2fms", cmd.split(" ").firstOrNull() ?: cmd, dtMs))
+            }
+        }
+        return resp
     }
 
     private fun execOk(cmd: String): Boolean {
@@ -213,22 +266,24 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
      * Only void commands are eligible — anything that returns a value still
      * goes through [execCmd].
      */
-    private fun execNoReply(cmd: String) {
+    private fun execNoReply(cmd: String): Boolean {
         synchronized(cmdLock) {
-            if (!connected) return
+            if (!connected) return false
             try {
                 daemonStdin!!.write("!$cmd\n".toByteArray())
                 daemonStdin!!.flush()
             } catch (e: Exception) {
                 Log.e(TAG, "execNoReply error: ${e.message}")
                 connected = false
+                return false
             }
         }
+        return true
     }
 
     protected fun sendOk(cmd: String): Boolean = execOk(cmd)
     protected fun sendCmd(cmd: String): String? = execCmd(cmd)
-    protected fun sendNoReply(cmd: String) = execNoReply(cmd)
+    protected fun sendNoReply(cmd: String): Boolean = execNoReply(cmd)
 
     // ================= HudClient(防捕获 native HUD)=================
     // 协议见 root_daemon.cpp 头部注释。除 hudOn 外全部走 execNoReply
@@ -336,10 +391,23 @@ open class RootInjectorClient(private val context: Context) : TouchInjectorInter
         execOk("TRIGGER_UP")
     }
 
-    override fun triggerTap(x: Int, y: Int, durationMs: Int) {
-        execOk("TRIGGER_DOWN $x $y")
+    /**
+     * 一枪 = DOWN + sleep + UP，两条注入命令都走 '!' 不等回话。
+     *
+     * daemon 的协议头(root_daemon.cpp)本来就把 TRIGGER_DOWN / TRIGGER_UP 列在
+     * fire-and-forget 命令里，这边却一直用 execOk 等 OK —— 每枪两次阻塞往返
+     * (实测 p90 2.3ms，尾部到 CMD_TIMEOUT_MS=500ms)全压在 tapExecutor 这条线程
+     * 上，把 tapInFlight 占得更久；冷却一短就直接把下一枪丢掉。顺序由 cmdLock +
+     * daemon 单线程读 stdin 保证，不会乱序。
+     *
+     * 代价是拿不到 OK：注入失败只能靠带回话的 zone 查询那类命令发现 —— 与
+     * MOVE/UP 热路径同一个取舍。写入失败(连接已断)仍会返回 false。
+     */
+    override fun triggerTap(x: Int, y: Int, durationMs: Int): Boolean {
+        if (!execNoReply("TRIGGER_DOWN $x $y")) return false
         if (durationMs > 0) Thread.sleep(durationMs.toLong())
-        execOk("TRIGGER_UP")
+        execNoReply("TRIGGER_UP")
+        return true
     }
 
     override fun setTriggerZone(left: Int, top: Int, right: Int, bottom: Int) {

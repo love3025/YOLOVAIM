@@ -90,10 +90,13 @@ class KpmInjectorClient(context: Context) : RootInjectorClient(context) {
         sendOk("STEALTH_UP $SLOT_TRIGGER")
     }
 
-    override fun triggerTap(x: Int, y: Int, durationMs: Int) {
-        sendOk("STEALTH_DOWN $SLOT_TRIGGER $x $y")
+    // 与 Root 路径同理:每枪两次阻塞往返换成 '!' fire-and-forget,顺序仍由
+    // cmdLock + daemon 单线程 stdin 保证。见 RootInjectorClient.triggerTap。
+    override fun triggerTap(x: Int, y: Int, durationMs: Int): Boolean {
+        if (!sendNoReply("STEALTH_DOWN $SLOT_TRIGGER $x $y")) return false
         if (durationMs > 0) Thread.sleep(durationMs.toLong())
-        sendOk("STEALTH_UP $SLOT_TRIGGER")
+        sendNoReply("STEALTH_UP $SLOT_TRIGGER")
+        return true
     }
 
     override fun setOrientationConfig(landscapeStart: Boolean) {
