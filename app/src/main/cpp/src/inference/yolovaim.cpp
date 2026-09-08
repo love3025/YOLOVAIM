@@ -96,6 +96,16 @@ extern "C"
 JNIEXPORT jboolean JNICALL
 Java_io_github_love3025_yolovaim_inference_JniCallBack_prewarmQnn(
     JNIEnv* env, jobject, jstring model_path) {
+    // 这台设备上 QNN HTP 用不了就别白跑。预热的全部意义是暖 HTP 的图缓存;
+    // HTP 挂不上时 init() 会一路回落到 GPU,于是这趟「预热」变成再编译一遍
+    // GPU 委托然后立刻扔掉 —— 实测 2.92s(19:41:46.279 → 19:41:49.201),
+    // 而且它返回的还是 OK,看日志根本发现不了。
+    // 判据用 init() 试过的真实结果,不查芯片表: 换机器自动适配,V68+ 的机型
+    // 行为完全不变。qnnUsable()==0(还没试过)时照常预热,不改变首次启动路径。
+    if (LiteRtEngine::qnnUsable() < 0) {
+        LOGD("prewarmQnn: skipped — QNN HTP unusable on this device");
+        return JNI_FALSE;
+    }
     const char* path = env->GetStringUTFChars(model_path, nullptr);
     LOGD("prewarmQnn: %s", path);
 

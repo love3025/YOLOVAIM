@@ -461,6 +461,15 @@ std::vector<Detection> MtkEngine::detect(
 {
     if (!m_initialized || !m_input_buffer || m_outputs.empty()) return {};
 
+    // 同 litert / ncnn:srcX/srcY_lut 是逐像素读取下标,越界的 offset 会读到
+    // src buffer 之外。见 common.h 的 cropInBounds。
+    if (!cropInBounds(offsetX, offsetY, regionWidth, regionHeight,
+                      screenWidth, screenHeight)) {
+        LOGE("detect: crop out of bounds off=(%d,%d) region=%dx%d screen=%dx%d",
+             offsetX, offsetY, regionWidth, regionHeight, screenWidth, screenHeight);
+        return {};
+    }
+
     int H = m_input_height;
     int W = m_input_width;
 

@@ -6,6 +6,21 @@ set(QNN_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 include_directories(${QNN_INCLUDE_DIR})
 
+# Native per-event latency tracing (touch_core 的 LOGTRACELAT 站点:uinput
+# write 耗时等)。默认关:那些站点在真实触摸事件率(120-240Hz)上,每条都是
+# 一次 logd socket 写,而且就落在注入的临界区里。
+#
+# 之前 YOLOVAIM_TRACE 这个宏在源码里用了但从没有任何地方定义过,等于那些
+# 计时点永久失效、也没有打开的办法。开的方式:
+#   ./gradlew assembleDebug -PyolovaimTrace=1
+# 或直接 -DYOLOVAIM_TRACE=ON 传给 CMake。与 Kotlin 侧的 FloatService.TRACE_LAT
+# 是两个独立开关:那个量的是应用侧分段,这个量的是注入落地。
+option(YOLOVAIM_TRACE "Per-event native latency tracing (very verbose)" OFF)
+if(YOLOVAIM_TRACE)
+    add_compile_definitions(YOLOVAIM_TRACE)
+    message(STATUS "YOLOVAIM_TRACE enabled — native per-event latency logging is ON")
+endif()
+
 # Helper macro for library
 macro(add_qnn_lib basename)
     set(libname "${basename}.so")

@@ -60,7 +60,17 @@ std::vector<Detection> NcnnEngine::detect(
     int screenWidth, int screenHeight,
     int rowStride, int pixelStride)
 {
-    if (!m_net || regionWidth <= 0 || regionHeight <= 0) {
+    if (!m_net) {
+        return {};
+    }
+
+    // 裁剪区必须整块落在采集画面内 —— 下面的 src_ptr 就是按 offset 算出来的
+    // 读取起点,from_pixels_resize 会从那里读 regionHeight 行,一路都不校验。
+    // 原来这里只查了 region 是不是正数。见 common.h 的 cropInBounds。
+    if (!cropInBounds(offsetX, offsetY, regionWidth, regionHeight,
+                      screenWidth, screenHeight)) {
+        LOGE("detect: crop out of bounds off=(%d,%d) region=%dx%d screen=%dx%d",
+             offsetX, offsetY, regionWidth, regionHeight, screenWidth, screenHeight);
         return {};
     }
 

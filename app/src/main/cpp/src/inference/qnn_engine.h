@@ -3,6 +3,8 @@
 #include <tensorflow/lite/c/common.h>
 #include <string>
 
+#include "common.h"
+
 // QNN HTP delegate builder for Qualcomm Hexagon NPU
 class QnnEngine {
 public:
@@ -32,4 +34,6 @@ private:
     bool m_preloaded = false;
     char m_native_lib_dir[512] = {0};
     const char* m_model_token = nullptr;
+    // QNN 图缓存目录。cache_dir 只借指针,所以按值留在对象上。
+    std::string m_cache_dir;
 };
