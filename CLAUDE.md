@@ -95,7 +95,10 @@ manager/
 model/
 ├── DetectionInfo.kt             # rect, classId, className
 ├── AreaConfig.kt                # x, y, width, height, name, color
-├── AimingState.kt               # PID state: pointerDown, position, errors, integral, lockedTarget
+├── AimingState.kt               # Touch state + filtered target velocity (px/s). PID-internal
+│                                #   state lives in AimPidCore, not here
+├── AimPidCore.kt                # Frame-rate-independent PID law (pure Kotlin, unit-tested)
+├── AimFinishController.kt       # Approach-band P shaping — OFF by default, see Aim Modes
 └── BezierMover.kt               # Smoothstep easing timer
 
 view/
@@ -241,14 +244,48 @@ YOLOv8 output shape: `[1, 5, num_outputs]` — cx, cy, bw, bh, objectness (all n
 
 ## Aim Modes
 
-### PID Controller (`AimController`)
+### PID Controller (`AimController` + `model/AimPidCore`)
 
-- **Kp** = 0.30, **Ki** = 0.02, **Kd** = 0.08
-- Anti-windup: integral resets on error zero-crossing, clamped to ±100
-- Max per-frame movement: 1200px
-- Convergence threshold: <10px → lift pointer
-- Max drag distance: 20% screen diagonal → lift + re-down
-- Target lock: hysteresis by center distance <150px
+The control law lives in `AimPidCore` — pure Kotlin, no Android deps, unit-tested by
+`AimPidCoreTest`. `AimController` only maps panel values into `AimPidCore.Gains`, adds
+sway, clamps the step and issues the `moveTo`. Keep it that way: the tunability
+guarantees below are only meaningful because they are asserted in tests.
+
+Two orthogonal knobs, both monotonic across their full slider range:
+
+- **Kp「响应速度」** (0.01–0.40, default 0.07) — fraction of the error closed per
+  `DT_REF` (20ms). Internally converted to a rate (`-ln(1-kp)/DT_REF`) and applied as
+  `1-exp(-rate·dt)`, so **the trajectory no longer depends on the inference frame
+  rate**. Raising the control rate makes motion finer and lower-latency, not more
+  aggressive — a gain that changes with fps is a gain the user cannot tune.
+- **`aimDamping`「平滑度」** (0.0–1.5, default 0.40) — the *only* damping term.
+  Standard PD D-term, but `ė` comes from the **known command rate** (passed through a
+  one-pole filter, `RATE_TAU`) minus the filtered target velocity, instead of a noisy
+  finite difference of the error.
+
+Also: Ki (integral, dt-normalized, separation + anti-windup ±100), Kf (target-velocity
+feedforward), max step 600px @ `DT_REF` (i.e. a *speed* limit, scaled by dt),
+convergence tolerance from `convergeTolerance(boxDim)`, max drag → lift + re-down,
+target lock hysteresis by center distance.
+
+**Do not reintroduce these three things** (each was a direct cause of "参数调不动"):
+
+1. A second damping term. The old build had `kd * EMA(e - e_prev)` *and* a hardcoded
+   `velocityDamping = 0.35f`. They are the same term algebraically (both act on the
+   closing rate), so the effective coefficient was `kd + 0.35` — the Kd slider owned
+   12.5% of the damping at default and 36% at maximum, the rest invisible. Hence
+   "加高 Kd 没用". They are now one knob.
+2. A per-iteration `kp * error` step. Same params then produce different wall-clock
+   trajectories at 30 vs 50fps → "速度不一致".
+3. Gain restoration *after* the brake terms — see `approachAssistEnabled` below.
+
+`AimFinishController` (approach-band P-term shaping) is **off by default**, behind
+`approachAssistEnabled` / config `approachAssist`. It re-lifts the total output to
+`min(4·kp, 0.2)·|e|` after all braking, which pins the effective gain to 0.2 for any
+kp in 0.05–0.20 (75% of the old slider dead → "降低 Kp 没用"), and its `weight` is
+driven by a single-frame closing-speed estimate — detection-box noise then modulates
+the loop gain between 1× and ~3× at frame rate, which is itself the visible jitter.
+Kept only for A/B comparison on a real device.
 
 ### Bezier Curve (`AimController` + `BezierMover`)
 
@@ -273,7 +310,10 @@ YOLOv8 output shape: `[1, 5, num_outputs]` — cx, cy, bw, bh, objectness (all n
 ## Config System
 
 `ConfigManager.kt` persists `AppConfig` (40+ settings) to `config.json` in app filesDir:
-- Aim settings (Kp/Ki/Kd, Bezier params, target lock, sway)
+- Aim settings (Kp / `aimDamping` / Ki / Kf, `approachAssist`, Bezier params, target lock, sway).
+  `kd` is still read and written for backward compatibility but no longer feeds the control
+  law: on load, a config without `aimDamping` migrates to `0.35 + kd`, which is exactly that
+  user's previous *effective* damping.
 - Trigger settings (reaction speed, cooldown, per-class offsets)
 - Per-class configuration (aim/trigger enable, offsets, box aim ratio)
 - Area settings (fire/trigger/aim/joystick zones)
