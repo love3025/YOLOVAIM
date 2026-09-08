@@ -545,6 +545,28 @@ void TouchManager::Up(int slot) {
     RequestConfirmUp(slot);
 }
 
+// YOLOVAIM 增加(vendoring 改动 4):对真实手指所在 slot 的抬起。
+// 不安排补发 —— 真手指被抬起后,驱动下一帧就会以 TRKID>0 重新注册它
+// (手指物理上仍按着),30ms 后补发的一发 TRKID=-1 会把刚注册回来的
+// 手指再次抬起,表现为摇杆反复弹跳/移动中断(真人断触)。
+// 补发机制的目的只是防"我们自己的注入 Up 丢失导致卡屏",对真手指
+// 是语义误用:真手指的存活由驱动上报维持,不存在"丢一发就永久卡住"。
+void TouchManager::UpNoConfirm(int slot) {
+    if (!initialized.load()) { return; }
+    if (!IsValidSlot(slot)) {
+        std::cerr << "UpNoConfirm: 非法 slot " << slot << "(slot_max="
+                  << slot_max << "),丢弃" << std::endl;
+        return;
+    }
+    // 若该 slot 上碰巧有待补发的旧抬起(我们自己注入过又刚释放),
+    // 一并取消,避免它稍后落在可能已被驱动重新分配的真手指上
+    {
+        std::lock_guard<std::mutex> guard(confirm_mutex);
+        confirm_mask &= ~(1u << slot);
+    }
+    SendTouchReport(false, false, Vector2{0, 0}, slot);
+}
+
 void TouchManager::SetScreenOrientation(int screen_orientation) {
     this->screen_orientation.store(screen_orientation, std::memory_order_relaxed);
 }

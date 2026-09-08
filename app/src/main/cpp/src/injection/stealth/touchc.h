@@ -53,7 +53,11 @@ public 函数使用说明(供 app 集成,与任何 UI 框架无关):
  *    GetSlotMax() 供 daemon 在 STEALTH_INIT 回复里带给客户端打日志。
  * 3. ConfirmUpThread 的 confirm_pending(bool) 扩为 per-slot 位图:多 slot
  *    下 slot 8 的 Down 不再误取消 slot 9 的待补发抬起。
- * 升级上游库时按这三处 diff 回来。
+ * 4. Up(slot) 增加"不补发"变体 UpNoConfirm(slot):对真实手指所在 slot 发
+ *    起的抬起(自动急停)绝不能走 confirm-up —— 真手指由驱动持续上报维持,
+ *    30ms 后对刚被驱动重新注册的手指再补一发 TRKID=-1 会把它再次抬起
+ *    (摇杆反复弹跳/移动中断)。补发机制只为防我们自己的注入 Up 丢失。
+ * 升级上游库时按这四处 diff 回来。
  * =========================================================================== */
 class TouchManager {
 public:
@@ -157,6 +161,11 @@ public:
     void Down(const Vector2& pos, int slot);
     void Move(const Vector2& pos, int slot);
     void Up(int slot);
+    // YOLOVAIM 增加:对该 slot 发一次抬起,但不安排 confirm-up 补发。
+    // 只用于对"真实手指所在 slot"的抬起(自动急停)——真手指抬起后驱动
+    // 下一帧就会重新上报 TRKID>0 注册回来,30ms 补发会把刚注册回来的
+    // 手指再次抬起,造成真人断触。我们自己的注入 slot 仍走 Up(slot)。
+    void UpNoConfirm(int slot);
     // 面板声明的 slot 上限;未初始化或探测失败返回 -1
     int GetSlotMax() const { return slot_max; }
     void SetScreenOrientation(int orientation);

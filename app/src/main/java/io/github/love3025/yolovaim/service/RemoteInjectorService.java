@@ -314,7 +314,16 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             imGrabbed = true;
             Log.d(TAG, "injectDown: GRAB applied, realDevId=" + realTouchDeviceId
                 + " nativeGrabbed=" + nativeInputmgrIsGrabbed());
-            cancelPreGrabHardwarePointers();
+            // 断触修复:这里不再对真设备发 ACTION_CANCEL。CANCEL 会让游戏把
+            // 用户正在进行的真实手势(如按住摇杆移动)整个判死,摇杆停走,
+            // 这正是"自瞄激活瞬间真手指断触"的来源。
+            // 替代:把 grab 前已按下的真手指无缝"接管"到虚拟设备 ——
+            // 先由 merge 通道重投影(ACTION_DOWN/POINTER_DOWN,同一坐标
+            // 连续坐标流),手势语义连续,游戏只看到触摸继续。
+            // InputDispatcher 对真设备的旧指针状态用一次带当前坐标的
+            // UP 序列收尾(不是 CANCEL —— UP 是正常结束,不触发游戏
+            // 的手势取消逻辑,且旧手势的最后一帧坐标正确)。
+            handoffPhysicalPointers();
         }
         if (!imGrabbed && nativeInputmgrIsGrabbed()) {
             imGrabbed = true;
@@ -406,7 +415,7 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
             nativeInputmgrGrab();
             imGrabbed = true;
             Log.d(TAG, "ensureGrabbed: GRAB applied, realDevId=" + realTouchDeviceId);
-            cancelPreGrabHardwarePointers();
+            handoffPhysicalPointers();
         }
     }
 
@@ -429,60 +438,71 @@ public class RemoteInjectorService extends IRemoteInjector.Stub {
     }
 
     /**
-     * Cancel pre-grab hardware pointers — matches reference exactly.
-     * Only cancels on realTouchDeviceId with actual physical pointer positions.
+     * 断触修复:接管 grab 前已按下的真手指,替代旧的 cancelPreGrabHardwarePointers()。
+     *
+     * 旧做法对真实触摸设备发 ACTION_CANCEL —— 游戏会把用户进行中的手势
+     * (按住摇杆移动)整个判死,这正是"自瞄激活瞬间真人断触"的来源。
+     *
+     * 新做法分两步,手势语义保持连续:
+     *  1) 对真实设备(InputDispatcher 还挂着它的旧指针)发一次带【当前
+     *     真实坐标】的正常 UP 序列 —— 不是 CANCEL。UP 是正常结束,游戏
+     *     侧摇杆/按键按抬起处理,且最后一帧坐标正确,不会触发取消逻辑。
+     *  2) 物理指针已在 evdev 读者里持续跟踪,grab 后下一轮 merge 就会把
+     *     它们作为虚拟设备的 DOWN/POINTER_DOWN 重投影(同坐标)。多数游戏
+     *     (摇杆/开火键都是"按下状态"语义)表现为:极短一瞬的松开+立刻
+     *     原位重新按下,而非整段手势被取消。
+     *
+     * 注意:物理上仍按着的手指在 UP 与重投影之间有一帧级空窗(远好于
+     * CANCEL 的"手势死亡")。grab 之后 evdev 仍在流动,空窗之后即恢复。
      */
-    private void cancelPreGrabHardwarePointers() {
+    private void handoffPhysicalPointers() {
         if (realTouchDeviceId == 0) {
-            Log.w(TAG, "cancelPreGrab: realTouchDeviceId=0, SKIP");
+            Log.w(TAG, "handoff: realTouchDeviceId=0, SKIP");
             return;
         }
-        // Always send CANCEL on real device — even with 1 pointer (dummy)
-        // This clears InputDispatcher's pointer tracking for the real device.
-        // EVIOCGRAB blocks evdev reads so physicalPointers may be empty,
-        // but InputDispatcher still has stale pointers from before the grab.
-        int count;
-        float posX = 0, posY = 0;
+        // 快照当前真手指(旧代码同理:EVIOCGRAB 后读者暂时拿不到新事件,
+        // 但 grab 前的最后一帧状态仍在 physicalPointers 里)
+        List<float[]> snapshot = new ArrayList<>();
         synchronized (physLock) {
-            count = physicalPointers.size();
-            if (count > 0) {
-                float[] first = physicalPointers.values().iterator().next();
-                posX = first[0];
-                posY = first[1];
+            for (float[] p : physicalPointers.values()) {
+                snapshot.add(new float[]{p[0], p[1]});
             }
         }
-        if (count == 0) {
-            count = 1;  // Send dummy CANCEL with 1 pointer at (0,0)
+        if (snapshot.isEmpty()) {
+            // 没有真手指在按:InputDispatcher 一般也没有旧指针,无需收尾
+            Log.d(TAG, "handoff: no physical pointers down, nothing to hand off");
+            return;
         }
-        MotionEvent.PointerProperties[] cProps = new MotionEvent.PointerProperties[count];
-        for (int i = 0; i < count; i++) {
-            cProps[i] = new MotionEvent.PointerProperties();
-            cProps[i].id = i;
-            cProps[i].toolType = MotionEvent.TOOL_TYPE_FINGER;
-        }
-        MotionEvent.PointerCoords[] cCoords = new MotionEvent.PointerCoords[count];
-        for (int i = 0; i < count; i++) {
-            cCoords[i] = new MotionEvent.PointerCoords();
-            cCoords[i].size = 1.0f;
-            cCoords[i].pressure = 1.0f;
-        }
-        // If we have real positions, use them; otherwise dummy at (0,0)
-        if (count == 1) {
-            cCoords[0].x = posX;
-            cCoords[0].y = posY;
-        }
+        // 正常 UP 序列收掉 InputDispatcher 上的真设备指针(带当前坐标)
         long now = SystemClock.uptimeMillis();
-        MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, count,
-            cProps, cCoords, 0, 0, 1f, 1f,
-            realTouchDeviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-        try {
-            boolean ok = (boolean) injectMethod.invoke(inputManager, cancel, INJECT_MODE);
-            Log.i(TAG, "cancelPreGrab: CANCEL sent ok=" + ok + " count=" + count + " deviceId=" + realTouchDeviceId);
-        } catch (Exception e) {
-            Log.e(TAG, "cancelPreGrab: CANCEL FAILED: " + e.getMessage());
-        } finally {
-            cancel.recycle();
+        for (int i = snapshot.size() - 1; i >= 0; i--) {
+            MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[i + 1];
+            MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[i + 1];
+            for (int j = 0; j <= i; j++) {
+                props[j] = new MotionEvent.PointerProperties();
+                props[j].id = j;
+                props[j].toolType = MotionEvent.TOOL_TYPE_FINGER;
+                coords[j] = new MotionEvent.PointerCoords();
+                coords[j].x = snapshot.get(j)[0];
+                coords[j].y = snapshot.get(j)[1];
+                coords[j].size = 1.0f;
+                coords[j].pressure = 1.0f;
+            }
+            int action = (i == 0) ? MotionEvent.ACTION_UP
+                : (i << MotionEvent.ACTION_POINTER_INDEX_SHIFT) | MotionEvent.ACTION_POINTER_UP;
+            MotionEvent ev = MotionEvent.obtain(now, now, action, i + 1,
+                props, coords, 0, 0, 1f, 1f,
+                realTouchDeviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
+            try {
+                injectMethod.invoke(inputManager, ev, INJECT_MODE);
+            } catch (Exception e) {
+                Log.e(TAG, "handoff: UP FAILED: " + e.getMessage());
+            } finally {
+                ev.recycle();
+            }
         }
+        Log.i(TAG, "handoff: " + snapshot.size() + " physical pointer(s) closed with UP "
+            + "(not CANCEL); merge loop re-projects them on the virtual device");
     }
 
     /**

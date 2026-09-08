@@ -31,6 +31,8 @@ bool stealth_is_active(void);
 // 注入(屏幕坐标,库内部换算设备单位)。slot 与 touch_core.h 对齐:
 // 8=TOUCH_VIRTUAL_SLOT(自瞄指),9=TOUCH_TRIGGER_SLOT(扳机指)。
 // 也可传真实手指所在 slot 给 stealth_up,实现"抬起玩家摇杆指"。
+// 8/9 若已被真实手指占用,内部会在 8/9 间换位或丢弃该次注入(见
+// stealth_backend.cpp 的 remapInjectSlot)。
 void stealth_down(int slot, int x, int y);
 void stealth_move(int slot, int x, int y);
 void stealth_up(int slot);
@@ -43,9 +45,11 @@ void stealth_set_orientation(int orientation);
 // 菜单独占期间不要注入(touchc.h 的警告)。
 bool stealth_grab(int enable);
 
-// 自动停枪:对摇杆区内的真实手指逐个经 KPM 发抬起。uinput 路径的
-// touch_lift_joystick_finger() 靠抹掉 uinput 投影生效,stealth 模式没有
-// 投影、真手指直通游戏,必须从内核侧把那个 slot 抬掉。
+// 自动停枪:对摇杆区内的真实手指逐个经 KPM 发抬起(不安排 confirm-up
+// 补发 —— 真手指由驱动上报维持,补发会把它再次抬起,见 touchc.cpp 的
+// UpNoConfirm)。uinput 路径的 touch_lift_joystick_finger() 靠抹掉 uinput
+// 投影生效,stealth 模式没有投影、真手指直通游戏,必须从内核侧把那个
+// slot 抬掉。
 bool stealth_lift_joystick_finger(void);
 
 // 释放。须与注入无并发 —— daemon 是单线程命令循环,天然满足。

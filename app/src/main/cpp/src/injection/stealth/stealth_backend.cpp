@@ -61,23 +61,63 @@ extern "C" StealthStatus stealth_init(int screenW, int screenH,
 
 extern "C" bool stealth_is_active(void) { return s_active; }
 
+// 在 8/9 里找"驱动当前没在报触摸"的空闲 slot(避开真实手指)。
+// 注意 8/9 都忙或检测不可用时回退原值 —— KPM 侧对 down/move 本就有
+// driver_busy 的 slot 冲突拒绝(-3),这里只是把拒绝提前到 daemon 层,
+// 并顺手把互相争抢 8/9 的两根注入指拆开。
+static int pickFreeInjectSlot(const int* slots, int n, int preferred) {
+    if (slots == nullptr || n <= 0) return preferred;
+    bool preferredBusy = false;
+    for (int i = 0; i < n; ++i) {
+        if (slots[i] == preferred) preferredBusy = true;
+    }
+    if (!preferredBusy) return preferred;
+    for (int cand = 8; cand <= 9; ++cand) {
+        if (cand == preferred) continue;
+        bool busy = false;
+        for (int i = 0; i < n; ++i) {
+            if (slots[i] == cand) { busy = true; break; }
+        }
+        if (!busy) return cand;
+    }
+    return -1;
+}
+
+// 注入 slot 冲突消解:8/9 若被真实手指占用则在两根注入指之间换位,
+// 都被占用则丢弃该次注入(-1)。touch_get_joystick_finger_slots 返回的
+// 是"摇杆区内"的真手指 slot,只能覆盖部分真手指 —— 更完整的"哪些
+// slot 被驱动占用"还是靠 KPM 侧 driver_busy 拒绝(-3),这里只是把
+// 最常见的撞位提前化解。
+static int remapInjectSlot(int slot) {
+    if (slot != 8 && slot != 9) return slot;
+    int slots[16];
+    const int n = touch_get_joystick_finger_slots(slots, 16);
+    return pickFreeInjectSlot(slots, n, slot);
+}
+
 extern "C" void stealth_down(int slot, int x, int y) {
     if (!s_active) { return; }
+    const int s = remapInjectSlot(slot);
+    if (s < 0) { return; }
     TouchManager::GetInstance().Down(Vector2{static_cast<float>(x),
                                              static_cast<float>(y)},
-                                     slot);
+                                     s);
 }
 
 extern "C" void stealth_move(int slot, int x, int y) {
     if (!s_active) { return; }
+    const int s = remapInjectSlot(slot);
+    if (s < 0) { return; }
     TouchManager::GetInstance().Move(Vector2{static_cast<float>(x),
                                              static_cast<float>(y)},
-                                     slot);
+                                     s);
 }
 
 extern "C" void stealth_up(int slot) {
     if (!s_active) { return; }
-    TouchManager::GetInstance().Up(slot);
+    const int s = remapInjectSlot(slot);
+    if (s < 0) { return; }
+    TouchManager::GetInstance().Up(s);
 }
 
 extern "C" void stealth_set_orientation(int orientation) {
@@ -100,8 +140,12 @@ extern "C" bool stealth_lift_joystick_finger(void) {
     auto& tm = TouchManager::GetInstance();
     for (int i = 0; i < n; i++) {
         // 对真实手指所在 slot 经 KPM 发抬起;KPM 注入的报文与真驱动
-        // 同源,Android 视角就是那根手指抬起了
-        tm.Up(slots[i]);
+        // 同源,Android 视角就是那根手指抬起了。
+        // 必须 UpNoConfirm:这些是玩家的真手指,抬起后驱动下一帧就会
+        // 重新注册(手指还按着);若走 Up() 的 confirm-up,30ms 后补发的
+        // TRKID=-1 会把刚注册回来的手指再次抬起 —— 摇杆反复弹跳,
+        // 真人断触。补发只该保护我们自己的注入 slot。
+        tm.UpNoConfirm(slots[i]);
     }
     return n > 0;
 }

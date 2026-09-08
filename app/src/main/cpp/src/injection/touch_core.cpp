@@ -701,12 +701,25 @@ static void* deviceReader(void* arg) {
                 case ABS_MT_POSITION_X:
                     if (curSlot >= 0 && curSlot < maxF) {
                         dev.fingers[curSlot].pos.x = ie.value * dev.s2tx;
+                        // 断触修复配套:真手指走 POSITION 事件时可能没有
+                        // TRKID 先行(部分驱动省略),绝不能保留我们注入指
+                        // 残留的 id(>=TOUCH_VIRTUAL_ID) —— 否则 remap 会把
+                        // 这根真手指误判成我们的注入指。POSITION 事件一律
+                        // 压回真实手指 id 段。
+                        if (dev.fingers[curSlot].id >= TOUCH_VIRTUAL_ID) {
+                            dev.fingers[curSlot].id =
+                                static_cast<int>((devIdx * 2 + 1) * maxF + curSlot);
+                        }
                         dev.fingers[curSlot].isDown = true;
                     }
                     break;
                 case ABS_MT_POSITION_Y:
                     if (curSlot >= 0 && curSlot < maxF) {
                         dev.fingers[curSlot].pos.y = ie.value * dev.s2ty;
+                        if (dev.fingers[curSlot].id >= TOUCH_VIRTUAL_ID) {
+                            dev.fingers[curSlot].id =
+                                static_cast<int>((devIdx * 2 + 1) * maxF + curSlot);
+                        }
                         dev.fingers[curSlot].isDown = true;
                     }
                     break;
@@ -901,9 +914,42 @@ void touch_set_screen_params(int w, int h, int rotation) {
     LOGD("screen params: %dx%d rotation=%d", w, h, g_rotation);
 }
 
+// ─── Injection slot remapping ────────────────────────────────────────
+//
+// 断触修复:注入固定写 slot 8/9,但读者线程把驱动报上来的真实手指也写进
+// 同一个 g_devices[0].fingers[] 数组 —— 驱动把真手指分到 8/9 时(10 槽
+// 面板 + 用户 9 指同按),touch_up(8) 会把真手指的 uinput 投影一起抬掉,
+// 造成真人断触。注入前先把 8/9 里没被真手指占用的那个挑出来;两个都被
+// 占用时丢弃本次注入(返回 -1),绝不与真手指抢 slot。
+//
+// 仅处理 8/9(我们自己的两根注入指);其余 slot 值是调用方对真实手指的
+// 显式操作(stealth 的急停不走 uinput,这里不会见到)。
+static int remapVirtualSlot(int slot) {
+    if (slot != TOUCH_VIRTUAL_SLOT && slot != TOUCH_TRIGGER_SLOT) return slot;
+    // 两根注入指保持互不相同:先看对方是否已被(我们)占用,避免
+    // 自瞄指/扳机指被重映射到同一个 slot 互相顶掉。
+    int candidate[2] = {TOUCH_VIRTUAL_SLOT, TOUCH_TRIGGER_SLOT};
+    int other = (slot == TOUCH_VIRTUAL_SLOT) ? TOUCH_TRIGGER_SLOT : TOUCH_VIRTUAL_SLOT;
+    // 优先返回调用方指定的 slot(若它空闲),保持与旧协议的兼容
+    if (!g_devices[0].fingers[slot].isDown) return slot;
+    // 指定 slot 上有手指 —— 可能是我们自己(重复 down,原样走)也可能是
+    // 真手指。用 id 区分:我们的注入 id 是 1000/2000 段。
+    int fid = g_devices[0].fingers[slot].id;
+    if (fid >= TOUCH_VIRTUAL_ID) return slot;
+    // 指定 slot 被真手指占用:试另一个注入 slot
+    if (other >= 0 && other < maxF) {
+        int oid = g_devices[0].fingers[other].id;
+        bool otherDown = g_devices[0].fingers[other].isDown;
+        if (!otherDown || oid >= TOUCH_VIRTUAL_ID) return other;
+    }
+    return -1;  // 8/9 都被真手指占着:丢弃本次注入
+}
+
 void touch_down(int slot, int id, int screenX, int screenY) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
+    slot = remapVirtualSlot(slot);
+    if (slot < 0) return;
     float tx, ty;
     screenToTouch(screenX, screenY, tx, ty);
     g_devices[0].fingers[slot].id = id;
@@ -915,6 +961,16 @@ void touch_down(int slot, int id, int screenX, int screenY) {
 void touch_move(int slot, int screenX, int screenY) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
+    // move 不换 slot:换slot等于把手指跳到新轨迹。指定 slot 被真手指占用
+    // 时(注入 down 已被丢弃的情况下才可能),这个 move 也不该发给真手指
+    // 的投影 —— 静默丢弃。
+    if ((slot == TOUCH_VIRTUAL_SLOT || slot == TOUCH_TRIGGER_SLOT)) {
+        if (slot < 0 || slot >= maxF) return;
+        if (!g_devices[0].fingers[slot].isDown ||
+            g_devices[0].fingers[slot].id < TOUCH_VIRTUAL_ID) {
+            return;  // 该 slot 上没有我们的注入指(被丢弃的 down/真手指)
+        }
+    }
     float tx, ty;
     screenToTouch(screenX, screenY, tx, ty);
     g_devices[0].fingers[slot].pos = Vec2(tx, ty);
@@ -924,6 +980,14 @@ void touch_move(int slot, int screenX, int screenY) {
 void touch_up(int slot) {
     std::lock_guard<std::mutex> guard(g_mutex);
     if (!g_initialized || g_devices.empty()) return;
+    // 同 touch_move:只抬我们自己的注入指,绝不碰真手指占用的 slot
+    if ((slot == TOUCH_VIRTUAL_SLOT || slot == TOUCH_TRIGGER_SLOT)) {
+        if (slot < 0 || slot >= maxF) return;
+        if (!g_devices[0].fingers[slot].isDown ||
+            g_devices[0].fingers[slot].id < TOUCH_VIRTUAL_ID) {
+            return;
+        }
+    }
     g_devices[0].fingers[slot].isDown = false;
     upload();
 }
