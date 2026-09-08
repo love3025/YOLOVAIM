@@ -11,7 +11,18 @@ data class AppConfig(
     var aimbotEnabled: Boolean = false,
     var speed: Float = 0.07f,
     var ki: Float = 0.001f,
+    /** 旧字段，控制律已不再使用；保留只为把老配置折算进 [aimDamping]。 */
     var kd: Float = 0.05f,
+    /**
+     * 平滑度 —— 唯一的阻尼旋钮。0.40 = 旧实现的 `velocityDamping 0.35 + kd 0.05`。
+     *
+     * 老配置里没有这个键，load() 时按 `0.35 + kd` 折算 —— 那正是该用户此前的
+     * **等效**阻尼（旧 D 项与写死的速度阻尼是同一项，见 AimPidCore 的说明），
+     * 所以升级后手感不变，而滑条从此真的管事。
+     */
+    var aimDamping: Float = 0.4f,
+    /** 接近段增强（默认关）。见 AimController.approachAssistEnabled。 */
+    var approachAssist: Boolean = false,
     var aimOffsetYRatio: Float = 0f,
     var aimSwayAmplitude: Int = 0,
     var aimPrediction: Int = 0,
@@ -28,6 +39,8 @@ data class AppConfig(
     var triggerDownFluctuation: Int = 3,
     var triggerTouchDuration: Int = 10,
     var triggerTouchRange: Int = 100,
+    /** 触发半径(采集像素)。0 = 关闭,只用「准星落在框内」那条判据。见 TriggerController 判据三 */
+    var triggerRadiusPx: Int = 0,
     var triggerShowArea: Boolean = false,
     var range: Int = 300,
     var showCaptureRange: Boolean = false,
@@ -85,6 +98,15 @@ object ConfigManager {
                         speed = obj.optDouble("speed", 0.07).toFloat(),
                         ki = obj.optDouble("ki", 0.001).toFloat(),
                         kd = obj.optDouble("kd", 0.05).toFloat(),
+                        // 缺省值故意依赖同一个 obj 里的 kd：见 AppConfig.aimDamping
+                        // 钳位不只是防手改配置：开发期发过两版滑条上限是 1.5 的
+                        // APK,那些设备上存下来的值可能 >1.0。核心里也钳了一道,
+                        // 这里钳是为了让面板显示的值和实际生效的值一致。
+                        aimDamping = obj.optDouble(
+                            "aimDamping",
+                            0.35 + obj.optDouble("kd", 0.05)
+                        ).toFloat().coerceIn(0f, io.github.love3025.yolovaim.model.AimPidCore.MAX_DAMPING),
+                        approachAssist = obj.optBoolean("approachAssist", false),
                         aimOffsetYRatio = obj.optDouble("aimOffsetYRatio", 0.0).toFloat(),
                         aimSwayAmplitude = obj.optInt("aimSwayAmplitude", 0),
                         aimPrediction = obj.optInt("aimPrediction", 0),
@@ -101,6 +123,7 @@ object ConfigManager {
                         triggerDownFluctuation = obj.optInt("triggerDownFluctuation", 3),
                         triggerTouchDuration = obj.optInt("triggerTouchDuration", 10),
                         triggerTouchRange = obj.optInt("triggerTouchRange", 100),
+                        triggerRadiusPx = obj.optInt("triggerRadiusPx", 0),
                         triggerShowArea = obj.optBoolean("triggerShowArea", false),
                         range = obj.optInt("range", 300),
                         showCaptureRange = obj.optBoolean("showCaptureRange", false),
@@ -155,6 +178,8 @@ object ConfigManager {
                     put("speed", config.speed.toDouble())
                     put("ki", config.ki.toDouble())
                     put("kd", config.kd.toDouble())
+                    put("aimDamping", config.aimDamping.toDouble())
+                    put("approachAssist", config.approachAssist)
                     put("aimOffsetYRatio", config.aimOffsetYRatio.toDouble())
                     put("aimSwayAmplitude", config.aimSwayAmplitude)
                     put("aimPrediction", config.aimPrediction)
@@ -171,6 +196,7 @@ object ConfigManager {
                     put("triggerDownFluctuation", config.triggerDownFluctuation)
                     put("triggerTouchDuration", config.triggerTouchDuration)
                     put("triggerTouchRange", config.triggerTouchRange)
+                    put("triggerRadiusPx", config.triggerRadiusPx)
                     put("triggerShowArea", config.triggerShowArea)
                     put("range", config.range)
                     put("showCaptureRange", config.showCaptureRange)

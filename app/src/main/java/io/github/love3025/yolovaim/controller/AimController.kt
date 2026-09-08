@@ -7,6 +7,8 @@ import io.github.love3025.yolovaim.service.FloatService
 import io.github.love3025.yolovaim.injector.TouchInjectorInterface
 import io.github.love3025.yolovaim.model.AreaConfig
 import io.github.love3025.yolovaim.model.AimingState
+import io.github.love3025.yolovaim.model.AimFinishController
+import io.github.love3025.yolovaim.model.AimPidCore
 import io.github.love3025.yolovaim.model.BezierMover
 import kotlin.math.max
 import kotlin.math.min
@@ -81,6 +83,19 @@ class AimController(
         private const val MAX_OFFSET = 600f
 
         /**
+         * 死区占目标框对应边长的比例。见 [convergeTolerance]。
+         *
+         * 0.25 是起点不是定论，要在真机上验：远距离若出现新的颤动，说明这一带已经
+         * 窄于检测噪声，那时该抬 [MIN_CONVERGE_TOL]，**不要**回到绝对像素。
+         */
+        private const val CONVERGE_TOL_BOX_RATIO = 0.25f
+        /**
+         * 容差下限(px)。触摸坐标是整数(moveTo 收 Int)，比 1px 更细的修正根本表达
+         * 不出来，只会变成一串空转的 MOVE。
+         */
+        private const val MIN_CONVERGE_TOL = 1f
+
+        /**
          * Per-frame latency tracing, compiled out by default.
          *
          * The 0.05ms threshold on these sites never gated anything in practice:
@@ -94,14 +109,8 @@ class AimController(
     // PID parameters
     var kp = 0.07f
     var ki = 0.001f
-    var kd = 0.05f
-
     // Y-axis gain scaling (prevents vertical oscillation when Kp is high)
     var kpYRatio = 0.6f
-    var kdYRatio = 0.85f
-
-    // Derivative EMA filter alpha (1.0 = no filter, 0.0 = freeze D term)
-    var derivFilterAlpha = 0.4f
 
     // Integral separation threshold (in px) — disable Ki above this error magnitude
     var integralSeparationThresh = 200f
@@ -109,14 +118,21 @@ class AimController(
     // Integral clamp (anti-windup). Ki=0.001 is small enough that 100 is fine.
     private val integralLimit = 100f
 
-    // Velocity damping: subtracts a fraction of the previous frame's move
-    // from the current output. This is the standard "rate feedback" used in
-    // motion control to brake approach velocity and prevent overshoot bounce
-    // on large aim movements. 0.0 = no damping, 0.5 = aggressive damping.
-    var velocityDamping = 0.35f
+    /**
+     * 平滑度 —— **唯一的阻尼旋钮**，无量纲。0 = 纯 P，越大越平滑。
+     *
+     * 默认 0.40 = 旧实现的 `velocityDamping 0.35 + kd 0.05`，所以默认手感不变；
+     * 区别是它现在完整地暴露在面板上，调它就真的在调阻尼。旧配置的迁移见
+     * `ConfigManager` 里对 `aimDamping` 缺省值的处理。
+     */
+    @Volatile
+    var aimDamping = 0.4f
 
-    // Per-frame output clamp (px). Lower = smoother but slower. 1200 was
-    // 72000 px/s at 60fps — too aggressive, caused large-sweep overshoot.
+    /**
+     * 单轮位移上限(px @ [AimPidCore.DT_REF])。实际上限按本轮 dt 缩放，
+     * 所以它现在是一个**速度**上限(600px/20ms = 30000px/s)，掉帧时不会因为
+     * dt 变长而被同一个数字卡住。
+     */
     var maxPerFrame = 600f
 
     // Feedforward gain (F term). Compensates target velocity before the
@@ -131,8 +147,30 @@ class AimController(
     var bezierDuration = 30
     var bezierControlOffset = 0.3f
     var bezierRandomSpread = 0.1f
+    /**
+     * 收敛阈值(px) —— 现在是死区的**上限**，不再直接就是死区。实际用的容差由
+     * [convergeTolerance] 按目标框缩放后给出，只会 <= 这个值。面板滑条(0~100)的
+     * 语义因此是「最多容忍多少」，0 = 显式关掉死区。
+     */
     var convergeThresh = 10f
-    var aimFov = 50  // px — circle radius around crosshair; targets outside this are ignored
+    /**
+     * px — circle radius around crosshair; targets outside this are ignored。
+     *
+     * 赋值同步 [dynamicCurrentFov]：后者是一份独立的动画状态，只有
+     * [updateDynamicFov] 会推动它，而那只在「有检测结果」的帧里跑。
+     * 不同步的后果：启动时配置写进了 aimFov，却没人碰
+     * dynamicCurrentFov，[effectiveFov] 于是一直返回字段初值（默认 50）
+     * —— 配置里存的是 100，HUD 却画 50，直到画面里第一次
+     * 出现目标、updateDynamicFov 终于跑了一次才被纠正。
+     */
+    var aimFov = 50
+        set(v) {
+            if (field == v) return
+            field = v
+            // 无目标时的稳态半径就是 aimFov；正在收缩也让它从满圈
+            // 重新收 —— 用户刚拖完滑条，下一帧应当先看到他设的那个大小。
+            resetDynamicFov()
+        }
     var dynamicFov = false  // shrink FOV onto target during aim to avoid retargeting
     var fovZoomDelay = 0  // ms — hold time at shrunken FOV after target lost before expanding back
     var aimOffsetYRatio = 0f
@@ -173,16 +211,118 @@ class AimController(
     // State
     val aimingState = AimingState()
     private val bezierMover = BezierMover()
+    private val aimFinish = AimFinishController()
+    private val pid = AimPidCore()
+    private val gains = AimPidCore.Gains()
+
+    /**
+     * 上一次**真正发出去**的整数触摸坐标。`Int.MIN_VALUE` = 还没发过。
+     *
+     * 触摸协议收的是整数([TouchInjectorInterface.moveTo])，而 dt 归一化之后
+     * 高帧率下每轮步长按比例变小：144fps、误差 5px、Kp 0.07 时一步只有
+     * 0.125px，整数坐标要 8 帧才变一次 —— 另外 7 帧发的是**和上一条一模一样**
+     * 的 MOVE。每条都是一次管道写加一次内核 input_event，而且就落在注入的
+     * 关键路径上。
+     *
+     * 亚像素照常累加在 [AimingState.centerX] 这个 float 上，所以不丢精度、
+     * 也不改轨迹 —— 只是不再重复发同一个坐标。
+     */
+    private var lastSentX = Int.MIN_VALUE
+    private var lastSentY = Int.MIN_VALUE
+
+    /**
+     * 发 MOVE，整数坐标与上次相同则跳过。
+     *
+     * @return 是否真的发出去了（目前调用方不关心，保留给排障计数）
+     */
+    private fun emitMove(): Boolean {
+        val ix = aimingState.centerX.toInt()
+        val iy = aimingState.centerY.toInt()
+        if (ix == lastSentX && iy == lastSentY) return false
+        lastSentX = ix
+        lastSentY = iy
+        touchClient()?.moveTo(ix, iy)
+        return true
+    }
+
+    /** 落指/抬指之后必须清，否则第一条 MOVE 可能被当成重复而被吞掉。 */
+    private fun forgetSentPosition() {
+        lastSentX = Int.MIN_VALUE
+        lastSentY = Int.MIN_VALUE
+    }
+
+    /**
+     * 接近段增强（[AimFinishController]）—— **默认关闭**。
+     *
+     * 它的设计目标是补偿「P 输出随误差线性衰减、末段拖尾」，做法是在所有刹车项
+     * **之后**把总输出重新抬到 `min(4·kp, 0.2)·|e|`。两个后果：
+     *
+     * 1. 有效比例增益变成 `min(4·kp, 0.2)`，于是 Kp 滑条在 0.05~0.20 这一整段
+     *    输出同一个 0.20 —— 面板上 75% 的行程是死的，「降低 Kp 没用」。
+     * 2. 它的 `weight` 由单帧误差差分估出的靠近速度决定，而静止目标的检测框
+     *    本身就有 ±1~2px 的抖。每帧真实靠近量只有 2~4px 时，噪声让 `weight`
+     *    在 0~1 之间摆，**环路增益以帧率在 1× 和 ~3× 之间跳变**。一个增益随机
+     *    变化 3 倍的系统不存在「又快又稳」的参数组，这就是抖动的主因。
+     *
+     * 保留开关是为了能实机 A/B 对照，不是推荐项。打开后 Kp/平滑度两个旋钮
+     * 都会重新失去权限。它原本要解决的「接近段慢」，现在由 dt 归一化
+     * (见 [AimPidCore]) 与放宽后的 Kp 上限承担。
+     */
+    // @Volatile：写在 GUI 线程(guiPanel.onApproachAssistChanged)，读在推理线程。
+    // 原先这个 setter 还顺手调了 aimFinish.reset() —— 那是从 GUI 线程去改
+    // 推理线程正在读的十几个字段，是一条真实的数据竞争。没有必要：整形器
+    // 自己就按采集时间戳判连续性，关掉再打开时 previousCaptureNs 早已陈旧，
+    // 第一次 observe() 会自行重建历史。
+    @Volatile
+    var approachAssistEnabled = false
 
     // Dynamic FOV state — `dynamicCurrentFov` is the actual radius used for
     // target selection and rendered as the FOV circle; it ranges from
     // `aimFov` (full circle when no target) down to `targetMaxDim + padding`
     // while locked onto a target.
-    private var dynamicCurrentFov = 50f
-    private var lostTargetMs: Long = -1
+    // @Volatile: aimFov 的 setter 会调 resetDynamicFov() 写这两个字段,而那是
+    // 从 GUI 线程来的(guiPanel.onAimFovChanged / onDynamicFovChanged),读侧是
+    // 推理线程的 updateDynamicFov / effectiveFov。arm64 上单字读写不会撕裂,但
+    // 没有 volatile 就没有可见性保证 —— 用户拖完滑条可能好几帧看不到变化。
+    @Volatile private var dynamicCurrentFov = aimFov.toFloat()
+    @Volatile private var lostTargetMs: Long = -1
 
     val effectiveFov: Int
         get() = dynamicCurrentFov.toInt().coerceIn(20, maxOf(aimFov, 20))
+
+    /**
+     * 本帧的收敛容差(px)，单轴。进了这一带就算「到位」，不再发 MOVE。
+     *
+     * 死区本身是必需的：检测框每帧都在抖，没有它自瞄会永远追噪声 —— 每帧注入一次
+     * 几像素的随机 MOVE，准星肉眼可见地颤，而真手指不会以 30Hz 永久微颤；带延迟的
+     * 闭环追小误差又正是 PID 失稳的地方(derivFilteredX/velocityDamping 那一堆就是在
+     * 打这场仗)。触摸坐标还是整数，1px 以下是空转。
+     *
+     * 但它的单位必须是**目标尺寸的比例，不能是绝对像素**。死区滤的是检测噪声，而框的
+     * 定位误差大致与目标尺寸成正比。写成绝对 10px 的后果：同一个数在近距离(框高
+     * ~100px)只占 10%，在远距离(框高 15~20px)却是半个框。而 PID 步长与误差成正比、
+     * 越接近越慢，所以它一定停在**自己进来那一侧**的内侧、残差接近满阈值，方向就是
+     * 接近方向；目标不动这个残差就永久留着 —— 现象是「锁住了但停在框边缘」，而扳机
+     * 判的是框内，于是一枪不出。
+     *
+     * 与压枪标度恰好相反、道理恰好一致：压枪对抗镜头爬升(与距离无关 → 必须绝对屏幕
+     * 像素，见 RATE_* 那段)，死区滤检测噪声(随目标尺寸缩放 → 必须取比例)。两个量性质
+     * 不同，各自的单位也就不同；混用哪一个都会在远距离塌掉。
+     *
+     * [convergeThresh] 仍是上限，所以近距离目标行为与从前完全一致，只有小框真的收紧。
+     * **扳机的第二条判据必须用同一个返回值**(见 TriggerController.processTrigger)，
+     * 否则「自瞄收敛 ⇒ 扳机在靶」这条不变量又会裂开。
+     *
+     * @param boxDim 目标框在该轴上的边长(px)。<= 0 表示拿不到框尺寸，退回绝对阈值。
+     */
+    fun convergeTolerance(boxDim: Float): Float {
+        // 用户把阈值拉到 0 = 显式关掉死区(abs(e) < 0 恒假，每帧都动)。别用下限把它
+        // 悄悄改回 1px。
+        if (convergeThresh <= 0f) return 0f
+        if (boxDim <= 0f) return convergeThresh
+        return min(convergeThresh, boxDim * CONVERGE_TOL_BOX_RATIO)
+            .coerceAtLeast(MIN_CONVERGE_TOL)
+    }
 
     fun resetDynamicFov() {
         dynamicCurrentFov = aimFov.toFloat()
@@ -249,6 +389,16 @@ class AimController(
             }
         }
         if (bestDet != null) {
+            aimFinish.reset() // new lock: old target's approach history is not reusable
+            // 前馈速度同理不可复用：updateVelocity 算的是相邻帧中心差，
+            // 跨目标的差是跳变不是速度，喂进 EMA 就是一个假速度尖峰。
+            aimingState.prevTargetX = Float.NaN
+            aimingState.prevTargetY = Float.NaN
+            // PID 的积分与指令速率同理:旧目标攒下的积分对新目标是噪声(符号都
+            // 可能反),旧目标复锁前的指令速率则是幻影刹车(见 AimPidCore
+            // PHANTOM_GRACE_S)。同一条锁路径里 beginIteration 的衰减管不到
+            // 「换目标」—— 那没有 gap。
+            pid.reset()
             val bcx = bestDet.rect.centerX()
             val bcy = bestDet.rect.centerY()
             aimingState.lockedTarget = RectF(bcx, bcy, bcx, bcy)
@@ -291,18 +441,62 @@ class AimController(
         }
     }
 
-    fun executeAiming(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+    /**
+     * [executeAiming] 真正 steer 到的 Y —— 原始瞄点 + 压枪偏移。
+     *
+     * 单独暴露是为了让**扳机判定拿到同一个 Y**。压枪偏移只加在自瞄的目标点上，
+     * 而扳机判的是原始检测框：持续开火时 recoilOffsetY 能累到上百 px，准星被压到
+     * 框下边以外，自瞄仍然「收敛」、扳机却认为离靶 —— 连发中途自己停火就是这么
+     * 来的。两边共用这个函数，那条错位不再可能出现。
+     */
+    fun effectiveAimY(aimY: Float): Float = if (recoilEnabled) aimY + recoilOffsetY else aimY
+
+    /**
+     * @param tolX / @param tolY 本帧的收敛容差，来自 [convergeTolerance]。缺省退回
+     *   绝对 [convergeThresh]（只有 InferenceManager 里那份死循环还走这条）。
+     * @param frameCaptureNs 本帧采集时刻(System.nanoTime 时基)。缺失/陈旧时保持原 PID，
+     *   不启用接近段增益；只用于观察窗口和增益上限，不估算触摸灵敏度。
+     */
+    fun executeAiming(
+        targetX: Float,
+        targetY: Float,
+        cx: Float,
+        cy: Float,
+        tolX: Float = convergeThresh,
+        tolY: Float = convergeThresh,
+        frameCaptureNs: Long = 0L,
+        boxCenterX: Float = Float.NaN,
+        boxCenterY: Float = Float.NaN
+    ) {
         val t0 = System.nanoTime()
+        // dt 与目标速度都在这里推进,不在调用方 —— 旧实现里 FloatService 先调
+        // updateVelocity() 再调这里,而 dt 只有这里知道,于是两边一旦顺序变了
+        // 速度就会用错的周期折算。集中在一处之后那种错位不再可能出现。
+        val dt = pid.beginIteration(frameCaptureNs)
+        aimingState.updateVelocity(
+            if (boxCenterX.isNaN()) targetX else boxCenterX,
+            if (boxCenterY.isNaN()) targetY else boxCenterY,
+            dt
+        )
         // 压枪：偏移量由 updateRecoil() 每帧维护，这里只读。
         // 累加/清零绝不能放回这里 —— executeAiming() 只在选到目标时才被调用
         // (FloatService 的 target != null 分支)，把状态机放进来就等于
         // 「无目标 → 既不累加也不清零」，偏移被冻结着带到下一次交火。
-        var adjustedTargetY = targetY
-        if (recoilEnabled) adjustedTargetY += recoilOffsetY
+        val adjustedTargetY = effectiveAimY(targetY)
         if (aimMode == 1) {
-            executeAimingBezier(targetX, adjustedTargetY, cx, cy)
+            aimFinish.reset()
+            pid.reset()
+            executeAimingBezier(targetX, adjustedTargetY, cx, cy, tolX, tolY)
         } else {
-            executeAimingPid(targetX, adjustedTargetY, cx, cy)
+            // 包含已经到位的帧：清掉增益的连续出界历史，单帧检测抖动不应
+            // 立刻唤醒增强。精度仍完全由同一对 tolX/tolY 决定。
+            if (approachAssistEnabled) {
+                aimFinish.observe(
+                    targetX - cx, adjustedTargetY - cy, tolX, tolY,
+                    convergeThresh, frameCaptureNs, t0
+                )
+            }
+            executeAimingPid(targetX, adjustedTargetY, cx, cy, tolX, tolY)
         }
         if (TRACE) {
             val dtMs = (System.nanoTime() - t0) / 1e6
@@ -310,12 +504,19 @@ class AimController(
         }
     }
 
-    private fun executeAimingBezier(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+    private fun executeAimingBezier(
+        targetX: Float,
+        targetY: Float,
+        cx: Float,
+        cy: Float,
+        tolX: Float,
+        tolY: Float
+    ) {
         val errorX = targetX - cx
         val errorY = targetY - cy
 
         if (!aimingState.pointerDown) {
-            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
+            if (Math.abs(errorX) < tolX && Math.abs(errorY) < tolY) return
 
             val aimArea = savedAreas().getOrNull(AREA_INDEX_AIM)
             if (aimArea != null) {
@@ -328,6 +529,7 @@ class AimController(
             aimingState.startX = aimingState.centerX
             aimingState.startY = aimingState.centerY
 
+            forgetSentPosition()
             touchClient()?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
             aimingState.pointerDown = true
             val now = System.currentTimeMillis()
@@ -335,7 +537,7 @@ class AimController(
             val duration = (bezierDuration * 5 + dist * 0.3f).toInt().coerceIn(200, 800)
             bezierMover.start(now, now + duration)
         } else {
-            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
+            if (Math.abs(errorX) < tolX && Math.abs(errorY) < tolY) {
                 // 收敛后保持按住，检测框消失时由 InferenceManager 负责 lift
                 bezierMover.cancel()
                 return
@@ -356,15 +558,22 @@ class AimController(
             aimingState.centerX += moveX
             aimingState.centerY += moveY
             if (applyDragSafety()) return
-            touchClient()?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
+            emitMove()
         }
     }
 
-    private fun executeAimingPid(targetX: Float, targetY: Float, cx: Float, cy: Float) {
+    private fun executeAimingPid(
+        targetX: Float,
+        targetY: Float,
+        cx: Float,
+        cy: Float,
+        tolX: Float,
+        tolY: Float
+    ) {
         val errorX = targetX - cx
         val errorY = targetY - cy
         if (!aimingState.pointerDown) {
-            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) return
+            if (Math.abs(errorX) < tolX && Math.abs(errorY) < tolY) return
             val aimArea = savedAreas().getOrNull(AREA_INDEX_AIM)
             if (aimArea != null) {
                 aimingState.centerX = aimArea.x + (Math.random() * aimArea.width).toFloat()
@@ -375,99 +584,64 @@ class AimController(
             }
             aimingState.startX = aimingState.centerX
             aimingState.startY = aimingState.centerY
-            aimingState.prevErrorX = 0f
-            aimingState.prevErrorY = 0f
-            aimingState.integralX = 0f
-            aimingState.integralY = 0f
-            aimingState.derivFilteredX = 0f
-            aimingState.derivFilteredY = 0f
-            aimingState.prevFrameX = aimingState.centerX
-            aimingState.prevFrameY = aimingState.centerY
             aimingState.prevTargetX = Float.NaN
             aimingState.prevTargetY = Float.NaN
             aimingState.smoothVelX = 0f
             aimingState.smoothVelY = 0f
+            // 落指等于换了一个起点：积分与指令速率历史都必须清，否则上一次
+            // 交火攒下的积分会在按下的第一帧直接推出去一步。
+            pid.reset()
+            aimFinish.reset() // DOWN has not produced an observed response yet
+            forgetSentPosition()
             touchClient()?.swipe(aimingState.centerX.toInt(), aimingState.centerY.toInt(), aimingState.centerX.toInt(), aimingState.centerY.toInt(), 0)
             aimingState.pointerDown = true
             Log.d(TAG, "aim DOWN at (${aimingState.centerX}, ${aimingState.centerY}) target=($targetX, $targetY)")
         } else {
-            if (Math.abs(errorX) < convergeThresh && Math.abs(errorY) < convergeThresh) {
+            if (Math.abs(errorX) < tolX && Math.abs(errorY) < tolY) {
                 // 收敛后保持按住，检测框消失时由 InferenceManager 负责 lift
                 return
             }
 
-            // Integral separation: only accumulate Ki when error is in the controlled band.
-            // Above the threshold the Kp term already drives the response, accumulating
-            // integral would cause overshoot and the vertical-axis oscillation reported by users.
-            val sep = integralSeparationThresh
-            if (Math.abs(errorX) < sep) {
-                if (errorX * aimingState.prevErrorX <= 0) aimingState.integralX = 0f
-                aimingState.integralX += errorX
-                aimingState.integralX = aimingState.integralX.coerceIn(-integralLimit, integralLimit)
-            } else {
-                aimingState.integralX *= 0.5f
-            }
-            if (Math.abs(errorY) < sep) {
-                if (errorY * aimingState.prevErrorY <= 0) aimingState.integralY = 0f
-                aimingState.integralY += errorY
-                aimingState.integralY = aimingState.integralY.coerceIn(-integralLimit, integralLimit)
-            } else {
-                aimingState.integralY *= 0.5f
-            }
+            // 控制律整体在 AimPidCore 里：帧率无关 + 单一阻尼项。
+            // 这里只负责把面板上的量装进 Gains，以及处理抖动/裁剪/落点。
+            gains.kp = kp
+            gains.kpYRatio = kpYRatio
+            gains.ki = ki
+            gains.kf = kf
+            gains.kfYRatio = kfYRatio
+            gains.kfGain = kfGain
+            gains.damping = aimDamping
+            gains.integralSeparation = integralSeparationThresh
+            gains.integralLimit = integralLimit
+            gains.maxStepAtRef = maxPerFrame
 
-            // EMA filter on derivative: detection box jitters frame-to-frame, and raw
-            // dError/dt amplifies that jitter into D-term spikes that drive oscillation.
-            val alpha = derivFilterAlpha
-            val rawDerivX = errorX - aimingState.prevErrorX
-            val rawDerivY = errorY - aimingState.prevErrorY
-            aimingState.derivFilteredX = alpha * rawDerivX + (1f - alpha) * aimingState.derivFilteredX
-            aimingState.derivFilteredY = alpha * rawDerivY + (1f - alpha) * aimingState.derivFilteredY
-
-            // Per-axis gain: Y axis gets reduced Kp/Kd to prevent vertical oscillation
-            // when Kp is high. The touch-injection pipeline and target Y motion both
-            // contribute more noise on the Y axis than X.
-            val kpY = kp * kpYRatio
-            val kdY = kd * kdYRatio
-
-            // Raw PID output
-            var rawX = errorX * kp + aimingState.integralX * ki + aimingState.derivFilteredX * kd
-            var rawY = errorY * kpY + aimingState.integralY * ki + aimingState.derivFilteredY * kdY
-
-            // Feedforward (F term): apply target velocity directly to output so the
-            // aim cursor leads a moving target instead of always chasing the lag.
-            // smoothVelX/Y is EMA-filtered in FloatService via AimingState.updateVelocity.
-            // kfGain amplifies the slider value so kf=0.2 produces ~60% lead (visible
-            // at typical 5-20 px/frame target speeds). Without it, kf * velocity is
-            // 1-2 px/frame and gets drowned out by Kp*error.
-            rawX += aimingState.smoothVelX * kf * kfGain
-            rawY += aimingState.smoothVelY * kf * kfGain * kfYRatio
+            var rawX = pid.stepX(errorX, aimingState.smoothVelX, gains)
+            var rawY = pid.stepY(errorY, aimingState.smoothVelY, gains)
 
             if (aimSwayAmplitude > 0) rawY += computeSway()
-            aimingState.prevErrorX = errorX
-            aimingState.prevErrorY = errorY
 
-            // Velocity damping (rate feedback): subtract a fraction of the previous
-            // frame's actual displacement. This is standard motion-control damping —
-            // it brakes the approach velocity as we get near the target and prevents
-            // the overshoot-bounce cycle on large aim sweeps. Works in addition to Kd.
-            val prevVelX = aimingState.centerX - aimingState.prevFrameX
-            val prevVelY = aimingState.centerY - aimingState.prevFrameY
-            rawX -= prevVelX * velocityDamping
-            rawY -= prevVelY * velocityDamping
+            // 接近段增强默认关闭，见 approachAssistEnabled 的说明。
+            if (approachAssistEnabled) {
+                rawX = aimFinish.shapeX(rawX, kp)
+                rawY = aimFinish.shapeY(rawY, kp * kpYRatio, AimFinishController.MAX_ASSIST_KP * kpYRatio)
+            }
 
+            // 总位移上限按 dt 缩放,所以它是一个速度上限而不是「每帧多少像素」。
+            val cap = pid.stepCap(gains)
             val moveDist = Math.sqrt((rawX * rawX + rawY * rawY).toDouble()).toFloat()
             var moveX = rawX
             var moveY = rawY
-            if (moveDist > maxPerFrame) {
-                moveX = rawX / moveDist * maxPerFrame
-                moveY = rawY / moveDist * maxPerFrame
+            if (moveDist > cap) {
+                moveX = rawX / moveDist * cap
+                moveY = rawY / moveDist * cap
             }
-            aimingState.prevFrameX = aimingState.centerX
-            aimingState.prevFrameY = aimingState.centerY
+            // 必须提交**裁剪后**的位移：阻尼项下一轮据此算指令速率,喂裁剪前的
+            // 值等于告诉它「我走了没走的路」,大幅扫动之后会多刹一下。
+            pid.commit(moveX, moveY)
             aimingState.centerX += moveX
             aimingState.centerY += moveY
             if (applyDragSafety()) return
-            touchClient()?.moveTo(aimingState.centerX.toInt(), aimingState.centerY.toInt())
+            emitMove()
         }
     }
 
@@ -496,6 +670,9 @@ class AimController(
         val dy = aimingState.centerY - aimingState.startY
         val dragDist = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
         if (dragDist > aimingState.maxDragDist) {
+            aimFinish.reset()
+            pid.reset()
+            forgetSentPosition()
             touchClient()?.lift()
             aimingState.pointerDown = false
             aimingState.lockedTarget = null
@@ -513,10 +690,16 @@ class AimController(
     // 它发生在手指还按着、枪口还在爬的时候。压枪的生命周期由 updateRecoil()
     // 的开火时间戳独占，触点抬起是瞄准逻辑的事，两者不耦合。
     fun lift() {
+        aimFinish.reset()
+        pid.reset()
+        forgetSentPosition()
         touchClient()?.lift()
         aimingState.pointerDown = false
         aimingState.lockedTarget = null
     }
+
+    /** 本帧没有可瞄目标时丢弃末段历史；不改变触点或压枪的生命周期。 */
+    fun clearFinishHistory() = aimFinish.reset()
 
     /**
      * 压枪状态机 —— 必须每推理帧调用一次，且与「有没有目标」无关。
@@ -637,6 +820,7 @@ class AimController(
     }
 
     fun reset() {
+        aimFinish.reset()
         aimingState.reset()
         bezierMover.cancel()
         resetRecoil()

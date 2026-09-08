@@ -40,6 +40,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerUpFluctuation: ((Int) -> Unit)? = null
     var onTriggerDownFluctuation: ((Int) -> Unit)? = null
     var onTriggerTouchDuration: ((Int) -> Unit)? = null
+    var onTriggerRadiusPx: ((Int) -> Unit)? = null
     var onTriggerTouchRange: ((Int) -> Unit)? = null
     var onTriggerShowArea: ((Boolean) -> Unit)? = null
     var onTestCircle: (() -> Unit)? = null
@@ -50,7 +51,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onAimPredictionChanged: ((Int) -> Unit)? = null
     var onTriggerOffsetYRatioChanged: ((Float) -> Unit)? = null
     var onKiChanged: ((Float) -> Unit)? = null
-    var onKdChanged: ((Float) -> Unit)? = null
+    var onAimDampingChanged: ((Float) -> Unit)? = null
+    var onApproachAssistChanged: ((Boolean) -> Unit)? = null
     var onKfChanged: ((Float) -> Unit)? = null
     var onAimTouchDisplay: ((Boolean) -> Unit)? = null
     var onAimTouchSize: ((Int) -> Unit)? = null
@@ -88,7 +90,10 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var aimbotEnabled = false; var speed = 0.07f; var range = 300
     var confidence = 0.50f; var modelIndex = 0; var modelNames: List<String> = emptyList()
     var aimOffsetYRatio = 0f; var aimSwayAmplitude = 0; var aimPrediction = 0
-    var ki = 0.001f; var kd = 0.05f; var kf = 0.05f
+    var ki = 0.001f; var kf = 0.05f
+    /** 平滑度(阻尼)。0 = 纯 P,越大越平滑。 */
+    var aimDamping = 0.4f
+    var approachAssist = false
     var aimTouchDisplay = false; var aimTouchSize = 20
     var aimMode = 0; var bezierDuration = 30; var bezierControlOffset = 0.3f; var bezierRandomSpread = 0.1f
     var aimHoldEnabled = false
@@ -103,6 +108,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
     var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false; var triggerOffsetYRatio = 0f
+    var triggerRadiusPx = 0
     var modelRunning = false
     var recordEnabled = false
     var classMap: Map<Int, String> = emptyMap()
@@ -319,13 +325,28 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             // PID controls
             contentContainer.addView(MaterialTextView(context).apply { text = "PID参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
             contentContainer.addView(spacer(dp(4)))
-            contentContainer.addView(buildStepperSlider("Kp", speed, 0.01f, 0.2f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+            // Kp 上限从 0.2 提到 0.4：旧的 0.2 其实是接近段增强内部那个
+            // MAX_ASSIST_KP,增强开着的时候 0.05 以上的行程全被压成同一个 0.2,
+            // 上限设多少都没意义。现在 Kp 就是 Kp,才有必要给出真实行程。
+            contentContainer.addView(buildStepperSlider("Kp 响应速度", speed, 0.01f, 0.4f, "%.2f") { speed = it; onSpeedChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(2)))
+            // 取代原来的 Kd 滑条。旧 Kd 与写死的 velocityDamping=0.35 是数学上
+            // 的同一项,那个滑条只掌管其中 12.5%,所以「加高 Kd 没用」。合成一个
+            // 之后它是唯一的阻尼旋钮,0.40 = 旧的 0.35+0.05。
+            contentContainer.addView(buildStepperSlider("平滑度", aimDamping, 0.0f, 1.0f, "%.2f") { aimDamping = it; onAimDampingChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
             contentContainer.addView(buildStepperSlider("Ki", ki, 0.00f, 0.1f, "%.3f") { ki = it; onKiChanged?.invoke(it) })
             contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildStepperSlider("Kd", kd, 0.00f, 0.2f, "%.2f") { kd = it; onKdChanged?.invoke(it) })
-            contentContainer.addView(spacer(dp(2)))
-            contentContainer.addView(buildStepperSlider("Kf", kf, 0.0f, 0.2f, "%.2f") { kf = it; onKfChanged?.invoke(it) })
+            contentContainer.addView(buildStepperSlider("Kf 前馈", kf, 0.0f, 0.2f, "%.2f") { kf = it; onKfChanged?.invoke(it) })
+            contentContainer.addView(spacer(dp(4)))
+            contentContainer.addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4))
+                addView(MaterialTextView(context).apply { text = "接近增强(实验：架空 Kp 与平滑度；Kp≥0.20 时不生效)"; textSize = 10f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
+                addView(MaterialSwitch(context).apply {
+                    isChecked = approachAssist
+                    setOnCheckedChangeListener { _, c -> approachAssist = c; onApproachAssistChanged?.invoke(c) }
+                })
+            })
         } else {
             // Bezier controls
             contentContainer.addView(MaterialTextView(context).apply { text = "贝塞尔参数"; textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setTextColor(clOnSurface) })
@@ -438,6 +459,11 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(buildStepperSlider("向下波动", triggerDownFluctuation.toFloat(), 0f, 15f, "0ms") { v -> val iv = v.toInt(); triggerDownFluctuation = iv; onTriggerDownFluctuation?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildStepperSlider("触摸时间", triggerTouchDuration.toFloat(), 1f, 50f, "0ms") { v -> val iv = v.toInt(); triggerTouchDuration = iv; onTriggerTouchDuration?.invoke(iv) })
+        contentContainer.addView(spacer(dp(2)))
+        // 触发半径:准星到检测框的距离在这个数以内就算在靶(框内恒为 0)。
+        // 0 = 关闭,只保留「准星必须落在框内」。远距离小框 / 准星中心与游戏准星
+        // 有系统偏差时,这个半径是唯一能补偿的旋钮 —— 见 TriggerController 判据三。
+        contentContainer.addView(buildStepperSlider("触发半径", triggerRadiusPx.toFloat(), 0f, 200f, "0px") { v -> val iv = v.toInt(); triggerRadiusPx = iv; onTriggerRadiusPx?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(2), 0, dp(2))
