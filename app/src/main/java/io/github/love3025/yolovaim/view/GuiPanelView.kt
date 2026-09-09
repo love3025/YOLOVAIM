@@ -40,7 +40,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var onTriggerUpFluctuation: ((Int) -> Unit)? = null
     var onTriggerDownFluctuation: ((Int) -> Unit)? = null
     var onTriggerTouchDuration: ((Int) -> Unit)? = null
-    var onTriggerRadiusPx: ((Int) -> Unit)? = null
+    var onTriggerRadiusPx: ((Float) -> Unit)? = null
     var onTriggerTouchRange: ((Int) -> Unit)? = null
     var onTriggerShowArea: ((Boolean) -> Unit)? = null
     var onTestCircle: (() -> Unit)? = null
@@ -108,7 +108,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
     var triggerEnabled = false; var triggerReactionSpeed = 100; var triggerCooldown = 200
     var triggerUpFluctuation = 3; var triggerDownFluctuation = 3
     var triggerTouchDuration = 10; var triggerTouchRange = 100; var triggerShowArea = false; var triggerOffsetYRatio = 0f
-    var triggerRadiusPx = 0
+    var triggerRadiusPx = 0f
     var modelRunning = false
     var recordEnabled = false
     var classMap: Map<Int, String> = emptyMap()
@@ -452,7 +452,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         contentContainer.addView(spacer(dp(2))); contentContainer.addView(divider()); contentContainer.addView(spacer(dp(6)))
         contentContainer.addView(buildStepperSlider("反应速度", triggerReactionSpeed.toFloat(), 10f, 500f, "0ms") { v -> val iv = v.toInt(); triggerReactionSpeed = iv; onTriggerReactionSpeed?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
-        contentContainer.addView(buildStepperSlider("冷却时间", triggerCooldown.toFloat(), 10f, 1000f, "0ms") { v -> val iv = v.toInt(); triggerCooldown = iv; onTriggerCooldown?.invoke(iv) })
+        contentContainer.addView(buildStepperSlider("冷却时间", triggerCooldown.toFloat(), 10f, 2000f, "0ms") { v -> val iv = v.toInt(); triggerCooldown = iv; onTriggerCooldown?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(buildStepperSlider("向上波动", triggerUpFluctuation.toFloat(), 0f, 15f, "0ms") { v -> val iv = v.toInt(); triggerUpFluctuation = iv; onTriggerUpFluctuation?.invoke(iv) })
         contentContainer.addView(spacer(dp(2)))
@@ -463,7 +463,8 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
         // 触发半径:准星到检测框的距离在这个数以内就算在靶(框内恒为 0)。
         // 0 = 关闭,只保留「准星必须落在框内」。远距离小框 / 准星中心与游戏准星
         // 有系统偏差时,这个半径是唯一能补偿的旋钮 —— 见 TriggerController 判据三。
-        contentContainer.addView(buildStepperSlider("触发半径", triggerRadiusPx.toFloat(), 0f, 200f, "0px") { v -> val iv = v.toInt(); triggerRadiusPx = iv; onTriggerRadiusPx?.invoke(iv) })
+        // fmt "%.1fpx":stepSizeForFmt 据此导出 0.1 步进(不是 0.01),显示保留一位小数。
+        contentContainer.addView(buildStepperSlider("触发半径", triggerRadiusPx, 0f, 200f, "%.1fpx") { v -> triggerRadiusPx = v; onTriggerRadiusPx?.invoke(v) })
         contentContainer.addView(spacer(dp(2)))
         contentContainer.addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(2), 0, dp(2))

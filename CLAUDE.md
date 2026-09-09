@@ -303,6 +303,10 @@ Kept only for A/B comparison on a real device.
 ## Trigger Bot (`TriggerController`)
 
 - Two-phase: first shot uses reaction speed delay, subsequent shots use cooldown
+- Cooldown is a hard minimum between ANY two shots (`lastShotNs` survives the
+  off-target reset): recoil kicking the crosshair off the box mid-spray, or
+  low-fps snapshot resets (<4fps), can no longer demote a shot back to the
+  reaction-speed phase and bypass the configured interval
 - Per-class trigger Y offsets
 - Auto-stop: lifts joystick finger before firing (joystick zone)
 - Fire area for random tap position

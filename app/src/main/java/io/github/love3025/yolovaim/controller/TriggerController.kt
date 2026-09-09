@@ -43,6 +43,13 @@ import kotlin.math.hypot
  * [SNAP_MAX_AGE_MS] 没刷新就不再算在靶 —— 采集卡死 / 切后台 / 推理挂掉时
  * 自动停火,不会变成瞎打的全自动。
  *
+ * ## 冷却语义:任意两枪之间的最短间隔
+ *
+ * 两段式(反应速度/冷却)之外,冷却还是一道**硬地板**:出枪时刻 ≥ 上一枪
+ * 成功派发时刻 + 冷却,与阶段窗口取 max。没有这道地板,离靶重置会让下一枪
+ * 退回反应速度阶段,两条真实路径都能借此把设置的开火间隔整个绕过 —— 见
+ * [lastShotNs] 的说明。
+ *
  * @param touchClient 必须是 `TouchService`(不是裸注入器):[fireTriggerTap] 在锁内
  *   调用它,而 TouchService.triggerTap 是投给 tapExecutor 的非阻塞派发。裸注入器
  *   的 triggerTap 会在调用线程上 sleep(触摸时长)+ 等 IPC,那样时钟线程会被自己
@@ -138,10 +145,10 @@ class TriggerController(
     var autoStopEnabled = false
     var triggerOffsetYRatio = 0f
     /**
-     * 触发半径(采集像素):准星到检测框的**距离**在这个数以内就算在靶,框内恒为 0。
+     * 触发半径(采集像素,0.1 步进):准星到检测框的**距离**在这个数以内就算在靶,框内恒为 0。
      * 0 = 关闭,退回「准星必须落在框内」。见 [processTrigger] 判据三。
      */
-    var triggerRadiusPx = 0
+    var triggerRadiusPx = 0f
     var triggerClasses: MutableSet<Int> = mutableSetOf()
     var classTriggerOffsets: Map<Int, Float> = emptyMap()
 
@@ -151,6 +158,29 @@ class TriggerController(
     // ---- 状态机(持 [lock]) ----
     /** 计时起点(ns, [System.nanoTime]):上膛时=帧采集时刻,开过枪后=上一枪时刻。0=空闲 */
     private var lastTriggerNs = 0L
+    /**
+     * 上一枪成功派发的时刻(ns)。**跨重置保留** —— [noteOffTarget] 的宽限到顶
+     * 重置不清它,只有 [shutdown] 清(新会话从零开始)。
+     *
+     * 为什么需要它:冷却的原语义只是「同一轮在靶里的连发间隔」,重置会让下一枪
+     * 退回反应速度阶段。两条真实路径会利用这一点把冷却整个绕过:
+     *
+     *  1. **后坐力重获靶**。每枪的后坐力把准星顶出判定框、压枪再拉回来,只要
+     *     「出框→回框」超过 [OFF_TARGET_GRACE_MS],连发里的每一枪都成了
+     *     「重新获靶的第一枪」—— 实际枪距 = 后坐力恢复 + 反应速度,冷却设再长
+     *     也压不住射速。
+     *  2. **低帧率重置**。推理帧间隔 > 保鲜期+宽限(约 250ms,即 <4fps)时,
+     *     帧与帧之间快照过期 → 宽限到顶 → 重置,每帧都是第一枪,枪距 ≈ 帧间隔。
+     *     旧帧基实现的状态跨帧保留,这种帧率下反而遵守冷却 —— 时间基重构在这里
+     *     引入过回归,本字段就是补丁。
+     *
+     * 用它把冷却升级成「任意两枪之间的最短间隔」(硬地板):[advance] 的出枪
+     * 时刻取「阶段窗口」与「自上一枪起算的冷却」的 max。连续在靶的连发里两个
+     * deadline 同一起算点,地板恒不约束 —— 行为与从前逐位相同;只有重置过的枪
+     * 才可能被地板压住。代价:全新目标的第一枪也吃上一枪的剩余冷却 —— 这正是
+     * 「开火间隔」的字面语义。
+     */
+    private var lastShotNs = 0L
     private var autoStopDone = false  // 本轮急停是否已执行
     /** 连续离靶的起点(ns);0 = 当前判据为在靶。见 [OFF_TARGET_GRACE_MS]。 */
     private var offTargetSinceNs = 0L
@@ -326,7 +356,7 @@ class TriggerController(
         // 就不再是可以忽略的量。
         val cx = centerX
         val cy = centerY
-        val radius = triggerRadiusPx.coerceAtLeast(0)
+        val radius = triggerRadiusPx.coerceAtLeast(0f)
         var onTarget = false
         // 排障用:本帧最近的那个框离准星多远、偏在哪边。
         var nearDist = Float.MAX_VALUE
@@ -464,7 +494,7 @@ class TriggerController(
         lastMissLogNs = nowNs
         Log.d(TAG, String.format(
             java.util.Locale.US,
-            "trig on=%d why=%s manual=%d near=%s off=(%d,%d) radius=%d elapsed=%d/%dms fired=%d fps=%.1f shots=%d drop=%d",
+            "trig on=%d why=%s manual=%d near=%s off=(%d,%d) radius=%.1f elapsed=%d/%dms fired=%d fps=%.1f shots=%d drop=%d",
             if (onTarget) 1 else 0, traceWhy, if (manualFire) 1 else 0,
             if (traceNearDist < 0f) "-" else "${traceNearDist.toInt()}px",
             traceOffX.toInt(), traceOffY.toInt(), triggerRadiusPx,
@@ -501,6 +531,7 @@ class TriggerController(
         retryAfterNs = 0L
         triggerFired = true
         lastTriggerNs = System.nanoTime()
+        lastShotNs = lastTriggerNs   // 冷却硬地板的起算点,跨重置保留
         autoStopDone = false
     }
 
@@ -526,23 +557,34 @@ class TriggerController(
         // 第一发:从**准星进入目标的那一帧的采集时刻**起算,反应速度后开枪。
         if (lastTriggerNs == 0L) { lastTriggerNs = snapFrameNs; autoStopDone = false }
         val windowMs = if (!triggerFired) triggerReactionSpeed.coerceIn(10, 500)
-                       else triggerCooldown.coerceIn(10, 1000)   // 第二发起用冷却
+                       else triggerCooldown.coerceIn(10, 2000)   // 第二发起用冷却
+        // 冷却硬地板:出枪时刻还必须 ≥ 上一枪 + 冷却,与阶段窗口取 max。急停的
+        // 60ms 提前量按 max 之后的 due 算 —— 地板压枪时若还按阶段窗口算,摇杆
+        // 会提前好几秒松开。连续在靶的连发里地板与窗口同一起算点,恒不约束,
+        // 行为与从前逐位相同;见 [lastShotNs]。
+        val floorMs = if (lastShotNs == 0L) 0 else triggerCooldown.coerceIn(10, 2000)
+        val dueNs = maxOf(lastTriggerNs + windowMs * MS_TO_NS,
+                          lastShotNs + floorMs * MS_TO_NS)
+        val effWindowMs = ((dueNs - lastTriggerNs) / MS_TO_NS).toInt()
         val elapsedMs = (nowNs - lastTriggerNs) / MS_TO_NS
         traceElapsedMs = elapsedMs
-        traceWindowMs = windowMs
+        traceWindowMs = effWindowMs
         var act = ACT_NONE
-        if (autoStopDue(elapsedMs, windowMs)) act = act or ACT_LIFT
+        if (autoStopDue(elapsedMs, effWindowMs)) act = act or ACT_LIFT
         // 退避期内的丢枪重试不触发 —— 出枪条件里这道门与 firing 并列,挡的是
         // 「每 2ms 撞一次还没走完的 tap」。计时照常推进,退避结束后条件仍满足
         // 就出枪,不改变冷却语义。
-        if (!firing && nowNs >= retryAfterNs && elapsedMs >= windowMs) {
+        if (!firing && nowNs >= retryAfterNs && nowNs >= dueNs) {
             firing = true
             act = act or ACT_FIRE
             // lag = 实际出枪时刻 - 应出枪时刻。改成时间基之前这个数是 0~一个推理
             // 帧周期(33-66ms)且每枪不同,那正是「开枪慢且慢得不固定」的量化来源;
-            // 现在应当稳定在 0~3ms(时钟步长 + 调度)。排障时先看这一条。
-            Log.d(TAG, "shot due=${windowMs}ms actual=${elapsedMs}ms lag=${elapsedMs - windowMs}ms" +
-                       " first=${!triggerFired}")
+            // 现在应当稳定在 0~3ms(时钟步长 + 调度)。排障时先看这一条。due 是
+            // max 之后的窗口,被地板压过的枪 lag 也只含调度抖动;floor=+Xms 标出
+            // 地板比阶段窗口多压的那段,它不算 lag。
+            Log.d(TAG, "shot due=${effWindowMs}ms actual=${elapsedMs}ms lag=${elapsedMs - effWindowMs}ms" +
+                       " first=${!triggerFired}" +
+                       (if (effWindowMs > windowMs) " floor=+${effWindowMs - windowMs}ms" else ""))
         }
         // 只要还在这条路上,时钟就得继续跑 —— 下一枪的时刻由它决定,不等下一帧。
         startTicker()
@@ -615,6 +657,7 @@ class TriggerController(
         synchronized(lock) {
             stopTicker()
             lastTriggerNs = 0L
+            lastShotNs = 0L   // 冷却地板只约束同一次服务会话内的枪
             offTargetSinceNs = 0L
             snapOnTarget = false
             triggerFired = false

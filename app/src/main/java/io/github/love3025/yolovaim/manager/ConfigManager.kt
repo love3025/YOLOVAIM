@@ -39,8 +39,8 @@ data class AppConfig(
     var triggerDownFluctuation: Int = 3,
     var triggerTouchDuration: Int = 10,
     var triggerTouchRange: Int = 100,
-    /** 触发半径(采集像素)。0 = 关闭,只用「准星落在框内」那条判据。见 TriggerController 判据三 */
-    var triggerRadiusPx: Int = 0,
+    /** 触发半径(采集像素,面板步进 0.1)。0 = 关闭,只用「准星落在框内」那条判据。见 TriggerController 判据三 */
+    var triggerRadiusPx: Float = 0f,
     var triggerShowArea: Boolean = false,
     var range: Int = 300,
     var showCaptureRange: Boolean = false,
@@ -123,7 +123,8 @@ object ConfigManager {
                         triggerDownFluctuation = obj.optInt("triggerDownFluctuation", 3),
                         triggerTouchDuration = obj.optInt("triggerTouchDuration", 10),
                         triggerTouchRange = obj.optInt("triggerTouchRange", 100),
-                        triggerRadiusPx = obj.optInt("triggerRadiusPx", 0),
+                        // optDouble:老配置里存的是整数,新配置是 0.1 步进的小数,统一走 double 读入
+                        triggerRadiusPx = obj.optDouble("triggerRadiusPx", 0.0).toFloat(),
                         triggerShowArea = obj.optBoolean("triggerShowArea", false),
                         range = obj.optInt("range", 300),
                         showCaptureRange = obj.optBoolean("showCaptureRange", false),
@@ -196,7 +197,7 @@ object ConfigManager {
                     put("triggerDownFluctuation", config.triggerDownFluctuation)
                     put("triggerTouchDuration", config.triggerTouchDuration)
                     put("triggerTouchRange", config.triggerTouchRange)
-                    put("triggerRadiusPx", config.triggerRadiusPx)
+                    put("triggerRadiusPx", config.triggerRadiusPx.toDouble())
                     put("triggerShowArea", config.triggerShowArea)
                     put("range", config.range)
                     put("showCaptureRange", config.showCaptureRange)
