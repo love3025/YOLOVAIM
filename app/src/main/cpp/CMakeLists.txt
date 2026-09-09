@@ -1,10 +1,25 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("aimbot")
+project("yolovaim")
 
 set(QNN_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lib)
 set(QNN_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 include_directories(${QNN_INCLUDE_DIR})
+
+# Native per-event latency tracing (touch_core 的 LOGTRACELAT 站点:uinput
+# write 耗时等)。默认关:那些站点在真实触摸事件率(120-240Hz)上,每条都是
+# 一次 logd socket 写,而且就落在注入的临界区里。
+#
+# 之前 YOLOVAIM_TRACE 这个宏在源码里用了但从没有任何地方定义过,等于那些
+# 计时点永久失效、也没有打开的办法。开的方式:
+#   ./gradlew assembleDebug -PyolovaimTrace=1
+# 或直接 -DYOLOVAIM_TRACE=ON 传给 CMake。与 Kotlin 侧的 FloatService.TRACE_LAT
+# 是两个独立开关:那个量的是应用侧分段,这个量的是注入落地。
+option(YOLOVAIM_TRACE "Per-event native latency tracing (very verbose)" OFF)
+if(YOLOVAIM_TRACE)
+    add_compile_definitions(YOLOVAIM_TRACE)
+    message(STATUS "YOLOVAIM_TRACE enabled — native per-event latency logging is ON")
+endif()
 
 # Helper macro for library
 macro(add_qnn_lib basename)
@@ -28,9 +43,9 @@ add_library(tensorflowlite_gpu_jni SHARED IMPORTED)
 set_target_properties(tensorflowlite_gpu_jni PROPERTIES
     IMPORTED_LOCATION ${QNN_LIB_DIR}/libtensorflowlite_gpu_jni.so)
 
-# Compile aimbot (JNI bridge + inference engines)
-add_library(aimbot SHARED
-    src/inference/aimbot.cpp
+# Compile yolovaim (JNI bridge + inference engines)
+add_library(yolovaim SHARED
+    src/inference/yolovaim.cpp
     src/inference/ncnn_engine.cpp
     src/inference/litert_engine.cpp
     src/inference/qnn_engine.cpp
@@ -47,11 +62,25 @@ add_library(uinput_inject SHARED src/injection/uinput_inject.cpp)
 target_link_libraries(uinput_inject touch_core android log)
 
 # Root daemon (standalone binary for su execution, packaged as .so for Gradle)
-add_executable(root_daemon src/daemon/root_daemon.cpp)
-target_include_directories(root_daemon PRIVATE src/injection)
-target_link_libraries(root_daemon touch_core android log)
+# The HUD module is compiled in: it talks to SurfaceFlinger through runtime
+# dlopen/dlsym, so there is no link-time dependency on libgui.
+# The stealth module (KPM kernel injection) is compiled in too: the KPM syscall
+# channel requires a root caller (inputprobe.c checks current_uid() == 0), so
+# touchc must live in this process, not the app process. The pairing salt lives
+# directly in src/injection/stealth/touch_pairing.h (see the decision note
+# there) — nothing to configure at build time.
+add_executable(root_daemon
+    src/daemon/root_daemon.cpp
+    src/hud/hud_surface.cpp
+    src/hud/hud_renderer.cpp
+    src/injection/stealth/touchc.cpp
+    src/injection/stealth/stealth_backend.cpp)
+target_include_directories(root_daemon PRIVATE src/injection src/injection/stealth src/hud)
+target_link_libraries(root_daemon touch_core android log dl)
 set_target_properties(root_daemon PROPERTIES
     OUTPUT_NAME "libroot_daemon.so"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
 )
 
 # InputManager evdev reader (for InputManager injection mode)
@@ -61,12 +90,12 @@ target_link_libraries(inputmgr_core android log)
 add_library(inputmgr_inject SHARED src/injection/inputmgr_jni.cpp)
 target_link_libraries(inputmgr_inject inputmgr_core android log)
 
-target_include_directories(aimbot PRIVATE
+target_include_directories(yolovaim PRIVATE
         ${QNN_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include/qnn)
 
 # Link TFLite and QNN libraries
-target_link_libraries(aimbot
+target_link_libraries(yolovaim
         libQnnHtp
         libQnnSystem
         libQnnTFLiteDelegate
@@ -122,7 +151,7 @@ find_package(OpenMP REQUIRED)
 find_package(Vulkan REQUIRED)
 
 # Link NCNN with all dependencies (including Vulkan for GPU acceleration)
-target_link_libraries(aimbot
+target_link_libraries(yolovaim
         ncnn
         glslang
         SPIRV
@@ -135,4 +164,4 @@ target_link_libraries(aimbot
         Vulkan::Vulkan
         android
         log)
-target_include_directories(aimbot PRIVATE ${NCNN_INCLUDE_DIR})
+target_include_directories(yolovaim PRIVATE ${NCNN_INCLUDE_DIR})

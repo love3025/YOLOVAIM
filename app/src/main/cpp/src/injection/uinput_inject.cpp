@@ -14,7 +14,7 @@ static int g_screen_h = 0;
 
 // ═════════════════════════════════════════════════════════════════════
 //  JNI Interface
-//  Package: team.maodie.aimbot.service.RemoteInjectorService
+//  Package: io.github.love3025.yolovaim.service.RemoteInjectorService
 // ═════════════════════════════════════════════════════════════════════
 
 extern "C" {
@@ -22,11 +22,11 @@ extern "C" {
 // ─── Configuration ──────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_setDeviceResolution(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_setDeviceResolution(
     JNIEnv*, jclass, jint, jint) {}
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_setScreenResolution(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_setScreenResolution(
     JNIEnv*, jclass, jint screenW, jint screenH)
 {
     if (screenW > 0 && screenH > 0) {
@@ -37,17 +37,19 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_setScreenResolution(
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_setLandscapeStart(
-    JNIEnv*, jclass, jint isLandscape)
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_setLandscapeStart(
+    JNIEnv*, jclass, jint rotation)
 {
-    touch_set_screen_params(g_screen_w, g_screen_h, isLandscape != 0);
-    LOGD("setLandscapeStart: %d (screen=%dx%d)", isLandscape, g_screen_w, g_screen_h);
+    // 名字是历史包袱:参数已是 Display.getRotation() 的 0..3,不再是布尔。
+    // 只传横/竖会把 90° 和 270° 算成同一张坐标表(见 touch_core.h)。
+    touch_set_screen_params(g_screen_w, g_screen_h, rotation);
+    LOGD("setLandscapeStart: rotation=%d (screen=%dx%d)", rotation, g_screen_w, g_screen_h);
 }
 
 // ─── Lifecycle ──────────────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_openUinputNative(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_openUinputNative(
     JNIEnv*, jobject)
 {
     if (touch_init(g_screen_w, g_screen_h))
@@ -56,21 +58,21 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_openUinputNative(
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_closeUinputNative(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_closeUinputNative(
     JNIEnv*, jobject)
 {
     touch_close();
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_startGeteventListenerNative(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_startGeteventListenerNative(
     JNIEnv*, jobject)
 {
     touch_start_readers();
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_stopGeteventListenerNative(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_stopGeteventListenerNative(
     JNIEnv*, jobject)
 {
     touch_stop_readers();
@@ -79,7 +81,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_stopGeteventListenerNative
 // ─── Virtual touch (aim) — uses TOUCH_VIRTUAL_SLOT on device 0 ──────
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_uinputSendDown(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_uinputSendDown(
     JNIEnv*, jobject, jint, jint x, jint y, jint)
 {
     if (!touch_is_initialized()) return JNI_FALSE;
@@ -88,7 +90,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_uinputSendDown(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_uinputSendMove(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_uinputSendMove(
     JNIEnv*, jobject, jint, jint x, jint y, jint)
 {
     if (!touch_is_initialized()) return JNI_FALSE;
@@ -97,7 +99,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_uinputSendMove(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_uinputSendUp(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_uinputSendUp(
     JNIEnv*, jobject, jint, jint)
 {
     if (!touch_is_initialized()) return JNI_FALSE;
@@ -108,7 +110,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_uinputSendUp(
 // ─── Trigger touch — uses TOUCH_TRIGGER_SLOT on device 0 ────────────
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_uinputTriggerDown(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_uinputTriggerDown(
     JNIEnv*, jobject, jint x, jint y)
 {
     if (!touch_is_initialized()) return;
@@ -116,7 +118,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_uinputTriggerDown(
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_uinputTriggerUp(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_uinputTriggerUp(
     JNIEnv*, jobject)
 {
     if (!touch_is_initialized()) return;
@@ -126,7 +128,7 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_uinputTriggerUp(
 // ─── Zone configuration ────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeSetTriggerZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeSetTriggerZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
 {
     touch_set_trigger_zone(l, t, r, b);
@@ -134,14 +136,14 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeSetTriggerZone(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeIsFingerInTriggerZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeIsFingerInTriggerZone(
     JNIEnv*, jclass)
 {
     return touch_is_finger_in_trigger_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeSetFireZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeSetFireZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
 {
     touch_set_fire_zone(l, t, r, b);
@@ -149,14 +151,21 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeSetFireZone(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeIsFingerInFireZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeIsFingerInFireZone(
     JNIEnv*, jclass)
 {
     return touch_is_finger_in_fire_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jint JNICALL
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeConsumeFireState(
+    JNIEnv*, jclass)
+{
+    return (jint)touch_consume_fire_state();
+}
+
 JNIEXPORT void JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeSetJoystickZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeSetJoystickZone(
     JNIEnv*, jclass, jint l, jint t, jint r, jint b)
 {
     touch_set_joystick_zone(l, t, r, b);
@@ -164,14 +173,14 @@ Java_team_maodie_aimbot_service_RemoteInjectorService_nativeSetJoystickZone(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeIsFingerInJoystickZone(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeIsFingerInJoystickZone(
     JNIEnv*, jclass)
 {
     return touch_is_finger_in_joystick_zone() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
-Java_team_maodie_aimbot_service_RemoteInjectorService_nativeLiftJoystickFinger(
+Java_io_github_love3025_yolovaim_service_RemoteInjectorService_nativeLiftJoystickFinger(
     JNIEnv*, jclass)
 {
     return touch_lift_joystick_finger() ? JNI_TRUE : JNI_FALSE;

@@ -39,3 +39,6 @@ license-ndk-src/
 # Release signing — 密钥库和签名配置不能进 git
 app/release.jks
 app/signing.txt
+
+# Kotlin daemon error logs (build artifacts)
+.kotlin/

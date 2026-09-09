@@ -85,7 +85,13 @@ TfLiteDelegate* QnnEngine::buildDelegate() {
     TfLiteQnnDelegateOptions qnn_options = TfLiteQnnDelegateOptionsDefault();
     qnn_options.backend_type = kHtpBackend;
     qnn_options.skel_library_dir = m_native_lib_dir;
-    qnn_options.cache_dir = "/data/data/team.maodie.aimbot/cache/qnn";
+    // 缓存目录按当前 Android 用户解析(见 common.h 的 appCacheDir)。原来这里
+    // 写死 /data/data/<pkg>/cache/qnn,而 /data/data 是 /data/user/0 的符号
+    // 链接 —— 分身 / 工作资料 / 多用户下那条路径指向别人的目录,写不进去,而
+    // QNN 图缓存失败不报错,只是每次冷启动重新编译一遍。
+    // 按值持有:cache_dir 只借指针。
+    if (m_cache_dir.empty()) m_cache_dir = appCacheDir("qnn");
+    qnn_options.cache_dir = m_cache_dir.empty() ? nullptr : m_cache_dir.c_str();
     // Per-model token isolates the QNN HTP graph cache: cache_dir/<token>_<fingerprint>.bin.
     // Each model gets its own token (driven by its basename in aimbot.cpp),
     // so warm-up compiles once and every subsequent load is a fingerprint-skip.
