@@ -310,6 +310,53 @@ Kept only for A/B comparison on a real device.
 - Per-class trigger Y offsets
 - Auto-stop: lifts joystick finger before firing (joystick zone)
 - Fire area for random tap position
+- `onShotFired` callback: every successfully dispatched shot credits one
+  FIRE_LATCH_MS budget into the recoil state machine (the trigger's own taps
+  are invisible to the fire-zone edge counter — TOUCH_TRIGGER_SLOT is excluded
+  in updateZones)
+
+## Recoil Compensation (`RecoilCore` + `RecoilDriver` + `AimController`)
+
+**Open-fire → pull-down, independent of inference.** Two cooperating pieces:
+
+- `model/RecoilCore` — pure Kotlin state machine (unit-tested, `RecoilCoreTest`):
+  time-based constant-rate ramp with a hard cap, per-shot budget latch
+  (FIRE_LATCH_MS = 100ms ↔ 600 RPM; taps counted at the injection layer on
+  every SYN_REPORT, so sub-frame taps are never lost), exponential decay after
+  `recoilResetIntervalMs` of no fire. Frame-rate invariant by construction:
+  the wall-clock advance is independent of how many ticks it is split across.
+- `controller/RecoilDriver` — 125Hz daemon thread that owns the core's write
+  side: samples fire state via `consumeFireState` (sole consumer of taps —
+  the inference loop only reads the level), ticks the state machine, and when
+  the closed loop has been silent for CLOSED_LOST_GRACE_MS (150ms) drives the
+  virtual finger downward directly with constant-speed MOVEs. This is the
+  "open-loop" path: recoil is expressed even with **no target on screen**,
+  with ~8ms latency instead of one inference frame, and without the PID's
+  low-pass on the Y axis.
+
+Topology (plan C — same virtual finger, two drivers, hand-off):
+
+- Closed loop (target present, PID steering): unchanged — offset enters the
+  aim point via `effectiveAimY()` and the PID cancels it. Keeps the one real
+  advantage of feedback: adaptivity to the game's touch sensitivity.
+- Open loop (no target / aimbot off / inference stalled): driver takes over.
+  The inference loop lifts the aim finger ONLY when the driver is not driving
+  (`recoilDriving` check in FloatService) — mid-spray, a target ducking behind
+  cover for a frame no longer produces a lift. Re-entry into closed loop
+  continues from the finger's current position (no jump).
+- Hand-off safety: the injection layer silently drops bare MOVEs on a slot
+  with no injected finger (`touch_move` checks isDown), so the driver plants
+  the finger with `swipe(x,x,0)` before its first MOVE and tracks
+  `fingerPlanted` until a real lift.
+
+Both paths share one `RecoilCore` instance (AimController holds it, driver
+ticks it; `offsetY` is @Volatile for cross-thread reads). Params: 下压范围
+(cap, 0.37 × capture height at 100%), 压枪速度 (30→150 px/s), 开火重置间隔 —
+all in screen space, NOT scaled by target box height (muzzle climb is camera
+rotation; box height correlates with distance — see the 7a1e202 regression).
+
+`AimController.updateRecoil`/`resetRecoil` still exist for non-driver paths
+(unit tests); both drivers ticking the same core would double-advance it.
 
 ## Config System
 

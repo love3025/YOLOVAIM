@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sin
 import kotlin.math.min
 import io.github.love3025.yolovaim.controller.AimController
+import io.github.love3025.yolovaim.controller.RecoilDriver
 import io.github.love3025.yolovaim.controller.TriggerController
 import io.github.love3025.yolovaim.manager.InferenceManager
 import io.github.love3025.yolovaim.manager.OverlayManager
@@ -285,7 +286,7 @@ class FloatService : Service() {
     private var triggerEnabled = false; private var triggerReactionSpeed = 100; private var triggerCooldown = 200
     private var triggerUpFluct = 3; private var triggerDownFluct = 3
     private var triggerTouchDuration = 10; private var triggerTouchRange = 100
-    private var triggerRadiusPx = 0
+    private var triggerRadiusPx = 0f
     private var triggerShowArea = false
     private var autoStopEnabled = false
     private var triggerOverlay: TriggerOverlayView? = null
@@ -299,6 +300,12 @@ class FloatService : Service() {
     private lateinit var triggerController: TriggerController
     private lateinit var inferenceManager: InferenceManager
     private lateinit var overlayManager: OverlayManager
+    /**
+     * 压枪开环驱动(125Hz 独立线程):开火即压枪,不经推理。持有
+     * [io.github.love3025.yolovaim.model.RecoilCore] 的唯一写权 —— AimController
+     * 里的 recoilCore 同一实例,AimController 只读它算 effectiveAimY。
+     */
+    private lateinit var recoilDriver: RecoilDriver
 
     /**
      * 旋转 180°(横屏 ↔ 反向横屏 / 竖屏 ↔ 倒置竖屏)时屏幕尺寸与 Configuration
@@ -361,6 +368,16 @@ class FloatService : Service() {
             }
         )
 
+        // 压枪开环驱动:与 AimController 共用同一个 RecoilCore 实例
+        // (driver 独占写,AimController 经 effectiveAimY 只读)。
+        recoilDriver = RecoilDriver(
+            touchClient = { touchService },
+            core = aimController.recoilCoreForDriver
+        )
+        // 自动扳机每成功派发一枪 → 给压枪状态机补一发预算(与人手连点同一
+        // 语义)。见 TriggerController.onShotFired 与 RecoilCore.creditExternalShot。
+        triggerController.onShotFired = { aimController.recoilCoreForDriver.creditExternalShot() }
+
         inferenceManager = InferenceManager(
             service = this,
             aimController = aimController,
@@ -415,6 +432,7 @@ class FloatService : Service() {
         aimController.recoilStrength = recoilStrength
         aimController.recoilSpeed = recoilSpeed
         aimController.recoilResetIntervalMs = recoilResetIntervalMs
+        syncRecoilDriverParams()
 
         // TriggerController
         triggerController.triggerEnabled = triggerEnabled
@@ -428,6 +446,29 @@ class FloatService : Service() {
         triggerController.triggerOffsetYRatio = triggerOffsetYRatio
         triggerController.triggerClasses = triggerClasses.toMutableSet()
         triggerController.classTriggerOffsets = classTriggerOffsets
+    }
+
+    /**
+     * 把压枪参数快照刷进 RecoilDriver(@Volatile 字段,随时可调,无需停时钟)。
+     * 落点 = 瞄准区(AREA_INDEX_AIM,用户配好的安全镜头区);没配瞄准区时退回
+     * 画面中心 —— 开环落指位置只要求「按下不误触其他键」,瞄准区天然满足。
+     */
+    private fun syncRecoilDriverParams() {
+        if (!::recoilDriver.isInitialized) return
+        recoilDriver.enabled = recoilEnabled
+        recoilDriver.speed = recoilSpeed
+        // 范围换算与 AimController.updateRecoil 同式:0.37 × 采集高度
+        val rangePx = (recoilStrength * 0.37f * captureH).coerceIn(0f, 600f)
+        recoilDriver.rangePx = if (recoilEnabled) rangePx else 0f
+        recoilDriver.resetMs = recoilResetIntervalMs
+        val aimArea = savedAreas.getOrNull(AREA_INDEX_AIM)
+        if (aimArea != null) {
+            recoilDriver.homeX = (aimArea.x + aimArea.width / 2f).toInt()
+            recoilDriver.homeY = (aimArea.y + aimArea.height / 2f).toInt()
+        } else {
+            recoilDriver.homeX = captureW / 2
+            recoilDriver.homeY = captureH / 2
+        }
     }
 
     private fun loadConfigToService() {
@@ -1463,10 +1504,10 @@ class FloatService : Service() {
             ConfigManager.updateConfig { showInferInfo = on }
         }
         guiPanel.onAimHoldEnabled = { aimHoldEnabled = it; aimController.aimHoldEnabled = it; ConfigManager.updateConfig { aimHoldEnabled = it } }
-        guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it } }
-        guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it } }
-        guiPanel.onRecoilSpeedChanged = { recoilSpeed = it; aimController.recoilSpeed = it; ConfigManager.updateConfig { recoilSpeed = it } }
-        guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it } }
+        guiPanel.onRecoilEnabledChanged = { recoilEnabled = it; aimController.recoilEnabled = it; ConfigManager.updateConfig { recoilEnabled = it }; syncRecoilDriverParams() }
+        guiPanel.onRecoilStrengthChanged = { recoilStrength = it; aimController.recoilStrength = it; ConfigManager.updateConfig { recoilStrength = it }; syncRecoilDriverParams() }
+        guiPanel.onRecoilSpeedChanged = { recoilSpeed = it; aimController.recoilSpeed = it; ConfigManager.updateConfig { recoilSpeed = it }; syncRecoilDriverParams() }
+        guiPanel.onRecoilResetIntervalChanged = { recoilResetIntervalMs = it; aimController.recoilResetIntervalMs = it; ConfigManager.updateConfig { recoilResetIntervalMs = it }; syncRecoilDriverParams() }
         guiPanel.onAimTouchDisplay = { show ->
             touchDisplayEnabled = show
             ConfigManager.updateConfig { aimTouchDisplay = show }
@@ -1693,12 +1734,15 @@ class FloatService : Service() {
         broadcastState(2) // INFERENCING
         centerX = captureW / 2f; centerY = captureH / 2f
         aimController.recoilRefHeight = captureH.toFloat()
+        // 压枪驱动与推理环同生命周期:推理停了,闭环宣告停,开环也该停
+        // (否则驱动线程在无采集时还在空转/驱动)。参数快照在启动前刷新一次。
+        syncRecoilDriverParams()
+        recoilDriver.start()
         Log.d(TAG, "infer loop started, center=($centerX,$centerY)")
         executor.execute {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             var aliveCtr = 0
             var lastFrameNs = 0L
-            var prevFingerOnFire = false
             // 排障用，只被下面那条每 30 帧一次的日志读取
             var dbgHeld = false; var dbgTaps = 0; var dbgRaw = -1
             // 链路仪表(TRACE_LAT)。窗口内累加与取峰，出一条日志后清零。
@@ -1710,7 +1754,7 @@ class FloatService : Service() {
             var tPrevFrameEnd = 0L
             while (inferRunning.get()) {
                 if (++aliveCtr % 30 == 0) { Log.d(TAG, "alive trigger=$triggerEnabled connected=${touchService.isConnected()} detects=${hasDetects.get()}") }
-                if (aliveCtr % 30 == 0) { Log.d(TAG, "recoil on=$recoilEnabled held=$dbgHeld taps=$dbgTaps offset=${aimController.recoilOffsetDebug} raw=$dbgRaw") }
+                if (aliveCtr % 30 == 0) { Log.d(TAG, "recoil on=$recoilEnabled fire=$dbgHeld offset=${aimController.recoilOffsetDebug} openLoop=${recoilDriver.openLoopActive} driverTicks=${recoilDriver.openLoopTicks} driverMoves=${recoilDriver.movesSent}") }
                 val currentRange = guiPanel.range
                 val normRange = normalizeRangePx(currentRange)
                 if (normRange != cachedRangePx) { cachedRangePx = normRange; cachedRange = normRange.toFloat() }
@@ -1792,34 +1836,22 @@ class FloatService : Service() {
                                 else ((nowNs - lastFrameNs) / 1e9f).coerceAtMost(0.1f)
                     lastFrameNs = nowNs
 
-                    // 开火电平每帧只查一次 (IPC)，压枪与自动扳机共用这一个采样。
-                    // 提到推理之前取：压枪要用本帧的开火状态，否则 executeAiming
-                    // 读到的恒是上一帧末尾写入的值，判断永远滞后一帧。代价是
-                    // processTrigger 拿到的样本比推理结果早约一个推理耗时，但它
-                    // 只用来判断"用户是不是正在手动开火"，这点偏差无影响。
-                    // 优先用注入层的上升沿计数(120-240Hz，短点击不会漏)。注入层不
-                    // 支持时返回 -1，退回电平查询 + 应用侧数边沿 —— 后者采样率就是
-                    // 推理帧率，短于一个帧间隔的点击仍会漏，但通路是已验证的。
+                    // ── 开火采样与压枪:已移交 RecoilDriver(125Hz 独立线程) ──
+                    //
+                    // consumeFireState 是「取走即清零」的,现在 driver 线程是 taps 的
+                    // 唯一消费者(它 125Hz 采样,比这里快一个量级,短点击不漏);
+                    // 本线程再调会把 driver 的 taps 偷走。扳机要的只是「玩家是否
+                    // 手动开火」这个电平 —— 传 null 让 processTrigger 自己按需查
+                    // (isFingerInFireZone 是纯电平查询,不清零,两边可共享)。
                     val tFire0 = if (TRACE_LAT) System.nanoTime() else 0L
-                    val packed = touchService.consumeFireState()
-                    val fingerOnFire: Boolean
-                    val fireTaps: Int
-                    if (packed >= 0) {
-                        fingerOnFire = (packed and 1) != 0
-                        fireTaps = packed ushr 1
-                    } else {
-                        fingerOnFire = touchService.isFingerInFireZone()
-                        fireTaps = if (fingerOnFire && !prevFingerOnFire) 1 else 0
-                    }
-                    // 回退分支里 isFingerInFireZone 也是一次阻塞往返，一起计入
-                    // fire 段 —— 两条路走同一个「每帧问一次开火状态」的代价。
+                    val fingerOnFire = touchService.isFingerInFireZone()
                     if (TRACE_LAT) tFireNs = System.nanoTime() - tFire0
-                    prevFingerOnFire = fingerOnFire
-                    val recoilHeld = fingerOnFire || triggerController.triggerFired
-                    dbgHeld = recoilHeld; dbgTaps = fireTaps; dbgRaw = packed
-                    // 压枪状态机每帧无条件推进，与有没有目标无关。挂在
-                    // executeAiming 上(只在选到目标时调用)正是旧实现偏移冻结的根因。
-                    aimController.updateRecoil(recoilHeld, fireTaps, dtSec, System.currentTimeMillis())
+                    dbgHeld = fingerOnFire; dbgTaps = 0; dbgRaw = -2
+                    // 压枪状态机由 recoilDriver.tick() 无条件推进(125Hz,与推理
+                    // 无关)。这里只剩一件事:宣告「闭环活跃」—— 本帧若选到目标并
+                    // 驱动了手指,driver 在宽限期内不会开环接管(见 CLOSED_LOST_GRACE_MS)。
+                    // 宣告点在下面 target != null 分支,不在帧顶 —— 「闭环活跃」
+                    // 的语义是「PID 正在拖」,不只是「推理在跑」。
 
                     // 录屏: 把当前帧转发给 MediaRecorder
                     if (recordEnabled && recordSurface != null && hwBuf != null) {
@@ -1985,6 +2017,11 @@ class FloatService : Service() {
                                         frameCaptureNs = frameCaptureNs,
                                         boxCenterX = tcx, boxCenterY = tcy
                                     )
+                                    // 闭环活跃宣告:PID 本帧驱动了手指,RecoilDriver
+                                    // 在宽限期内不开环接管(见 RecoilDriver.tick)。
+                                    // 宣告只在 t != null(真的在拖)时发 —— 「推理在跑
+                                    // 但没目标」不算闭环活跃,那正是开环要兜底的场景。
+                                    recoilDriver.noteClosedAlive()
                                 }
                                 // 含选靶 + 瞄点 + PID/Bezier + MOVE 管道写。
                                 // MOVE 是 '!' 无回复，所以这一段**不含** daemon
@@ -2015,7 +2052,18 @@ class FloatService : Service() {
                         if (target == null) aimController.clearFinishHistory()
 
                         // 抬起条件：按下虚拟触摸但瞄准条件任一不满足都应释放（修了按住激发中途松手后触摸点卡住的 bug）
+                        //
+                        // 例外(方案C):压枪开环正在驱动手指时不抬。贴墙交火里
+                        // 目标缩回墙 → hasDetects=false → 这里把手指抬了 → 断触;
+                        // 而 player 手指还按着开火、枪口还在爬,压枪正该工作。
+                        // RecoilDriver 接管期(pointerDown 会被下面的 lift 后由
+                        // driver 的 MOVE 维持触点;若 pointerDown=false 且 driver
+                        // 在驱动,说明手指本来就是 driver 放下的,同样不许抬)。
+                        // 注意 driver 停止驱动的条件里已含「压枪停/衰减到底」,
+                        // 停火超时后这里自然会走到 lift,不抢生命周期。
+                        val recoilDriving = recoilEnabled && recoilDriver.openLoopActive
                         if (aimController.aimingState.pointerDown &&
+                            !recoilDriving &&
                             (!aimbotOn.get() || !hasDetects.get() || !holdToAimActive)) {
                             aimController.lift()
                         }
@@ -2079,6 +2127,8 @@ class FloatService : Service() {
                 }
             }
             inferRunning.set(false)
+            // 推理环退出:同步停掉压枪驱动(避免它在无采集时继续开环驱动)
+            recoilDriver.stop()
         }
     }
 
@@ -2213,6 +2263,7 @@ class FloatService : Service() {
         } catch (_: Exception) {}
         if (mediaRecorder != null) toggleRecording(false)
         inferRunning.set(false); wakeInferLoop(); executor.shutdown()
+        recoilDriver.stop()
         try { imageReader?.setOnImageAvailableListener(null, null) } catch (_: Exception) {}
         readerThread?.quitSafely(); readerThread = null; readerHandler = null
         triggerController.shutdown()

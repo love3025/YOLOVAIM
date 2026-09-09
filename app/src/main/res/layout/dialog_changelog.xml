@@ -26,6 +26,38 @@
         android:orientation="vertical"
         android:layout_marginTop="24dp">
 
+        <!-- v1.4.0 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="v1.4.0"
+                android:textSize="16sp"
+                android:textColor="?attr/colorOnSurface"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2026-09-09"
+                android:textSize="12sp"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:layout_marginTop="2dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="• 压枪改为开火即压：125Hz 独立驱动，不经推理，开火到下压延迟从一帧降到约 8ms\n• 画面里没有目标也持续压枪，交火时目标短暂躲掩体不再中断下压\n• 自瞄接管与压枪驱动无缝切换，同一根手指连续移动不回跳\n• 自动扳机每枪计入压枪预算，连点与长按同一语义，不再过压一倍\n• 压枪状态机抽出为可单测核心，15 条行为契约测试锁定"
+                android:textSize="14sp"
+                android:textColor="?attr/colorOnSurface"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
         <!-- v1.3.0 -->
         <LinearLayout
             android:layout_width="match_parent"

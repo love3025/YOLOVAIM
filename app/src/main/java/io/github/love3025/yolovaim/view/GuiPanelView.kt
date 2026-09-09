@@ -253,7 +253,7 @@ class GuiPanelView(context: Context) : MaterialCardView(ContextThemeWrapper(cont
             addView(MaterialTextView(context).apply { text = "压枪"; textSize = 12f; setTextColor(clOnSurface); layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f) })
             addView(MaterialSwitch(context).apply { isChecked = recoilEnabled; setOnCheckedChangeListener { _, c -> recoilEnabled = c; onRecoilEnabledChanged?.invoke(c) } })
         })
-        contentContainer.addView(MaterialTextView(context).apply { text = "长按(按住不放)和连点(半自动)都适用,不分模式。范围=最多压到多深,速度=压下去多快"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, dp(2)) })
+        contentContainer.addView(MaterialTextView(context).apply { text = "开火即压枪,不经推理(125Hz独立驱动,无目标也压)。长按连点都适用。范围=最多压到多深,速度=压下去多快"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, dp(2)) })
         contentContainer.addView(buildStepperSlider("下压范围", recoilStrength, 0.05f, 1.0f, "%.0f%%") { recoilStrength = it; onRecoilStrengthChanged?.invoke(it) })
         contentContainer.addView(MaterialTextView(context).apply { text = "最多压到多深,按屏幕高算：100% ≈ 0.37 屏高(1080p 约 400px)。压到这个深度就停住,不再往下走"; textSize = 9f; setTextColor(clOnSurfaceVariant); setPadding(0, dp(2), 0, 0) })
         contentContainer.addView(buildStepperSlider("压枪速度", recoilSpeed, 0f, 1.0f, "%.0f%%") { recoilSpeed = it; onRecoilSpeedChanged?.invoke(it) })

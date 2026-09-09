@@ -24,63 +24,19 @@ class AimController(
         private const val AREA_INDEX_AIM = 2
 
         /**
-         * 压枪的内部标度。都不是可调项 —— 面板上暴露的是 0~1 的范围/速度，
-         * 这里负责把它们换算成屏幕像素。
+         * 下压范围满量程 = 屏幕高度 × 该比例。1080p 上 = 400px，与上游
+         * MAX_OFFSET 一致；用比例而非绝对值，换分辨率不必重调。
          *
          * **标度必须是屏幕空间，不能按目标框高取比例。** 枪口爬升是镜头的旋转，
          * 画面上的位移像素数由 FOV 与分辨率决定，与目标远近无关；而框高与距离
          * 强相关。`7a1e202` 把 range/rate 改成 `strength * boxH` 后，远距离
          * (实测框高 15~20px) 的上限塌到 17px、速率塌到 2.4px/s，比上游慢 37 倍，
-         * 等于让远处目标自动关掉压枪 —— 而远距离恰恰最需要它。实测日志见
-         * recoil-improvement-plan.md §11。
+         * 等于让远处目标自动关掉压枪 —— 而远距离恰恰最需要它。
          *
-         * RATE_* 的锚点：上游 `recoilStrength * 3f` 每帧、以 30fps 换算
-         * 就是 90px/s，那一版实机确认「有明显效果」。故速度 50% 取 90px/s。
-         */
-        /**
-         * 压枪速率(屏幕 px/s)：速度 0% -> 30，50% -> 90，100% -> 150。
-         * **长按和连点共用这一条** —— 面板上只有一个「压枪速度」。
-         */
-        private const val RATE_SLOW = 30f
-        private const val RATE_FAST = 150f
-        /**
-         * 回落衰减速率常数(1/s) = 原来 `pow(0.7, dt*30)` 的等价指数形式
-         * (30·ln0.7 = -10.70024)。换 exp 是纯性能：pow 一般按 exp(y·log x) 实现，
-         * 实测(aarch64 OpenJDK) 97.3ns vs 19.3ns，float32 下偏差 3e-7。
-         */
-        private const val DECAY_EXP_PER_SEC = -10.70024f
-        /**
-         * 每一发开火发放的推进预算(ms)。连点每枪的推进量因此恒为
-         * `速率 × FIRE_LATCH_MS`，与手指实际按了多久无关。
-         *
-         * 它替掉的是上游那条「斜坡跟着开火电平走」的判据：连点时电平只有几十毫秒
-         * 为真，每枪实得 `速率 × 按压时长`，于是点得快每枪压得少、点得慢每枪压得
-         * 多 —— 方向正好是反的(决定总爬升的是开枪次数，不是按压时长)，仿真实测
-         * 这条噪声能让每枪的量漂移 38%，而且它不可调。
-         *
-         * 取值的物理含义是**枪的循环射速的倒数**，不是随手取的平滑窗口：枪口爬升
-         * 正比于已开火的弹数，长按时循环射速 f 发/秒、每发爬升 = 速率/f，连点每枪
-         * `速率 × W` 要与长按一致，条件就是 W = 1/f。100ms ↔ 600 RPM，正是步枪的
-         * 典型档(600~750 RPM)；150ms 只有 400 RPM，对步枪偏慢，会让连点相对长按
-         * 超压。
-         *
-         * 没有做成滑块：它描述的是枪，不是手感偏好。若日后要暴露，该按「循环射速
-         * (RPM)」来标，而不是再加一个「力度」。
-         */
-        private const val FIRE_LATCH_MS = 100f
-        /**
-         * 未兑现的开火预算最多攒几发。正常连点每帧至多 1-2 发，攒不到这里；
-         * 这道上限守的是注入层边沿计数异常暴增的情形 —— 没有它，预算会让斜坡
-         * 在手指早已松开之后还一路推到上限。
-         */
-        private const val MAX_PENDING_ROUNDS = 5f
-        /**
-         * 下压范围满量程 = 屏幕高度 × 该比例。1080p 上 = 400px，与上游
-         * MAX_OFFSET 一致；用比例而非绝对值，换分辨率不必重调。
+         * 速率/预算/衰减常数(RATE_*、FIRE_LATCH_MS、DECAY_EXP_PER_SEC 等)
+         * 已随状态机一起搬进 RecoilCore,注释与锚点说明在那边。
          */
         private const val RANGE_MAX_RATIO = 0.37f
-        /** 绝对保险，防止异常参数把偏移推到离谱的值。 */
-        private const val MAX_OFFSET = 600f
 
         /**
          * 死区占目标框对应边长的比例。见 [convergeTolerance]。
@@ -196,10 +152,20 @@ class AimController(
      * 兜底 1080 只在还没建立采集时用得到，那时也不会有推理帧。
      */
     var recoilRefHeight = 1080f
-    private var recoilOffsetY = 0f
-    private var lastFireMs = 0L
-    /** 尚未兑现的开火推进预算(ms)；每发 +FIRE_LATCH_MS，按真实 dt 扣减。 */
-    private var fireBudgetMs = 0f
+    /**
+     * 压枪状态机的纯计算核心。数学(斜坡/预算/衰减/上限)全部在
+     * [io.github.love3025.yolovaim.model.RecoilCore],由 RecoilCoreTest 锁行为;
+     * 这里只负责参数换算(范围 0~1 → px)与对外转发。
+     */
+    private val recoilCore = io.github.love3025.yolovaim.model.RecoilCore()
+
+    /**
+     * 把同一实例交给 RecoilDriver(FloatService 装配时取一次)。**写权在 driver**
+     * —— 125Hz 时钟独占 tick;本类只读 [io.github.love3025.yolovaim.model.RecoilCore.offsetY]
+     * 算 effectiveAimY。updateRecoil()/resetRecoil() 保留但只该在 driver 不存在
+     * 的路径(单测/InferenceManager 死循环)里调;两边同时 tick 会把状态机推两倍速。
+     */
+    val recoilCoreForDriver: io.github.love3025.yolovaim.model.RecoilCore get() = recoilCore
 
     // Class filtering
     var aimClasses: MutableSet<Int> = mutableSetOf()
@@ -449,7 +415,7 @@ class AimController(
      * 框下边以外，自瞄仍然「收敛」、扳机却认为离靶 —— 连发中途自己停火就是这么
      * 来的。两边共用这个函数，那条错位不再可能出现。
      */
-    fun effectiveAimY(aimY: Float): Float = if (recoilEnabled) aimY + recoilOffsetY else aimY
+    fun effectiveAimY(aimY: Float): Float = if (recoilEnabled) aimY + recoilCore.offsetY else aimY
 
     /**
      * @param tolX / @param tolY 本帧的收敛容差，来自 [convergeTolerance]。缺省退回
@@ -753,70 +719,23 @@ class AimController(
      * 这与自瞄有没有接管无关。等自瞄再接手时，偏移量应当反映真实的累计爬升。
      */
     fun updateRecoil(held: Boolean, taps: Int, dtSec: Float, nowMs: Long) {
-        if (!recoilEnabled) {
-            recoilOffsetY = 0f
-            fireBudgetMs = 0f
-            return
-        }
-
-        // ── 本帧该按"开火"推进多久 ──
-        //
-        // taps 来自注入层在 SYN_REPORT 上数的上升沿(120-240Hz)，短于一个推理帧
-        // 间隔的点击也不会漏 —— 只按推理帧率查电平的话 30fps 下会整帧落空。
-        //
-        // 每检测到一发就发一份 FIRE_LATCH_MS 的推进预算，并且**按毫秒精确扣减，
-        // 不按帧扣**。写成"记一个 latch 截止时刻、每帧看还没到期就推进整帧"是不
-        // 行的：100ms 的窗口在 30fps(33ms/帧)下会随相位落进 3 或 4 帧，每枪实得
-        // 100ms 或 133ms —— 33% 的逐枪抖动，与 FIRE_LATCH_MS 那里要修的 38% 漂移
-        // 同一性质(都是让每枪的量取决于一个玩家控制不了的量)。按预算扣就与帧相位
-        // 无关：给定墙钟时间内推进的总量与分几帧走无关，和衰减那条同一个道理。
-        //
-        // 手指按着时按真实 dt 推进(按得越久开火越多、爬升越多)，松开后由预算兜底
-        // (保证每一发至少拿到一发的量)。两者合起来 = 推进 max(按压时长, W)。
-        val dtMs = dtSec * 1000f
-        if (taps > 0) {
-            fireBudgetMs = (fireBudgetMs + taps * FIRE_LATCH_MS)
-                .coerceAtMost(FIRE_LATCH_MS * MAX_PENDING_ROUNDS)
-        }
-        val firing = held || fireBudgetMs > 0f
-        val advanceSec = (if (held) dtMs else minOf(dtMs, fireBudgetMs)) / 1000f
-        fireBudgetMs = (fireBudgetMs - dtMs).coerceAtLeast(0f)
-
-        // 面板滑块本就是 0~1，这两道夹取守的是手改 config.json 的情形：速度为负
-        // 会让斜坡反向爬升；范围为负会让下面的 coerceIn(0f, range) 直接抛
-        // IllegalArgumentException(min > max 在 Kotlin 里是空区间)。面板的
-        // 0~100% 是这两个量唯一的真值来源。
-        val speed = recoilSpeed.coerceIn(0f, 1f)
-        val range = (recoilStrength.coerceIn(0f, 1f) * RANGE_MAX_RATIO * recoilRefHeight)
-            .coerceIn(0f, MAX_OFFSET)
-
-        if (firing) {
-            // lastFireMs 无条件刷：预算只管斜坡要不要走，不改变「正在开火」
-            // 这个事实，否则下面的回落会在连点的每次松手之间被触发。
-            lastFireMs = nowMs
-            val rate = RATE_SLOW + (RATE_FAST - RATE_SLOW) * speed
-            recoilOffsetY += rate * advanceSec
-        } else if (recoilResetIntervalMs <= 0) {
-            // 间隔 = 0：预算耗尽之后立即重置，不走衰减。
-            recoilOffsetY = 0f
-        } else if (nowMs - lastFireMs > recoilResetIntervalMs) {
-            // 衰减系数同样按时间归一，否则这里又会引入一个帧率相关量，把上面刚
-            // 换成时间基的意义抵消掉。基准是 0.7/帧 @30fps，见 DECAY_EXP_PER_SEC。
-            val k = Math.exp((dtSec * DECAY_EXP_PER_SEC).toDouble()).toFloat()
-            recoilOffsetY *= k
-            if (recoilOffsetY < 0.5f) recoilOffsetY = 0f
-        }
-
-        recoilOffsetY = recoilOffsetY.coerceIn(0f, range)
+        // 数学细节(预算毫秒扣减/衰减时间归一/上限兜底)全部在 RecoilCore,注释也
+        // 在那边,由 RecoilCoreTest 锁行为。这里只做参数换算:下压范围 0~1 → px
+        // (屏幕空间,标度 = RANGE_MAX_RATIO × recoilRefHeight,与目标远近无关)。
+        recoilCore.tick(
+            enabled = recoilEnabled, held = held, taps = taps,
+            dtSec = dtSec, nowMs = nowMs,
+            speed = recoilSpeed,
+            rangePx = recoilStrength * RANGE_MAX_RATIO * recoilRefHeight,
+            resetMs = recoilResetIntervalMs
+        )
     }
 
     /** 排障用：外部只读当前偏移量。 */
-    val recoilOffsetDebug: Float get() = recoilOffsetY
+    val recoilOffsetDebug: Float get() = recoilCore.offsetY
 
     fun resetRecoil() {
-        recoilOffsetY = 0f
-        // 一起清掉，否则残留的预算会让斜坡在重置后又白推进最多 FIRE_LATCH_MS。
-        fireBudgetMs = 0f
+        recoilCore.reset()
     }
 
     fun reset() {

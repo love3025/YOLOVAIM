@@ -66,6 +66,17 @@ class TriggerController(
     private val fireArea: () -> AreaConfig?,
     private val fallbackTapCircle: () -> Triple<Int, Int, Int>
 ) {
+    /**
+     * 每成功派发一枪后的回调(锁内调用,必须非阻塞)。
+     *
+     * 用途:压枪。自动扳机的点击在注入层被 TOUCH_TRIGGER_SLOT 排除、不计入
+     * 开火区上升沿(touch_core 的 updateZones),于是扳机连发时压枪状态机
+     * 看不到任何 taps,只能靠 triggerFired 锁存电平当长按 —— 同射速下自动
+     * 扳机会比人手连点多压一倍的量(电平恒真 vs 每枪 100ms 预算)。挂上这个
+     * 回调后,FloatService 把它接到 RecoilCore:每枪一发 FIRE_LATCH_MS 预算,
+     * 与人手连点同一语义。
+     */
+    var onShotFired: (() -> Unit)? = null
     companion object {
         private const val TAG = "TriggerController"
 
@@ -533,6 +544,9 @@ class TriggerController(
         lastTriggerNs = System.nanoTime()
         lastShotNs = lastTriggerNs   // 冷却硬地板的起算点,跨重置保留
         autoStopDone = false
+        // 压枪预算:每枪一发,见 onShotFired 的说明。null 安全调用,没挂就是
+        // 旧语义(电平锁存)。
+        onShotFired?.invoke()
     }
 
     /**
